@@ -103,15 +103,17 @@ NATURES = {
 
 
 def get_family(base_name: str) -> dict:
-    return EVOLUTION[base_name]
+    # 웹에는 있지만 봇 데이터셋(현재 1세대 위주)엔 없는 종(3세대+ 등)을 대비한 안전한 기본값.
+    # 진화 정보 없이 "더 이상 진화 안 함" 상태로 취급해서 /출석 등이 죽지 않게 해요.
+    return EVOLUTION.get(base_name, {"family": [base_name], "evolutions": []})
 
 
 def get_evolutions(base_name: str) -> list:
-    return EVOLUTION[base_name].get("evolutions", [])
+    return get_family(base_name).get("evolutions", [])
 
 
 def get_family_names(base_name: str) -> list:
-    return EVOLUTION[base_name]["family"]
+    return get_family(base_name)["family"]
 
 
 def get_types(species_name: str) -> list:
