@@ -39,8 +39,7 @@ COG_GROUPS: dict[str, list[str]] = {
         "spectator_ticket", # 관전 전용 통화방 입장권
     ],
     "🐾 포켓몬/출석": [
-        "attendance",  # 출석 + 포켓몬 육성 시스템
-        "shop",        # 포켓몬 상점(진화의 돌, 변함없는돌, 이름변경표)
+        "attendance",  # 출석 + 포켓몬 육성 시스템 (상점/아이템 사용은 웹사이트에서)
     ],
     "🎙️ 음성/TTS": [
         "tts",        # 채팅 TTS

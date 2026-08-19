@@ -156,7 +156,7 @@ class Attendance(commands.Cog):
             if trainer.get("evolutionLocked"):
                 await interaction.response.send_message(
                     f"{trainer['currentPokemon']}은(는) 변함없는돌 때문에 레벨로 진화하지 않아요. "
-                    f"`/변함없는돌해제`로 풀 수 있어요.",
+                    f"해제하려면 웹사이트에서 아이템을 사용해주세요.",
                     ephemeral=True,
                 )
                 return
@@ -166,7 +166,7 @@ class Attendance(commands.Cog):
                 await interaction.response.send_message(f"{trainer['currentPokemon']}은(는) 더 이상 진화하지 않아요.", ephemeral=True)
             elif step["trigger"] == "stone":
                 await interaction.response.send_message(
-                    f"{trainer['currentPokemon']}은(는) **{step['item']}**(으)로만 진화해요. `/돌사용`을 써보세요.",
+                    f"{trainer['currentPokemon']}은(는) **{step['item']}**(으)로만 진화해요. 웹사이트에서 아이템을 사용해주세요.",
                     ephemeral=True,
                 )
             else:
@@ -411,7 +411,6 @@ class Attendance(commands.Cog):
     @app_commands.choices(기능=[
         app_commands.Choice(name="출석 명령어 (/출석)", value="attend"),
         app_commands.Choice(name="육성 명령어 (/시작, /프로필, /진화, /도감, /랭킹 등)", value="attendance"),
-        app_commands.Choice(name="상점 명령어 (/상점, /구매, /돌사용 등)", value="shop"),
         app_commands.Choice(name="랭크방/관전 명령어 (/랭크방, /관전입장권 등)", value="rank_room"),
         app_commands.Choice(name="전적 조회 명령어 (/전적)", value="tier_lookup"),
     ])

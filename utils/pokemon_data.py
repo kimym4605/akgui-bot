@@ -61,7 +61,6 @@ SPECIES = _load_json(SPECIES_PATH, {})
 _CACHED_NAME_TO_ID = _load_json(NAME_TO_ID_PATH, {})
 NAME_TO_ID = {**_FALLBACK_NAME_TO_ID, **_CACHED_NAME_TO_ID}
 
-EEVEE_STONE_MAP = {"불꽃돌": "부스터", "물의돌": "샤미드", "번개돌": "쥬피썬더"}
 EEVEE_EVOLUTIONS = ["에브이", "블래키"]
 EVOLUTION["이브이"] = {
     "family": ["이브이", "__EEVEE_EVO__"],

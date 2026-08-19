@@ -13,7 +13,7 @@ def channel_key(group: str) -> str:
 
 def restrict_to_channel(group: str):
     """이 데코레이터를 붙인 명령어는 채널설정에서 지정한 채널(또는 그 채널 안의 스레드)에서만 동작해요.
-    group 예시: "attendance"(출석/육성), "shop"(상점)"""
+    group 예시: "attendance"(출석/육성), "attend"(출석)"""
 
     async def predicate(interaction: discord.Interaction) -> bool:
         allowed_channel_id = get_setting(channel_key(group))

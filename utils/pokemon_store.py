@@ -4,9 +4,10 @@
 - 레벨 조건 진화: 레벨 도달 시 "진화 가능" 상태가 되고, confirm_evolution()으로 확인해야 실제로 진화해요.
   (이브이는 이때 낮/밤에 따라 에브이/블래키로 갈려요)
   변함없는돌(evolutionLocked=True)을 채워두면 레벨 조건 진화 자체가 잠겨요.
-- 돌 조건 진화: 레벨과 무관하게, use_stone()으로 알맞은 돌을 써야만 진화해요.
-  (이브이는 불꽃돌/물의돌/번개돌을 쓰면 레벨 상관없이 즉시 부스터/샤미드/쥬피썬더로 진화해요.
-   변함없는돌을 채운 상태에서도 돌 진화는 그대로 가능해요.)
+- 돌 조건 진화: 레벨과 무관하게 알맞은 돌을 써야만 진화해요.
+
+아이템 구매/사용(돌 사용, 변함없는돌, 특성리셋권, 이름변경표, 포켓몬리셋권 등)은
+전부 웹사이트에서 처리해요 — 이 파일에는 그 관련 함수가 없어요(confirm_evolution()만 예외).
 
 저장 스키마 (MongoDB "trainers" 컬렉션, _id = 디스코드 user_id 문자열):
 {
@@ -32,7 +33,6 @@ from pymongo import DESCENDING, MongoClient
 
 from utils.pokemon_data import (
     BRANCH_EVOLUTIONS,
-    EEVEE_STONE_MAP,
     STARTER_POOL,
     calculate_stats,
     exp_needed,
@@ -56,18 +56,6 @@ MAX_LEVEL = 100
 POKEDEX_LEVEL = 100
 
 KST = timezone(timedelta(hours=9))
-
-SHOP_ITEMS = {
-    "불꽃돌": 300,
-    "물의돌": 300,
-    "번개돌": 300,
-    "잎의돌": 300,
-    "달의돌": 300,
-    "변함없는돌": 500,
-    "특성리셋권": 400,
-    "이름변경표": 200,
-    "포켓몬리셋권": 1000,
-}
 
 
 def _kst_today_iso() -> str:
@@ -223,119 +211,6 @@ def confirm_evolution(user_id: int):
     return {"before": before_name, "after": after_name, "registered": registered, "trainer": trainer}
 
 
-def use_stone(user_id: int, item_name: str):
-    """상점에서 산 돌을 써서 진화시켜요.
-    이브이는 불꽃돌/물의돌/번개돌이면 레벨/진화단계와 무관하게 즉시 해당 형태로 진화해요.
-    변함없는돌을 채운 상태여도 돌 진화는 그대로 동작해요."""
-    trainer = _get_doc(user_id)
-    if trainer is None:
-        return False, "먼저 `/시작`으로 포켓몬을 받아주세요."
-
-    trainer.setdefault("items", {})
-
-    if trainer["items"].get(item_name, 0) <= 0:
-        return False, f"{item_name}을(를) 갖고 있지 않아요. `/상점`에서 구매해주세요."
-
-    if trainer["currentPokemon"] == "이브이" and item_name in EEVEE_STONE_MAP:
-        trainer["items"][item_name] -= 1
-        before_name = trainer["currentPokemon"]
-        after_name = _advance_evolution_stage(trainer, forced_name=EEVEE_STONE_MAP[item_name])
-        registered = _apply_pokedex_registration(trainer)
-
-        _save_doc(user_id, trainer)
-
-        return True, {"before": before_name, "after": after_name, "registered": registered, "trainer": trainer}
-
-    step = get_next_evolution(trainer)
-    if step is None or step["trigger"] != "stone" or step["item"] != item_name:
-        return False, f"{trainer['currentPokemon']}은(는) {item_name}(으)로 진화하지 않아요."
-
-    trainer["items"][item_name] -= 1
-    before_name = trainer["currentPokemon"]
-    after_name = _advance_evolution_stage(trainer)
-    registered = _apply_pokedex_registration(trainer)
-
-    _save_doc(user_id, trainer)
-
-    return True, {"before": before_name, "after": after_name, "registered": registered, "trainer": trainer}
-
-
-def lock_evolution(user_id: int):
-    """변함없는돌을 사용해서 레벨 진화를 잠가요."""
-    trainer = _get_doc(user_id)
-    if trainer is None:
-        return False, "먼저 `/시작`으로 포켓몬을 받아주세요."
-    trainer.setdefault("items", {})
-
-    if trainer.get("evolutionLocked"):
-        return False, "이미 변함없는돌을 갖고 있어요."
-    if trainer["items"].get("변함없는돌", 0) <= 0:
-        return False, "변함없는돌이 없어요. `/상점`에서 구매해주세요."
-
-    trainer["items"]["변함없는돌"] -= 1
-    trainer["evolutionLocked"] = True
-
-    _save_doc(user_id, trainer)
-
-    return True, f"{trainer['currentPokemon']}에게 변함없는돌을 채웠어요. 레벨로는 더 이상 진화하지 않아요. (돌 진화는 여전히 가능해요)"
-
-
-def unlock_evolution(user_id: int):
-    """변함없는돌을 해제해서 레벨 진화를 다시 가능하게 해요."""
-    trainer = _get_doc(user_id)
-    if trainer is None:
-        return False, "먼저 `/시작`으로 포켓몬을 받아주세요."
-
-    if not trainer.get("evolutionLocked"):
-        return False, "지금은 변함없는돌을 갖고 있지 않아요."
-
-    trainer["evolutionLocked"] = False
-
-    _save_doc(user_id, trainer)
-
-    return True, f"{trainer['currentPokemon']}의 변함없는돌을 해제했어요. 다시 레벨로 진화할 수 있어요."
-
-
-def reset_ability(user_id: int):
-    """특성리셋권을 소모해서 현재 포켓몬의 특성을 다시 뽑아요."""
-    trainer = _get_doc(user_id)
-    if trainer is None:
-        return False, "먼저 `/시작`으로 포켓몬을 받아주세요."
-    trainer.setdefault("items", {})
-
-    if trainer["items"].get("특성리셋권", 0) <= 0:
-        return False, "특성리셋권이 없어요. `/상점`에서 구매해주세요."
-
-    trainer["items"]["특성리셋권"] -= 1
-    old_ability = trainer["ability"]
-    new_ability = roll_ability(trainer["currentPokemon"])
-    trainer["ability"] = new_ability
-
-    _save_doc(user_id, trainer)
-
-    return True, f"{trainer['currentPokemon']}의 특성이 **{old_ability}** → **{new_ability}**(으)로 바뀌었어요!"
-
-
-def reset_pokemon(user_id: int):
-    """포켓몬리셋권을 소모해서 현재 포켓몬을 버리고 새로운 랜덤 포켓몬을 Lv.1부터 다시 키워요.
-    골드/아이템/도감/출석 기록은 그대로 유지되고, 지금 키우던 포켓몬만 바뀌어요 (도감에는 등록 안 됨)."""
-    trainer = _get_doc(user_id)
-    if trainer is None:
-        return False, "먼저 `/시작`으로 포켓몬을 받아주세요."
-    trainer.setdefault("items", {})
-
-    if trainer["items"].get("포켓몬리셋권", 0) <= 0:
-        return False, "포켓몬리셋권이 없어요. `/상점`에서 구매해주세요."
-
-    trainer["items"]["포켓몬리셋권"] -= 1
-    before_name = trainer["currentPokemon"]
-    _spawn_new_pokemon(trainer)
-
-    _save_doc(user_id, trainer)
-
-    return True, {"before": before_name, "after": trainer["currentPokemon"], "trainer": trainer}
-
-
 def _spawn_new_pokemon(trainer: dict):
     base_name = random.choice(STARTER_POOL)
     for k, v in _new_pokemon_fields(base_name).items():
@@ -379,49 +254,6 @@ def attend(user_id: int):
         "trainer": trainer,
         "coin_gain": COIN_PER_ATTENDANCE,
     }
-
-
-def buy_item(user_id: int, item_name: str, qty: int = 1):
-    if item_name not in SHOP_ITEMS:
-        return False, "상점에 없는 아이템이에요."
-    if qty <= 0:
-        return False, "수량은 1개 이상이어야 해요."
-
-    trainer = _get_doc(user_id)
-    if trainer is None:
-        trainer = start_trainer(user_id)
-    trainer.setdefault("items", {})
-
-    total_price = SHOP_ITEMS[item_name] * qty
-    if trainer["gold"] < total_price:
-        return False, f"골드가 부족해요. (필요: {total_price}G, 보유: {trainer['gold']}G)"
-
-    trainer["gold"] -= total_price
-    trainer["items"][item_name] = trainer["items"].get(item_name, 0) + qty
-
-    _save_doc(user_id, trainer)
-
-    return True, f"{item_name} {qty}개를 구매했어요! (-{total_price}G)"
-
-
-def set_nickname(user_id: int, nickname: str):
-    if not (1 <= len(nickname) <= 12):
-        return False, "별명은 1~12자로 입력해주세요."
-
-    trainer = _get_doc(user_id)
-    if trainer is None:
-        return False, "먼저 `/시작`으로 포켓몬을 받아주세요."
-    trainer.setdefault("items", {})
-
-    if trainer["items"].get("이름변경표", 0) <= 0:
-        return False, "이름변경표가 없어요. `/상점`에서 구매해주세요."
-
-    trainer["items"]["이름변경표"] -= 1
-    trainer["nickname"] = nickname
-
-    _save_doc(user_id, trainer)
-
-    return True, f"별명을 **{nickname}**(으)로 지어줬어요!"
 
 
 def get_pokedex(user_id: int) -> list:
