@@ -4,7 +4,6 @@ from discord.ext import commands
 
 from utils.ability_data import roll_ability
 from utils.channel_check import channel_key, restrict_to_channel
-from utils.move_ui import prompt_new_moves
 from utils.pokemon_data import EVOLUTION, STAT_KEYS, calculate_stats, sprite_url
 from utils.pokemon_store import (
     attend,
@@ -121,7 +120,7 @@ class Attendance(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="출석", description="오늘의 출석체크를 합니다. (하루 1회, 경험치+골드 획득)")
+    @app_commands.command(name="출석", description="오늘의 출석체크를 합니다. (하루 1회, 악귀코인 획득)")
     @restrict_to_channel("attend")
     async def do_attend(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -131,7 +130,7 @@ class Attendance(commands.Cog):
         if not success:
             trainer = result
             await interaction.followup.send(
-                f"오늘은 이미 출석하셨어요. {_display_name(trainer)}(Lv.{trainer['level']})은(는) 내일 또 키워주세요!",
+                f"오늘은 이미 출석하셨어요. {_display_name(trainer)}(Lv.{trainer['level']})은(는) 내일 또 출석해주세요!",
                 ephemeral=True,
             )
             return
@@ -140,49 +139,10 @@ class Attendance(commands.Cog):
 
         embed = discord.Embed(
             title="✅ 출석 완료!",
-            description=f"획득 경험치: **+{result['exp_gain']} EXP**\n획득 골드: **+{result['gold_gain']} G**",
+            description=f"획득 악귀코인: **+{result['coin_gain']}개**\n보유 악귀코인: **{trainer['coin']}개**",
             color=0x57F287,
         )
         await interaction.followup.send(embed=embed)
-
-        dm_failed = False
-
-        if result["leveled_up"]:
-            level_embed = discord.Embed(
-                title="⬆️ 레벨 업!",
-                description=f"{_display_name(trainer)}\nLv.{result['before_level']} → **Lv.{trainer['level']}**",
-                color=0x5865F2,
-            )
-            level_embed.set_thumbnail(url=sprite_url(trainer["currentPokemon"]))
-            try:
-                await interaction.user.send(embed=level_embed)
-            except discord.Forbidden:
-                dm_failed = True
-
-            await prompt_new_moves(
-                send=interaction.user.send,
-                user_id=interaction.user.id,
-                base_name=trainer["basePokemon"],
-                before_level=result["before_level"],
-                after_level=trainer["level"],
-            )
-
-        if result["pending_evolution"]:
-            view = EvolveConfirmView(interaction.user.id)
-            hint = result["pending_evolution"]["target_hint"]
-            desc = f"**{trainer['currentPokemon']}**이(가) 진화할 수 있어요!"
-            if hint:
-                desc += f" (→ {hint})"
-            try:
-                await interaction.user.send(content=desc, view=view)
-            except discord.Forbidden:
-                dm_failed = True
-
-        if dm_failed:
-            await interaction.followup.send(
-                "📪 DM이 막혀있어서 레벨업/진화 알림을 못 보냈어요. `/프로필`에서 확인해주세요.",
-                ephemeral=True,
-            )
 
     @app_commands.command(name="진화", description="진화 가능한 상태면 확인창을 다시 띄워요.")
     @restrict_to_channel("attendance")
@@ -240,6 +200,7 @@ class Attendance(commands.Cog):
         embed.add_field(name="포켓몬", value=f"{_display_name(trainer)} (Lv.{trainer['level']})", inline=True)
         embed.add_field(name="성격 / 특성", value=f"{trainer['nature']} / {trainer['ability']}", inline=True)
         embed.add_field(name="골드", value=f"{trainer['gold']} G", inline=True)
+        embed.add_field(name="악귀코인", value=f"{trainer.get('coin', 0)}개", inline=True)
 
         if trainer["level"] >= 100:
             embed.add_field(name="경험치", value="🏆 만렙(Lv.100)이에요!", inline=False)

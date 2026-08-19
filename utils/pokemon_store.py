@@ -11,12 +11,15 @@
 저장 스키마 (MongoDB "trainers" 컬렉션, _id = 디스코드 user_id 문자열):
 {
   "basePokemon": str, "currentPokemon": str, "evolutionStage": int,
-  "level": int, "exp": int, "gold": int, "attendance": int,
+  "level": int, "exp": int, "gold": int, "coin": int, "attendance": int,
   "lastAttendanceDate": str | None, "voiceDate": str | None, "voiceMinutesToday": float,
   "moves": [str, ...], "stats": {...}, "iv": {...}, "nature": str, "ability": str,
   "pokedex": [str, ...], "nickname": str | None, "items": {아이템이름: 개수},
   "evolutionLocked": bool
 }
+
+"coin"(악귀코인)은 골드와 별개의 재화예요. /출석에서만 하루 1개씩 지급되고,
+경험치/레벨업은 이제 웹(배틀·탐험)에서만 이루어져요 — 디스코드에서는 더 이상 EXP를 주지 않아요.
 
 이 컬렉션은 웹(FastAPI backend)에서도 그대로 읽어서 씁니다. 필드를 바꿀 때는
 backend 쪽 트레이너 조회 API도 같이 확인해주세요.
@@ -48,8 +51,7 @@ _client = MongoClient(MONGODB_URI)
 _db = _client[MONGODB_DB_NAME]
 _trainers = _db["trainers"]
 
-EXP_PER_ATTENDANCE = 100
-GOLD_PER_ATTENDANCE = 100
+COIN_PER_ATTENDANCE = 1
 MAX_LEVEL = 100
 POKEDEX_LEVEL = 100
 
@@ -132,6 +134,7 @@ def start_trainer(user_id: int) -> dict:
     base_name = random.choice(STARTER_POOL)
     trainer = {
         "gold": 0,
+        "coin": 0,
         "attendance": 0,
         "lastAttendanceDate": None,
         "voiceDate": None,
@@ -151,6 +154,7 @@ def get_trainer(user_id: int) -> dict | None:
         trainer.setdefault("items", {})
         trainer.setdefault("nickname", None)
         trainer.setdefault("evolutionLocked", False)
+        trainer.setdefault("coin", 0)
     return trainer
 
 
@@ -352,104 +356,28 @@ def _apply_pokedex_registration(trainer: dict) -> bool:
 
 
 def attend(user_id: int):
-    """/출석: 하루 1회(한국시간 자정 기준). 경험치+골드 지급, 레벨업/도감등록/능력치 갱신을 처리해요.
-    진화는 자동으로 안 일어나요 — leveled_up이 True이고 이제 진화 가능하면 pending_evolution이 채워져요."""
+    """/출석: 하루 1회(한국시간 자정 기준). 악귀코인 1개를 지급해요.
+    경험치/레벨업은 이제 웹(배틀·탐험)에서만 이루어지고, 디스코드 출석은 코인 전용이에요."""
     trainer = _get_doc(user_id)
     if trainer is None:
         trainer = start_trainer(user_id)
     trainer.setdefault("pokedex", [])
     trainer.setdefault("items", {})
+    trainer.setdefault("coin", 0)
 
     today_iso = _kst_today_iso()
     if trainer.get("lastAttendanceDate") == today_iso:
         return False, trainer
 
-    before_level = trainer["level"]
-
-    trainer["exp"] += EXP_PER_ATTENDANCE
-    trainer["gold"] += GOLD_PER_ATTENDANCE
     trainer["attendance"] += 1
     trainer["lastAttendanceDate"] = today_iso
-
-    leveled_up = False
-    while trainer["level"] < MAX_LEVEL and trainer["exp"] >= exp_needed(trainer["level"]):
-        trainer["exp"] -= exp_needed(trainer["level"])
-        trainer["level"] += 1
-        leveled_up = True
-    if trainer["level"] >= MAX_LEVEL:
-        trainer["level"] = MAX_LEVEL
-        trainer["exp"] = 0
-
-    trainer["stats"] = calculate_stats(trainer["currentPokemon"], trainer["level"], trainer["iv"], trainer["nature"])
+    trainer["coin"] += COIN_PER_ATTENDANCE
 
     _save_doc(user_id, trainer)
-
-    pending = get_next_evolution(trainer) if has_pending_level_evolution(trainer) else None
 
     return True, {
         "trainer": trainer,
-        "before_level": before_level,
-        "leveled_up": leveled_up,
-        "pending_evolution": pending,
-        "exp_gain": EXP_PER_ATTENDANCE,
-        "gold_gain": GOLD_PER_ATTENDANCE,
-        "exp_needed": exp_needed(trainer["level"]),
-    }
-
-
-def add_voice_exp(user_id: int, minutes: float):
-    """통화 체류시간(분)만큼 경험치를 지급해요. 하루(한국시간 자정 기준) 최대 240분(4시간)까지만 인정돼요."""
-    trainer = _get_doc(user_id)
-    if trainer is None:
-        trainer = start_trainer(user_id)
-    trainer.setdefault("pokedex", [])
-    trainer.setdefault("items", {})
-
-    today_iso = _kst_today_iso()
-    if trainer.get("voiceDate") != today_iso:
-        trainer["voiceDate"] = today_iso
-        trainer["voiceMinutesToday"] = 0
-
-    DAILY_CAP_MINUTES = 240
-    EXP_PER_MINUTE = 0.3
-
-    remaining = DAILY_CAP_MINUTES - trainer.get("voiceMinutesToday", 0)
-    effective_minutes = max(0, min(minutes, remaining))
-    if effective_minutes <= 0:
-        return None
-
-    exp_gain = round(effective_minutes * EXP_PER_MINUTE)
-    if exp_gain <= 0:
-        return None
-
-    before_level = trainer["level"]
-
-    trainer["voiceMinutesToday"] = trainer.get("voiceMinutesToday", 0) + effective_minutes
-    trainer["exp"] += exp_gain
-
-    leveled_up = False
-    while trainer["level"] < MAX_LEVEL and trainer["exp"] >= exp_needed(trainer["level"]):
-        trainer["exp"] -= exp_needed(trainer["level"])
-        trainer["level"] += 1
-        leveled_up = True
-    if trainer["level"] >= MAX_LEVEL:
-        trainer["level"] = MAX_LEVEL
-        trainer["exp"] = 0
-
-    trainer["stats"] = calculate_stats(trainer["currentPokemon"], trainer["level"], trainer["iv"], trainer["nature"])
-
-    _save_doc(user_id, trainer)
-
-    pending = get_next_evolution(trainer) if has_pending_level_evolution(trainer) else None
-
-    return {
-        "trainer": trainer,
-        "before_level": before_level,
-        "leveled_up": leveled_up,
-        "pending_evolution": pending,
-        "exp_gain": exp_gain,
-        "minutes_credited": effective_minutes,
-        "capped": effective_minutes < minutes,
+        "coin_gain": COIN_PER_ATTENDANCE,
     }
 
 

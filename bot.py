@@ -43,7 +43,6 @@ COG_GROUPS: dict[str, list[str]] = {
         "shop",        # 포켓몬 상점(진화의 돌, 변함없는돌, 이름변경표)
     ],
     "🎙️ 음성/TTS": [
-        "voice_exp",  # 음성채널 체류 EXP
         "tts",        # 채팅 TTS
     ],
     "🛠️ 커뮤니티/운영": [
