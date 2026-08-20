@@ -7,13 +7,8 @@ from utils.channel_check import channel_key, restrict_to_channel
 from utils.pokemon_data import EVOLUTION, STAT_KEYS, calculate_stats, sprite_url
 from utils.pokemon_store import (
     attend,
-    confirm_evolution,
     exp_needed,
-    get_next_evolution,
-    get_pokedex,
-    get_ranking,
     get_trainer,
-    has_pending_level_evolution,
     has_trainer,
     reset_user,
     save_trainer,
@@ -45,49 +40,6 @@ def _display_name(trainer: dict) -> str:
     return f"{nickname}({trainer['currentPokemon']})" if nickname else trainer["currentPokemon"]
 
 
-class EvolveConfirmView(discord.ui.View):
-    def __init__(self, user_id: int, timeout: float = 60):
-        super().__init__(timeout=timeout)
-        self.user_id = user_id
-        self.decided = None
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("본인만 선택할 수 있어요.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label="진화한다", style=discord.ButtonStyle.success)
-    async def evolve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.decided = "evolve"
-        self.stop()
-
-        result = confirm_evolution(self.user_id)
-        if result is None:
-            await interaction.response.edit_message(content="이미 처리됐거나 진화 조건이 아니에요.", view=None)
-            return
-
-        embed = discord.Embed(
-            title="🌟 진화!",
-            description=f"{result['before']} → **{result['after']}**(으)로 진화했어요!",
-            color=0x57F287,
-        )
-        embed.set_image(url=sprite_url(result["after"]))
-        if result["registered"]:
-            embed.add_field(
-                name="📖 도감 등록!",
-                value=f"{result['after']}이(가) 만렙(Lv.100)이라 도감에 등록되고 새 포켓몬을 받았어요!",
-                inline=False,
-            )
-        await interaction.response.edit_message(content=None, embed=embed, view=None)
-
-    @discord.ui.button(label="진화하지 않는다", style=discord.ButtonStyle.secondary)
-    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.decided = "skip"
-        self.stop()
-        await interaction.response.edit_message(content="진화를 미뤘어요. 나중에 `/진화` 명령어로 다시 확인할 수 있어요.", view=None)
-
-
 class Attendance(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -116,7 +68,7 @@ class Attendance(commands.Cog):
         )
         embed.set_image(url=sprite_url(trainer["currentPokemon"]))
         embed.add_field(name="능력치", value=_stats_text(trainer["stats"]), inline=False)
-        embed.set_footer(text="매일 /출석 으로 경험치를 얻고 키워보세요! (만렙 Lv.100 도달 시 도감에 자동 등록돼요)")
+        embed.set_footer(text="웹사이트(배틀/탐험)에서 레벨업하고 키워보세요! (만렙 Lv.100 도달 시 도감에 자동 등록돼요)")
 
         await interaction.response.send_message(embed=embed)
 
@@ -143,41 +95,6 @@ class Attendance(commands.Cog):
             color=0x57F287,
         )
         await interaction.followup.send(embed=embed)
-
-    @app_commands.command(name="진화", description="진화 가능한 상태면 확인창을 다시 띄워요.")
-    @restrict_to_channel("attendance")
-    async def evolve_check(self, interaction: discord.Interaction):
-        trainer = get_trainer(interaction.user.id)
-        if trainer is None:
-            await interaction.response.send_message("아직 시작하지 않았어요! `/시작`으로 첫 포켓몬을 받아보세요.", ephemeral=True)
-            return
-
-        if not has_pending_level_evolution(trainer):
-            if trainer.get("evolutionLocked"):
-                await interaction.response.send_message(
-                    f"{trainer['currentPokemon']}은(는) 변함없는돌 때문에 레벨로 진화하지 않아요. "
-                    f"해제하려면 웹사이트에서 아이템을 사용해주세요.",
-                    ephemeral=True,
-                )
-                return
-
-            step = get_next_evolution(trainer)
-            if step is None:
-                await interaction.response.send_message(f"{trainer['currentPokemon']}은(는) 더 이상 진화하지 않아요.", ephemeral=True)
-            elif step["trigger"] == "stone":
-                await interaction.response.send_message(
-                    f"{trainer['currentPokemon']}은(는) **{step['item']}**(으)로만 진화해요. 웹사이트에서 아이템을 사용해주세요.",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.response.send_message(
-                    f"아직 진화 레벨(Lv.{step['level']})에 도달하지 않았어요. (현재 Lv.{trainer['level']})",
-                    ephemeral=True,
-                )
-            return
-
-        view = EvolveConfirmView(interaction.user.id)
-        await interaction.response.send_message(content=f"**{trainer['currentPokemon']}**이(가) 진화할 수 있어요!", view=view)
 
     @app_commands.command(name="프로필", description="내 포켓몬 트레이너 프로필을 봐요.")
     @restrict_to_channel("attendance")
@@ -287,48 +204,6 @@ class Attendance(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="도감", description="지금까지 등록한 포켓몬 도감을 봐요.")
-    @restrict_to_channel("attendance")
-    async def pokedex(self, interaction: discord.Interaction):
-        collected = get_pokedex(interaction.user.id)
-
-        if not collected:
-            await interaction.response.send_message(
-                "아직 도감에 등록된 포켓몬이 없어요. 포켓몬을 Lv.100까지 키워보세요!",
-            )
-            return
-
-        lines = ", ".join(sorted(collected))
-        embed = discord.Embed(
-            title=f"📖 도감 ({len(collected)}종 등록)",
-            description=lines,
-            color=0x9B59B6,
-        )
-        await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="랭킹", description="레벨 기준 포켓몬 육성 랭킹을 봐요.")
-    @restrict_to_channel("attendance")
-    async def ranking(self, interaction: discord.Interaction):
-        top = get_ranking(limit=10)
-
-        if not top:
-            await interaction.response.send_message("아직 아무도 시작하지 않았어요. `/시작`으로 첫 주자가 되어보세요!")
-            return
-
-        medals = ["🥇", "🥈", "🥉"]
-        lines = []
-        for i, (user_id, trainer) in enumerate(top):
-            member = interaction.guild.get_member(int(user_id)) if interaction.guild else None
-            name = member.display_name if member else f"(알 수 없는 유저: {user_id})"
-            prefix = medals[i] if i < len(medals) else f"{i + 1}."
-            lines.append(
-                f"{prefix} {name} — {_display_name(trainer)} Lv.{trainer['level']} "
-                f"(EXP {trainer['exp']}, 출석 {trainer['attendance']}회, 도감 {len(trainer.get('pokedex', []))}종)"
-            )
-
-        embed = discord.Embed(title="🏆 포켓몬 육성 랭킹", description="\n".join(lines), color=0xFFD700)
-        await interaction.response.send_message(embed=embed)
-
     @app_commands.command(name="출석리셋", description="[서버 소유자 전용/테스트용] 내 트레이너 데이터를 전부 초기화해요.")
     @restrict_to_channel("attendance")
     async def reset(self, interaction: discord.Interaction):
@@ -410,7 +285,7 @@ class Attendance(commands.Cog):
     @app_commands.describe(기능="채널을 지정할 명령어 그룹", 채널="이 그룹의 명령어를 허용할 채널")
     @app_commands.choices(기능=[
         app_commands.Choice(name="출석 명령어 (/출석)", value="attend"),
-        app_commands.Choice(name="육성 명령어 (/시작, /프로필, /진화, /도감, /랭킹 등)", value="attendance"),
+        app_commands.Choice(name="육성 명령어 (/시작, /프로필, /기술, /기술목록 등)", value="attendance"),
         app_commands.Choice(name="랭크방/관전 명령어 (/랭크방, /관전입장권 등)", value="rank_room"),
         app_commands.Choice(name="전적 조회 명령어 (/전적)", value="tier_lookup"),
     ])

@@ -33,6 +33,7 @@ COG_GROUPS: dict[str, list[str]] = {
     "🤝 팀/내전": [
         "team",       # /팀짜기
         "scrim",      # /내전모집
+        "map",        # /맵추천
     ],
     "🔊 랭크방/관전": [
         "rank_room",        # 즉석 생성형 랭크 통화방
