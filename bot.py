@@ -15,9 +15,8 @@ load_dotenv(dotenv_path=BASE_DIR / ".env")
 intents = discord.Intents.default()
 intents.voice_states = True  # /팀짜기 명령어가 음성채널 인원을 읽기 위해 필요해요
 intents.members = True  # ⚠️ 특권 인텐트예요. 자동 역할 부여(on_member_join)를 감지하려면 필요해요.
-intents.message_content = True  # ⚠️ 특권 인텐트예요. TTS가 채팅 내용을 읽어주려면 필요해요.
 # ⚠️ Discord 개발자 포털 > Bot 탭 > Privileged Gateway Intents 에서
-#    "SERVER MEMBERS INTENT"와 "MESSAGE CONTENT INTENT"를 반드시 켜주세요. 안 켜면 아래에서 에러가 나요.
+#    "SERVER MEMBERS INTENT"를 반드시 켜주세요. 안 켜면 아래에서 에러가 나요.
 
 # ------------------------------------------------------------------
 # 📦 기능별 Cog 그룹 — 여기서 어떤 기능이 있는지 한눈에 볼 수 있어요.
@@ -41,9 +40,6 @@ COG_GROUPS: dict[str, list[str]] = {
     ],
     "🐾 포켓몬/출석": [
         "attendance",  # 출석 + 포켓몬 육성 시스템 (상점/아이템 사용은 웹사이트에서)
-    ],
-    "🎙️ 음성/TTS": [
-        "tts",        # 채팅 TTS
     ],
     "🛠️ 커뮤니티/운영": [
         "onboarding",    # 규칙 동의/온보딩
