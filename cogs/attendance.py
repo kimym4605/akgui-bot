@@ -15,8 +15,6 @@ from utils.pokemon_store import (
     start_trainer,
 )
 from utils.settings_store import set_setting
-from utils.skill_data import MOVES, get_learnset
-from utils.skill_store import get_current_skills
 
 STAT_LABELS = {
     "hp": "HP", "attack": "공격", "defense": "방어",
@@ -139,71 +137,6 @@ class Attendance(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="기술", description="현재 포켓몬의 보유 기술을 확인해요.")
-    @restrict_to_channel("attendance")
-    async def skills(self, interaction: discord.Interaction):
-        trainer = get_trainer(interaction.user.id)
-        if trainer is None:
-            await interaction.response.send_message(
-                "아직 시작하지 않았어요! `/시작`으로 첫 포켓몬을 받아보세요.",
-                ephemeral=True,
-            )
-            return
-
-        moves = get_current_skills(interaction.user.id)
-        embed = discord.Embed(
-            title=f"{_display_name(trainer)} Lv.{trainer['level']}",
-            description="기술 목록",
-            color=0x5865F2,
-        )
-        if not moves:
-            embed.add_field(name="\u200b", value="아직 배운 기술이 없어요.", inline=False)
-        else:
-            for i, move_name in enumerate(moves, start=1):
-                info = MOVES.get(move_name, {})
-                embed.add_field(
-                    name=f"{i}. {move_name}",
-                    value=(
-                        f"타입: {info.get('type', '?')} · 위력: {info.get('power', '?')} · "
-                        f"명중: {info.get('accuracy', '?')} · 분류: {info.get('category', '?')} · "
-                        f"PP: {info.get('pp', '?')}"
-                    ),
-                    inline=False,
-                )
-        embed.set_thumbnail(url=sprite_url(trainer["currentPokemon"]))
-
-        await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="기술목록", description="앞으로 배울 예정인 기술들을 확인해요.")
-    @restrict_to_channel("attendance")
-    async def upcoming_skills(self, interaction: discord.Interaction):
-        trainer = get_trainer(interaction.user.id)
-        if trainer is None:
-            await interaction.response.send_message(
-                "아직 시작하지 않았어요! `/시작`으로 첫 포켓몬을 받아보세요.",
-                ephemeral=True,
-            )
-            return
-
-        learnset = get_learnset(trainer["basePokemon"])
-        upcoming = sorted(
-            (int(lvl), move)
-            for lvl, moves in learnset.items()
-            for move in moves
-            if int(lvl) > trainer["level"]
-        )
-
-        embed = discord.Embed(
-            title=f"{trainer['currentPokemon']} 다음 습득 예정 기술",
-            color=0x9B59B6,
-        )
-        if not upcoming:
-            embed.description = "더 이상 배울 예정인 기술이 없어요."
-        else:
-            embed.description = "\n".join(f"Lv.{lvl} → {move}" for lvl, move in upcoming)
-
-        await interaction.response.send_message(embed=embed)
-
     @app_commands.command(name="출석리셋", description="[서버 소유자 전용/테스트용] 내 트레이너 데이터를 전부 초기화해요.")
     @restrict_to_channel("attendance")
     async def reset(self, interaction: discord.Interaction):
@@ -285,7 +218,7 @@ class Attendance(commands.Cog):
     @app_commands.describe(기능="채널을 지정할 명령어 그룹", 채널="이 그룹의 명령어를 허용할 채널")
     @app_commands.choices(기능=[
         app_commands.Choice(name="출석 명령어 (/출석)", value="attend"),
-        app_commands.Choice(name="육성 명령어 (/시작, /프로필, /기술, /기술목록 등)", value="attendance"),
+        app_commands.Choice(name="육성 명령어 (/시작, /프로필 등)", value="attendance"),
         app_commands.Choice(name="랭크방/관전 명령어 (/랭크방, /관전입장권 등)", value="rank_room"),
         app_commands.Choice(name="전적 조회 명령어 (/전적)", value="tier_lookup"),
     ])
