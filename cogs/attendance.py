@@ -214,12 +214,12 @@ class Attendance(commands.Cog):
 
         return [app_commands.Choice(name=n, value=n) for n in matches]
 
-    @app_commands.command(name="채널설정", description="[서버 소유자 전용] 포켓몬/랭크방 명령어를 쓸 수 있는 채널을 지정해요.")
+    @app_commands.command(name="채널설정", description="[서버 소유자 전용] 포켓몬/방 명령어를 쓸 수 있는 채널을 지정해요.")
     @app_commands.describe(기능="채널을 지정할 명령어 그룹", 채널="이 그룹의 명령어를 허용할 채널")
     @app_commands.choices(기능=[
         app_commands.Choice(name="출석 명령어 (/출석)", value="attend"),
         app_commands.Choice(name="육성 명령어 (/시작, /프로필 등)", value="attendance"),
-        app_commands.Choice(name="랭크방/관전 명령어 (/랭크방, /관전입장권 등)", value="rank_room"),
+        app_commands.Choice(name="즉석생성형 통화방 명령어 (/방만들기 등)", value="room"),
         app_commands.Choice(name="전적 조회 명령어 (/전적)", value="tier_lookup"),
     ])
     async def set_channel(self, interaction: discord.Interaction, 기능: app_commands.Choice[str], 채널: discord.TextChannel):
