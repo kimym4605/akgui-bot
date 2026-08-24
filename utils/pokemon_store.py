@@ -1,8 +1,8 @@
 """트레이너(유저)의 포켓몬 육성 데이터를 관리해요.
 
-진화·아이템 구매/사용(돌 사용, 변함없는돌, 특성리셋권, 이름변경표, 포켓몬리셋권 등)·
+스타팅 선택(트레이너 생성)·진화·아이템 구매/사용(돌 사용, 변함없는돌, 특성리셋권, 이름변경표, 포켓몬리셋권 등)·
 도감·랭킹은 전부 웹사이트에서 처리해요 — 이 파일(봇)에는 그 관련 함수가 없어요.
-봇은 트레이너 생성(start_trainer)과 하루 1회 코인 지급(attend)만 담당해요.
+봇은 하루 1회 코인 지급(attend)만 담당해요. start_trainer()는 `/포켓몬설정`(서버 소유자 전용 테스트 명령어) 전용 폴백이에요.
 
 저장 스키마 (MongoDB "trainers" 컬렉션, _id = 디스코드 user_id 문자열):
 {
@@ -132,10 +132,9 @@ def get_trainer(user_id: int) -> dict | None:
 
 def attend(user_id: int):
     """/출석: 하루 1회(한국시간 자정 기준). 악귀코인 1개를 지급해요.
-    경험치/레벨업은 이제 웹(배틀·탐험)에서만 이루어지고, 디스코드 출석은 코인 전용이에요."""
+    경험치/레벨업은 이제 웹(배틀·탐험)에서만 이루어지고, 디스코드 출석은 코인 전용이에요.
+    호출 전에 반드시 has_trainer()로 트레이너 존재를 확인해야 해요(없으면 웹에서 먼저 시작 필요)."""
     trainer = _get_doc(user_id)
-    if trainer is None:
-        trainer = start_trainer(user_id)
     trainer.setdefault("pokedex", [])
     trainer.setdefault("items", {})
     trainer.setdefault("coin", 0)

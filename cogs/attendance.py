@@ -42,37 +42,16 @@ class Attendance(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="시작", description="포켓몬 육성을 시작해요. 기본 형태 포켓몬 1마리를 받아요.")
-    @restrict_to_channel("attendance")
-    async def begin(self, interaction: discord.Interaction):
-        if has_trainer(interaction.user.id):
-            trainer = get_trainer(interaction.user.id)
+    @app_commands.command(name="출석", description="오늘의 출석체크를 합니다. (하루 1회, 악귀코인 획득)")
+    @restrict_to_channel("attend")
+    async def do_attend(self, interaction: discord.Interaction):
+        if not has_trainer(interaction.user.id):
             await interaction.response.send_message(
-                f"이미 {_display_name(trainer)}(Lv.{trainer['level']})과 함께하고 있어요!",
+                "아직 포켓몬을 키우기 전이에요! 악귀포켓몬 웹사이트에서 먼저 스타팅 포켓몬을 선택해주세요.",
                 ephemeral=True,
             )
             return
 
-        trainer = start_trainer(interaction.user.id)
-
-        embed = discord.Embed(
-            title="🎉 포켓몬 육성을 시작했어요!",
-            description=(
-                f"**{trainer['currentPokemon']}**을(를) 만났어요!\n"
-                f"성격: {trainer['nature']} · 특성: {trainer['ability']}\n"
-                f"시작 기술: {', '.join(trainer['moves']) or '없음'}"
-            ),
-            color=0x57F287,
-        )
-        embed.set_image(url=sprite_url(trainer["currentPokemon"]))
-        embed.add_field(name="능력치", value=_stats_text(trainer["stats"]), inline=False)
-        embed.set_footer(text="웹사이트(배틀/탐험)에서 레벨업하고 키워보세요! (만렙 Lv.100 도달 시 도감에 자동 등록돼요)")
-
-        await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="출석", description="오늘의 출석체크를 합니다. (하루 1회, 악귀코인 획득)")
-    @restrict_to_channel("attend")
-    async def do_attend(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
         success, result = attend(interaction.user.id)
@@ -100,7 +79,7 @@ class Attendance(commands.Cog):
         trainer = get_trainer(interaction.user.id)
         if trainer is None:
             await interaction.response.send_message(
-                "아직 시작하지 않았어요! `/시작`으로 첫 포켓몬을 받아보세요.",
+                "아직 포켓몬을 키우기 전이에요! 악귀포켓몬 웹사이트에서 먼저 스타팅 포켓몬을 선택해주세요.",
                 ephemeral=True,
             )
             return
