@@ -57,8 +57,9 @@ class Attendance(commands.Cog):
         success, result = attend(interaction.user.id)
 
         if not success:
+            trainer = result
             await interaction.followup.send(
-                "오늘은 이미 출석하셨어요. 내일 또 출석해주세요!",
+                f"오늘은 이미 출석하셨어요. 보유 악귀코인: **{trainer.get('coin', 0)}개** · 내일 또 출석해주세요!",
                 ephemeral=True,
             )
             return
