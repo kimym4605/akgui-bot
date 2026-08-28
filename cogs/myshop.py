@@ -13,8 +13,12 @@
 매번 로그인하는 게 번거로운 유저를 위해, 선택적으로 세션 쿠키(ssid)를 직접 복사해서
 등록해두면 당분간(쿠키 자체 만료 전까지, 대략 한 달 정도) 로그인 없이 바로 /오상을
 쓸 수 있어요. 이 쿠키는 utils/riot_session_store.py에서 암호화해서 저장해요.
+
+설정 방법 (.env):
+  VALORANT_SHOP_CHANNEL_ID=발로란트-상점_채널ID   ← 없으면 채널 제한 없이 아무 채널에서나 동작해요.
 """
 import datetime
+import os
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -25,6 +29,30 @@ from discord.ext import commands, tasks
 from utils import riot_auth, riot_session_store, valorant_skins
 
 KST = ZoneInfo("Asia/Seoul")
+
+
+def _get_shop_channel_id() -> int | None:
+    raw = os.getenv("VALORANT_SHOP_CHANNEL_ID")
+    if not raw or not raw.isdigit():
+        return None
+    return int(raw)
+
+
+def require_shop_channel():
+    """이 데코레이터를 붙인 명령어는 VALORANT_SHOP_CHANNEL_ID로 지정한 채널에서만
+    쓸 수 있어요. 설정 안 했으면 제한 없이 아무 채널에서나 동작해요."""
+
+    async def predicate(interaction: discord.Interaction) -> bool:
+        channel_id = _get_shop_channel_id()
+        if channel_id is None or interaction.channel_id == channel_id:
+            return True
+
+        await interaction.response.send_message(
+            f"이 명령어는 <#{channel_id}> 채널에서만 사용할 수 있어요.", ephemeral=True
+        )
+        return False
+
+    return app_commands.check(predicate)
 # 발로란트 상점은 매일 자정 전후로 갱신돼요. 그 전에 미리 한 번 등록된 유저 전원의
 # 쿠키를 재인증해서 저장해두면(SkinPeek류 봇과 동일한 방식) 쿠키 자체 만료(대략 1~3주) 전에
 # 계속 갱신되니까, 한 번 등록만 해두면 사실상 다시 로그인할 일이 없어져요.
@@ -239,6 +267,7 @@ class MyShop(commands.Cog):
         name="오상",
         description="⚠️본인 라이엇 계정으로 로그인해서 개인 오늘의 상점(4개 로테이션)을 봐요.",
     )
+    @require_shop_channel()
     async def my_shop(self, interaction: discord.Interaction):
         cookie_header = riot_session_store.get_session(interaction.user.id)
         if cookie_header:
