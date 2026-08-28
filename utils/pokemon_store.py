@@ -8,6 +8,7 @@
 {
   "basePokemon": str, "currentPokemon": str, "evolutionStage": int,
   "level": int, "exp": int, "gold": int, "coin": int, "attendance": int,
+  "attendanceStreak": int,  # 연속 출석일수(하루라도 빠지면 1로 리셋)
   "lastAttendanceDate": str | None, "voiceDate": str | None, "voiceMinutesToday": float,
   "moves": [str, ...], "stats": {...}, "iv": {...}, "nature": str, "ability": str,
   "pokedex": [str, ...], "nickname": str | None, "items": {아이템이름: 개수},
@@ -138,10 +139,15 @@ def attend(user_id: int):
     trainer.setdefault("pokedex", [])
     trainer.setdefault("items", {})
     trainer.setdefault("coin", 0)
+    trainer.setdefault("attendanceStreak", 0)
 
     today_iso = _kst_today_iso()
     if trainer.get("lastAttendanceDate") == today_iso:
         return False, trainer
+
+    yesterday_iso = (datetime.now(KST).date() - timedelta(days=1)).isoformat()
+    # 어제 출석했으면 연속 기록에 이어붙이고, 하루라도 빠졌으면(또는 첫 출석이면) 1부터 다시 세요.
+    trainer["attendanceStreak"] = trainer["attendanceStreak"] + 1 if trainer.get("lastAttendanceDate") == yesterday_iso else 1
 
     trainer["attendance"] += 1
     trainer["lastAttendanceDate"] = today_iso

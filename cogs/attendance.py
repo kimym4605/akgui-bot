@@ -59,7 +59,8 @@ class Attendance(commands.Cog):
         if not success:
             trainer = result
             await interaction.followup.send(
-                f"오늘은 이미 출석하셨어요. 보유 악귀코인: **{trainer.get('coin', 0)}개** · 내일 또 출석해주세요!",
+                f"오늘은 이미 출석하셨어요. 보유 악귀코인: **{trainer.get('coin', 0)}개** "
+                f"· 연속 출석 **{trainer.get('attendanceStreak', 0)}일째** · 내일 또 출석해주세요!",
                 ephemeral=True,
             )
             return
@@ -68,7 +69,11 @@ class Attendance(commands.Cog):
 
         embed = discord.Embed(
             title="✅ 출석 완료!",
-            description=f"획득 악귀코인: **+{result['coin_gain']}개**\n보유 악귀코인: **{trainer['coin']}개**",
+            description=(
+                f"획득 악귀코인: **+{result['coin_gain']}개**\n"
+                f"보유 악귀코인: **{trainer['coin']}개**\n"
+                f"🔥 연속 출석: **{trainer['attendanceStreak']}일째**"
+            ),
             color=0x57F287,
         )
         await interaction.followup.send(embed=embed)
