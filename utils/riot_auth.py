@@ -21,6 +21,7 @@
 """
 import base64
 import json
+import os
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import parse_qsl
@@ -54,9 +55,18 @@ _IMPERSONATE = "chrome131"
 _RIOT_CLIENT_USER_AGENT = "RiotClient/62.0.1.4909243.4789131 rso-auth (Windows;10;;Professional, x64)"
 
 
+# Fly.io(데이터센터 IP)에서 entitlements.auth.riotgames.com만 계속 403으로 막혀서
+# (2026-08-28, User-Agent 교체로도 해결 안 됨 확인) 주거용 프록시를 거쳐서 나가요.
+# .env / flyctl secrets의 RIOT_PROXY_URL이 없으면 그냥 직접 나가요(로컬 개발용).
+_PROXY_URL = os.environ.get("RIOT_PROXY_URL")
+
+
 def new_session() -> AsyncSession:
     return AsyncSession(
-        impersonate=_IMPERSONATE, timeout=15, headers={"User-Agent": _RIOT_CLIENT_USER_AGENT}
+        impersonate=_IMPERSONATE,
+        timeout=15,
+        headers={"User-Agent": _RIOT_CLIENT_USER_AGENT},
+        proxy=_PROXY_URL,
     )
 
 
