@@ -1,12 +1,13 @@
 """
 오늘의 피처드 번들(상점 메인에 뜨는 큰 번들) 조회 기능이에요.
 
-⚠️ 이건 "내 계정의 개인 일일 상점(4개 로테이션)"이 아니에요. HenrikDev API는 개인 로그인이
-필요한 그 정보는 제공하지 않아요 (라이엇 계정 로그인을 봇에 넣는 건 계정 도용 위험이 있어서
-지원하지 않아요). 대신 모두에게 동일하게 보이는 "피처드 번들"만 로그인 없이 가져와요.
+이건 "내 계정의 개인 일일 상점(4개 로테이션)"이 아니라, 모두에게 동일하게 보이는
+"피처드 번들"이에요. HenrikDev API로 로그인 없이 가져올 수 있는 정보라 이 cog는 그대로
+로그인 없는 방식을 유지해요. 개인 오늘의 상점(로그인 필요, 계정 도용 리스크를 감수하고
+구현한 기능)은 cogs/myshop.py를 참고하세요.
 
 HenrikDev의 store-featured 엔드포인트는 라이엇 원본 포맷(아이템 UUID)을 그대로 주기 때문에,
-valorant-api.com의 스킨 목록으로 UUID -> 실제 이름/이미지를 매칭해요.
+valorant-api.com의 스킨 목록(utils/valorant_skins.py)으로 UUID -> 실제 이름/이미지를 매칭해요.
 """
 import os
 from typing import Optional
@@ -16,8 +17,9 @@ from discord import app_commands
 from discord.ext import commands
 import aiohttp
 
+from utils import valorant_skins
+
 HENRIK_BASE = "https://api.henrikdev.xyz"
-SKINS_ENDPOINT = "https://valorant-api.com/v1/weapons/skins?language=ko-KR"
 
 # 라이엇 상점 API의 아이템 타입 UUID 상수예요. (커뮤니티에 널리 알려진 고정값)
 SKIN_LEVEL_TYPE_ID = "e7c63390-eda7-46e0-bb7a-a6abdacd2433"   # 무기 스킨
@@ -41,40 +43,16 @@ class Store(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.session: Optional[aiohttp.ClientSession] = None
-        self.skin_level_lookup: dict[str, dict] = {}  # 스킨 레벨 UUID -> {"name", "icon"}
 
     async def cog_load(self):
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
-        await self._load_skin_lookup()
+        if not valorant_skins.is_loaded():
+            count = await valorant_skins.load(self.session)
+            print(f"🛒 스킨 매칭 데이터 {count}개를 불러왔어요.")
 
     async def cog_unload(self):
         if self.session is not None:
             await self.session.close()
-
-    async def _load_skin_lookup(self):
-        """스킨 레벨 UUID로 실제 이름/이미지를 찾을 수 있게 미리 캐싱해둬요."""
-        try:
-            async with self.session.get(SKINS_ENDPOINT) as resp:
-                if resp.status != 200:
-                    return
-                payload = await resp.json()
-        except Exception as error:  # noqa: BLE001
-            print(f"⚠️ 스킨 목록을 불러오지 못했어요(오늘의번들용): {error}")
-            return
-
-        lookup: dict[str, dict] = {}
-        for skin in payload.get("data", []):
-            name = skin.get("displayName")
-            fallback_icon = skin.get("displayIcon")
-            for level in skin.get("levels") or []:
-                level_uuid = level.get("uuid")
-                if level_uuid:
-                    lookup[level_uuid] = {
-                        "name": name,
-                        "icon": level.get("displayIcon") or fallback_icon,
-                    }
-        self.skin_level_lookup = lookup
-        print(f"🛒 오늘의번들용 스킨 매칭 데이터 {len(lookup)}개를 불러왔어요.")
 
     def _build_bundle_embed(self, bundle: dict) -> discord.Embed:
         items = bundle.get("Items", [])
@@ -104,7 +82,7 @@ class Store(commands.Cog):
 
             name = "알 수 없는 아이템"
             if item_type_id == SKIN_LEVEL_TYPE_ID:
-                info = self.skin_level_lookup.get(item_id)
+                info = valorant_skins.get(item_id)
                 if info:
                     name = info["name"]
                     if not thumbnail_set and info.get("icon"):
