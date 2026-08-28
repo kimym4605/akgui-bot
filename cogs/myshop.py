@@ -26,7 +26,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from utils import riot_auth, riot_session_store, valorant_skins
+from utils import riot_auth, riot_session_store, valorant_accessories, valorant_skins
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -53,6 +53,8 @@ def require_shop_channel():
         return False
 
     return app_commands.check(predicate)
+
+
 # 발로란트 상점은 매일 자정 전후로 갱신돼요. 그 전에 미리 한 번 등록된 유저 전원의
 # 쿠키를 재인증해서 저장해두면(SkinPeek류 봇과 동일한 방식) 쿠키 자체 만료(대략 1~3주) 전에
 # 계속 갱신되니까, 한 번 등록만 해두면 사실상 다시 로그인할 일이 없어져요.
@@ -68,6 +70,7 @@ LOGIN_URL = (
 )
 
 VP_CURRENCY_ID = "85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741"
+SKIN_LEVEL_TYPE_ID = "e7c63390-eda7-46e0-bb7a-a6abdacd2433"  # 번들 아이템 타입 판별용
 
 
 def _format_remaining(seconds: int) -> str:
@@ -120,6 +123,130 @@ def _build_shop_embeds(user: discord.abc.User, storefront: dict, riot_id: str = 
     return embeds
 
 
+_ACCESSORY_COLOR = 0xC9A227  # 킹덤 크레딧을 상징하는 골드색이에요.
+
+
+def _build_accessory_embeds(storefront: dict) -> list[discord.Embed]:
+    """장식상점(건버디/스프레이/플레이어카드/칭호)을 스킨 상점과 같은 스타일로 보여줘요."""
+    accessory_store = storefront.get("AccessoryStore", {})
+    offers = accessory_store.get("AccessoryStoreOffers", [])
+    remaining = accessory_store.get("AccessoryStoreRemainingDurationInSeconds", 0)
+
+    if not offers:
+        return []
+
+    header = discord.Embed(
+        description=f"⏳ {_format_remaining(remaining)}",
+        color=_ACCESSORY_COLOR,
+    )
+    header.set_author(name="🎀 장식상점 (킹덤 크레딧)")
+    embeds = [header]
+
+    for entry in offers:
+        offer = entry.get("Offer", {})
+        rewards = offer.get("Rewards", [])
+        if not rewards:
+            continue
+        item_id = rewards[0].get("ItemID")
+        info = valorant_accessories.get(item_id)
+
+        cost_map = offer.get("Cost", {})
+        cost = next(iter(cost_map.values())) if cost_map else 0
+
+        name = info["name"] if info else "알 수 없는 아이템"
+        category = info["category"] if info else "장식 아이템"
+
+        item_embed = discord.Embed(
+            title=name, description=f"{category} · 💠 {cost:,} KC", color=_ACCESSORY_COLOR
+        )
+        if info and info.get("icon"):
+            item_embed.set_thumbnail(url=info["icon"])
+        embeds.append(item_embed)
+
+    return embeds
+
+
+_BUNDLE_COLOR = 0x0F1923  # 발로란트 다크 테마 색이에요.
+
+
+def _build_bundle_embeds(storefront: dict) -> list[discord.Embed]:
+    """오늘 상점 메인에 떠 있는 피처드 번들(있을 때만)을 보여줘요."""
+    featured = storefront.get("FeaturedBundle", {})
+    bundles = featured.get("Bundles") or ([featured["Bundle"]] if featured.get("Bundle") else [])
+    if not bundles:
+        return []
+
+    embeds = []
+    for bundle in bundles:
+        items = bundle.get("Items", [])
+        remaining = bundle.get("DurationRemainingInSeconds", 0)
+        total_cost = bundle.get("TotalDiscountedCost") or {}
+        total_base = bundle.get("TotalBaseCost") or {}
+        total_price = next(iter(total_cost.values()), 0)
+        base_price = next(iter(total_base.values()), 0) or total_price
+
+        header = discord.Embed(description=f"⏳ {_format_remaining(remaining)}", color=_BUNDLE_COLOR)
+        header.set_author(name="📦 오늘의 번들")
+        price_text = f"💠 {total_price:,} VP"
+        if base_price and base_price != total_price:
+            price_text += f" ~~{base_price:,} VP~~"
+        header.add_field(name="번들 총 가격", value=price_text, inline=False)
+        embeds.append(header)
+
+        for entry in items:
+            item = entry.get("Item", {})
+            item_type_id = item.get("ItemTypeID")
+            item_id = item.get("ItemID")
+            price = entry.get("DiscountedPrice", entry.get("BasePrice", 0))
+
+            info = valorant_skins.get(item_id) if item_type_id == SKIN_LEVEL_TYPE_ID else valorant_accessories.get(item_id)
+            name = info["name"] if info else "알 수 없는 아이템"
+            color = (info.get("tier_color") if info else None) or _DEFAULT_TIER_COLOR
+
+            item_embed = discord.Embed(title=name, description=f"💠 {price:,} VP", color=color)
+            if info and info.get("icon"):
+                item_embed.set_thumbnail(url=info["icon"])
+            embeds.append(item_embed)
+
+    return embeds
+
+
+class BackToShopView(discord.ui.View):
+    """장식상점/번들 화면에서 다시 스킨 상점으로 돌아가는 버튼 하나짜리 뷰예요."""
+
+    def __init__(self, parent: "ShopResultView"):
+        super().__init__(timeout=600)
+        self._parent = parent
+
+    @discord.ui.button(label="◀ 상점으로 돌아가기", style=discord.ButtonStyle.secondary)
+    async def back_to_shop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embeds=self._parent.shop_embeds, view=self._parent)
+
+
+class ShopResultView(discord.ui.View):
+    """상점 결과 메시지에 붙는 버튼들이에요. 장식상점/번들은 바로 다 보여주지 않고,
+    제트봇처럼 버튼을 눌러야만 그때 같은 메시지 안에서 화면을 전환해서 보여줘요."""
+
+    def __init__(self, shop_embeds: list[discord.Embed], storefront: dict):
+        super().__init__(timeout=600)
+        self.shop_embeds = shop_embeds
+        self._accessory_embeds = _build_accessory_embeds(storefront)
+        self._bundle_embeds = _build_bundle_embeds(storefront)
+
+        if not self._accessory_embeds:
+            self.remove_item(self.show_accessories)
+        if not self._bundle_embeds:
+            self.remove_item(self.show_bundle)
+
+    @discord.ui.button(label="🎀 장식상점 보기", style=discord.ButtonStyle.secondary)
+    async def show_accessories(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embeds=self._accessory_embeds[:10], view=BackToShopView(self))
+
+    @discord.ui.button(label="📦 번들 보기", style=discord.ButtonStyle.secondary)
+    async def show_bundle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embeds=self._bundle_embeds[:10], view=BackToShopView(self))
+
+
 async def _send_shop(interaction: discord.Interaction, session, access_token: str, id_token: str) -> bool:
     """access_token/id_token으로 상점까지 조회해서 채널에 공개로 올려요. 성공하면 True."""
     region = await riot_auth.get_region(session, access_token, id_token)
@@ -144,14 +271,18 @@ async def _send_shop(interaction: discord.Interaction, session, access_token: st
         await interaction.followup.send("상점 정보를 못 받아왔어요. 잠시 후 다시 시도해주세요.", ephemeral=True)
         return False
 
-    if not valorant_skins.is_loaded():
+    if not valorant_skins.is_loaded() or not valorant_accessories.is_loaded():
         # valorant-api.com은 로그인이 필요 없는 공개 API라 별도의 임시 세션을 써요.
-        async with aiohttp.ClientSession() as skin_session:
-            await valorant_skins.load(skin_session)
+        async with aiohttp.ClientSession() as static_session:
+            if not valorant_skins.is_loaded():
+                await valorant_skins.load(static_session)
+            if not valorant_accessories.is_loaded():
+                await valorant_accessories.load(static_session)
 
     riot_id = riot_auth.riot_id_from_id_token(id_token) or ""
     # 결과는 제트봇처럼 채널에 공개로 올려요(로그인 과정 자체만 본인만 보이게 처리).
-    await interaction.followup.send(embeds=_build_shop_embeds(interaction.user, storefront, riot_id), ephemeral=False)
+    embeds = _build_shop_embeds(interaction.user, storefront, riot_id)
+    await interaction.followup.send(embeds=embeds, view=ShopResultView(embeds, storefront), ephemeral=False)
     return True
 
 
