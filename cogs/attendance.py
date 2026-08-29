@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -15,6 +17,8 @@ from utils.pokemon_store import (
     start_trainer,
 )
 from utils.settings_store import set_setting
+
+COIN_IMAGE_PATH = Path(__file__).resolve().parent.parent / "assets" / "coin.png"
 
 STAT_LABELS = {
     "hp": "HP", "attack": "공격", "defense": "방어",
@@ -76,7 +80,9 @@ class Attendance(commands.Cog):
             ),
             color=0x57F287,
         )
-        await interaction.followup.send(embed=embed)
+        embed.set_thumbnail(url="attachment://coin.png")
+        coin_file = discord.File(COIN_IMAGE_PATH, filename="coin.png")
+        await interaction.followup.send(embed=embed, file=coin_file)
 
     @app_commands.command(name="프로필", description="내 포켓몬 트레이너 프로필을 봐요.")
     @restrict_to_channel("attendance")
