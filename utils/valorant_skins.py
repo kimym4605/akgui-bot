@@ -12,11 +12,12 @@ import aiohttp
 SKINS_ENDPOINT = "https://valorant-api.com/v1/weapons/skins?language=ko-KR"
 TIERS_ENDPOINT = "https://valorant-api.com/v1/contenttiers?language=ko-KR"
 
-_lookup: dict[str, dict] = {}  # 스킨 레벨 UUID -> {"name", "icon", "tier_color"}
+_lookup: dict[str, dict] = {}  # 스킨 레벨 UUID -> {"name", "icon", "tier_color", "tier_icon"}
 
 
-async def _load_tiers(session: aiohttp.ClientSession) -> dict[str, int]:
-    """등급(Select/Deluxe/Premium/Exclusive/Ultra) UUID -> Discord embed색(int)."""
+async def _load_tiers(session: aiohttp.ClientSession) -> dict[str, dict]:
+    """등급(Select/Deluxe/Premium/Exclusive/Ultra) UUID -> {"color": int, "icon": str}.
+    icon은 제트봇처럼 스킨 이름 앞에 붙이는 작은 다이아 모양 등급 아이콘이에요."""
     try:
         async with session.get(TIERS_ENDPOINT) as resp:
             if resp.status != 200:
@@ -29,8 +30,8 @@ async def _load_tiers(session: aiohttp.ClientSession) -> dict[str, int]:
     for tier in payload.get("data", []):
         # highlightColor는 "RRGGBBAA" 형식의 8자리 hex예요. 앞 6자리(RGB)만 써요.
         hex_color = (tier.get("highlightColor") or "")[:6]
-        if len(hex_color) == 6:
-            tiers[tier["uuid"]] = int(hex_color, 16)
+        color = int(hex_color, 16) if len(hex_color) == 6 else None
+        tiers[tier["uuid"]] = {"color": color, "icon": tier.get("displayIcon")}
     return tiers
 
 
@@ -52,14 +53,15 @@ async def load(session: aiohttp.ClientSession) -> int:
     for skin in payload.get("data", []):
         name = skin.get("displayName")
         fallback_icon = skin.get("displayIcon")
-        tier_color = tiers.get(skin.get("contentTierUuid"))
+        tier = tiers.get(skin.get("contentTierUuid")) or {}
         for level in skin.get("levels") or []:
             level_uuid = level.get("uuid")
             if level_uuid:
                 lookup[level_uuid] = {
                     "name": name,
                     "icon": level.get("displayIcon") or fallback_icon,
-                    "tier_color": tier_color,
+                    "tier_color": tier.get("color"),
+                    "tier_icon": tier.get("icon"),
                 }
     _lookup = lookup
     return len(lookup)
