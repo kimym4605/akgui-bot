@@ -112,7 +112,7 @@ def _build_shop_embeds(user: discord.abc.User, storefront: dict, riot_id: str = 
         name = info["name"] if info else "알 수 없는 스킨"
         color = (info.get("tier_color") if info else None) or _DEFAULT_TIER_COLOR
 
-        item_embed = discord.Embed(description=f"💠 {cost:,} VP", color=color)
+        item_embed = discord.Embed(description=f"{cost:,} VP", color=color)
         item_embed.set_author(name=name, icon_url=(info.get("tier_icon") if info else None))
         if info and info.get("icon"):
             item_embed.set_thumbnail(url=info["icon"])
@@ -188,7 +188,7 @@ def _build_bundle_embeds(storefront: dict) -> list[discord.Embed]:
 
         header = discord.Embed(description=f"⏳ {_format_remaining(remaining)}", color=_BUNDLE_COLOR)
         header.set_author(name="📦 오늘의 번들")
-        price_text = f"💠 {total_price:,} VP"
+        price_text = f"{total_price:,} VP"
         if base_price and base_price != total_price:
             price_text += f" ~~{base_price:,} VP~~"
         header.add_field(name="번들 총 가격", value=price_text, inline=False)
@@ -204,7 +204,7 @@ def _build_bundle_embeds(storefront: dict) -> list[discord.Embed]:
             name = info["name"] if info else "알 수 없는 아이템"
             color = (info.get("tier_color") if info else None) or _DEFAULT_TIER_COLOR
 
-            item_embed = discord.Embed(description=f"💠 {price:,} VP", color=color)
+            item_embed = discord.Embed(description=f"{price:,} VP", color=color)
             item_embed.set_author(name=name, icon_url=(info.get("tier_icon") if info else None))
             if info and info.get("icon"):
                 item_embed.set_thumbnail(url=info["icon"])
