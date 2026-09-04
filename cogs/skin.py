@@ -1,9 +1,12 @@
+import logging
 from typing import List, Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 import aiohttp
+
+log = logging.getLogger(__name__)
 
 # valorant-api.com : 로그인/인증 없이 쓸 수 있는 비공식 발로란트 정적 데이터 API
 # 최신 응답 필드는 https://dash.valorant-api.com 에서 확인할 수 있어요.
@@ -49,13 +52,13 @@ class Skin(commands.Cog):
                     return
                 payload = await resp.json()
         except Exception as error:  # noqa: BLE001
-            print(f"⚠️ 스킨 목록을 불러오지 못했어요: {error}")
+            log.warning(f"⚠️ 스킨 목록을 불러오지 못했어요: {error}")
             return
 
         skins = payload.get("data", [])
         # 이름이 없는 항목(기본 스킨 등)은 검색 대상에서 빼요.
         self.skins_cache = [s for s in skins if s.get("displayName")]
-        print(f"🔫 스킨 {len(self.skins_cache)}개를 불러왔어요.")
+        log.info(f"🔫 스킨 {len(self.skins_cache)}개를 불러왔어요.")
 
     def _find_matches(self, raw_keyword: str) -> list[dict]:
         """스킨 이름에 직접 포함되는 것 + 별명 매핑을 통해 찾은 것을 합쳐서 반환해요."""

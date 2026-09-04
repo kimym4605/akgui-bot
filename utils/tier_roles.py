@@ -2,9 +2,12 @@
 발로란트 티어 이름 <-> 디스코드 역할 이름 변환, 그리고 역할 생성/부여/교체를 담당하는 공용 모듈이에요.
 cogs/tier.py(확인 명령어)와 cogs/rank.py(/전적 실행 시 자동 동기화)가 같이 사용해요.
 """
+import logging
 from typing import Optional
 
 import discord
+
+log = logging.getLogger(__name__)
 
 # 레디언트를 제외한 모든 랭크는 1~3단계로 나뉘어요. (레디언트만 단일 등급)
 TIER_BASES = ["아이언", "브론즈", "실버", "골드", "플래티넘", "다이아몬드", "초월자", "불멸"]
@@ -109,13 +112,13 @@ async def get_or_create_tier_role(
     except discord.HTTPException as error:
         # 서버 부스트 레벨 부족 등으로 아이콘 적용이 실패하면, 아이콘 없이라도 역할은 만들어요.
         if "display_icon" in kwargs:
-            print(f"⚠️ '{display_name}' 역할에 이미지 아이콘을 못 붙였어요 ({error}). 아이콘 없이 만들게요.")
+            log.warning(f"⚠️ '{display_name}' 역할에 이미지 아이콘을 못 붙였어요 ({error}). 아이콘 없이 만들게요.")
             kwargs.pop("display_icon")
             role = await guild.create_role(**kwargs)
         else:
             raise
 
-    print(f"🆕 '{display_name}' 역할을 새로 만들었어요. (서버: {guild.name})")
+    log.info(f"🆕 '{display_name}' 역할을 새로 만들었어요. (서버: {guild.name})")
     return role
 
 

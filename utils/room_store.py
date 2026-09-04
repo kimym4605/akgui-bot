@@ -5,6 +5,8 @@
 봇이 재시작돼도 누가 어느 방의 방장인지, 어떤 종류의 방인지 잊어버리지 않게 해요.
 """
 import json
+
+from utils import atomic_json
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -22,8 +24,8 @@ def _load() -> dict:
 
 
 def _save(data: dict):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 원자적 쓰기 - 도중에 죽어도 기존 파일이 안 깨져요. (utils/atomic_json.py 주석 참고)
+    atomic_json.write_json(DATA_FILE, data)
 
 
 def load_all() -> dict[int, dict]:

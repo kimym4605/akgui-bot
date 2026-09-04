@@ -2,9 +2,12 @@
 발로란트 요원 포지션(타격대/척후대/전략가/감시자) 역할 생성/부여/교체를 담당하는 공용 모듈이에요.
 tier_roles.py와 구조를 똑같이 맞췄어요. cogs/rank.py의 /전적 실행 시 자동 동기화에 사용돼요.
 """
+import logging
 from typing import Optional
 
 import discord
+
+log = logging.getLogger(__name__)
 
 POSITION_BASES = ["타격대", "척후대", "전략가", "감시자"]
 
@@ -43,7 +46,7 @@ async def get_or_create_position_role(guild: discord.Guild, position_name: str) 
     if role is None:
         color = POSITION_COLOR_MAP.get(position_name, discord.Color.default())
         role = await guild.create_role(name=display_name, color=color, reason="포지션 역할 자동 생성")
-        print(f"🆕 '{display_name}' 역할을 새로 만들었어요. (서버: {guild.name})")
+        log.info(f"🆕 '{display_name}' 역할을 새로 만들었어요. (서버: {guild.name})")
     return role
 
 

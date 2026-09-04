@@ -1,3 +1,4 @@
+import logging
 import asyncio
 import os
 import time
@@ -13,6 +14,8 @@ from utils.rank_stats_store import get_kd_percentile, get_sample_size, record_st
 from utils.riot_account_store import get_account, is_matching_account
 from utils.tier_roles import parse_korean_tier, sync_tier_role
 from utils.position_roles import sync_position_role
+
+log = logging.getLogger(__name__)
 
 # HenrikDev API (https://docs.henrikdev.xyz) : 라이엇 공식 파트너는 아니지만
 # 활발히 유지보수되고 있는 서드파티(비공식) 발로란트 전적 API예요.
@@ -159,7 +162,7 @@ async def fetch_tier_icons(session: aiohttp.ClientSession) -> dict[int, str]:
                 return {}
             payload = await resp.json()
     except Exception as error:  # noqa: BLE001
-        print(f"⚠️ 티어 아이콘 목록을 불러오지 못했어요: {error}")
+        log.warning(f"⚠️ 티어 아이콘 목록을 불러오지 못했어요: {error}")
         return {}
 
     seasons = payload.get("data", [])
@@ -169,14 +172,16 @@ async def fetch_tier_icons(session: aiohttp.ClientSession) -> dict[int, str]:
     latest_season = seasons[-1]  # 목록 맨 마지막이 가장 최신 시즌이에요.
     return {
         tier["tier"]: tier["largeIcon"]
-        for tier in latest_season.get("tiers", [])
+        for tier in (latest_season.get("tiers") or [])
         if tier.get("largeIcon")
     }
 
 
 def _extract_player_match_stats(match: dict, name: str, tag: str) -> Optional[dict]:
     """한 경기 데이터에서 이 유저 본인의 스탯만 뽑아내요. 못 찾으면 None을 반환해요."""
-    all_players = match.get("players", {}).get("all_players", [])
+    # ⚠️ .get("players", {}) 는 키가 아예 없을 때만 {}를 줘요. HenrikDev는 값 자체를 null로
+    # 내려주는 경우가 있어서(2026-09-02 실제 /전적 크래시 발생) `or {}` 로 받아야 안전해요.
+    all_players = (match.get("players") or {}).get("all_players") or []
     me = next(
         (
             p for p in all_players
@@ -187,9 +192,17 @@ def _extract_player_match_stats(match: dict, name: str, tag: str) -> Optional[di
     if me is None:
         return None
 
-    stats = me.get("stats", {})
+    stats = me.get("stats") or {}
     my_team = (me.get("team") or "").lower()  # "red" / "blue"
-    my_team_info = match.get("teams", {}).get(my_team, {})
+    my_team_info = (match.get("teams") or {}).get(my_team) or {}
+
+    # 스탯이나 팀(라운드) 정보가 통째로 비어있는 경기는 집계에서 빼요.
+    # 넣으면 "0킬 0데스로 패배한 경기"로 잡혀서 K/D와 승률이 실제보다 낮게 나와요.
+    # (예전엔 이런 데이터에서 아예 크래시가 났어서, 조용히 틀린 값이 나가지 않게 막아둬요.)
+    if not stats or not my_team_info:
+        log.warning(f"⚠️ [{name}#{tag}] 경기 데이터가 불완전해서 집계에서 제외했어요 "
+                    f"(stats={'있음' if stats else '없음'}, team={'있음' if my_team_info else '없음'}).")
+        return None
 
     rounds_won = my_team_info.get("rounds_won", 0) or 0
     rounds_lost = my_team_info.get("rounds_lost", 0) or 0
@@ -456,7 +469,7 @@ class Rank(commands.Cog):
 
         # 티어 아이콘 목록은 자주 안 바뀌니까 봇 켜질 때 한 번만 받아서 캐싱해둬요.
         self.tier_icons = await fetch_tier_icons(self.session)
-        print(f"🖼️ 티어 아이콘 {len(self.tier_icons)}개를 불러왔어요.")
+        log.info(f"🖼️ 티어 아이콘 {len(self.tier_icons)}개를 불러왔어요.")
 
     async def cog_unload(self):
         if self.session is not None:
@@ -523,12 +536,12 @@ class Rank(commands.Cog):
                 fetch_matches_by_mode(self.session, headers, region, 닉네임, 태그, match_count, mode="competitive"),
                 fetch_matches_by_mode(self.session, headers, region, 닉네임, 태그, match_count, mode="unrated"),
             )
-            print(f"⏱️ [{닉네임}#{태그}] 티어+경쟁전+일반전 동시조회: {time.monotonic() - _t0:.2f}초")
+            log.info(f"⏱️ [{닉네임}#{태그}] 티어+경쟁전+일반전 동시조회: {time.monotonic() - _t0:.2f}초")
         except asyncio.TimeoutError:
             await interaction.followup.send("HenrikDev API 응답이 너무 느려서 시간 초과됐어요. 잠시 후 다시 시도해주세요.")
             return
         except Exception as error:  # noqa: BLE001
-            print(error)
+            log.exception("전적 조회 중 예외: %s", error)
             await interaction.followup.send("조회 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.")
             return
 
@@ -538,10 +551,11 @@ class Rank(commands.Cog):
             await interaction.followup.send(f"오류: {message}")
             return
 
-        mmr_data = mmr_payload["data"]
-        current = mmr_data.get("current", {})
-        tier_name = current.get("tier", {}).get("name", "정보 없음")
-        tier_id = current.get("tier", {}).get("id")
+        mmr_data = mmr_payload["data"] or {}
+        current = mmr_data.get("current") or {}
+        tier = current.get("tier") or {}
+        tier_name = tier.get("name") or "정보 없음"
+        tier_id = tier.get("id")
         rr = current.get("rr")
 
         # ---- 티어 역할 자동 동기화 ----
@@ -561,7 +575,7 @@ class Rank(commands.Cog):
                         if icon_resp.status == 200:
                             icon_bytes = await icon_resp.read()
                 except Exception as error:  # noqa: BLE001
-                    print(f"⚠️ 티어 아이콘 이미지를 다운로드하지 못했어요: {error}")
+                    log.warning(f"⚠️ 티어 아이콘 이미지를 다운로드하지 못했어요: {error}")
 
             try:
                 sync_result = await sync_tier_role(member, korean_tier, icon_bytes=icon_bytes)

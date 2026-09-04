@@ -22,6 +22,7 @@
 
 새 종류의 방을 추가하려면 cogs/room.py의 ROOM_KINDS 딕셔너리에 항목 하나만 추가하면 돼요.
 """
+import logging
 import asyncio
 import os
 
@@ -29,6 +30,8 @@ import discord
 from discord.ext import commands
 
 from utils import room_store
+
+log = logging.getLogger(__name__)
 
 ROOM_EXPIRE_SECONDS = 600  # 방을 만들고 이 시간 안에 아무도 안 들어오면 자동 삭제해요.
 REQUEST_TIMEOUT_SECONDS = 600  # 입장 신청 알림(수락/거절 버튼)이 유효한 시간
@@ -201,7 +204,7 @@ class DynamicRoomEngine:
         self._cleanup_tracking(channel_id)
         try:
             await channel.delete(reason="방장 퇴장으로 자동 삭제")
-            print(f"🗑️ '{channel.name}' {room_label}을 자동 삭제했어요. (방장 퇴장)")
+            log.info(f"🗑️ '{channel.name}' {room_label}을 자동 삭제했어요. (방장 퇴장)")
         except (discord.Forbidden, discord.NotFound):
             pass
 
@@ -226,7 +229,7 @@ class DynamicRoomEngine:
         self._cleanup_tracking(channel_id)
         try:
             await channel.delete(reason=f"{room_label} 미사용으로 자동 삭제 ({ROOM_EXPIRE_SECONDS // 60}분 경과)")
-            print(f"🗑️ '{channel.name}' {room_label}을 자동 삭제했어요. (미사용)")
+            log.info(f"🗑️ '{channel.name}' {room_label}을 자동 삭제했어요. (미사용)")
         except (discord.Forbidden, discord.NotFound):
             pass
 
@@ -264,7 +267,7 @@ class DynamicRoomEngine:
             self.channel_to_kind[channel_id] = kind
             recovered += 1
 
-        print(f"🔊 즉석생성형 통화방 복구 완료: {recovered}개 복구, {cleaned}개 정리됨.")
+        log.info(f"🔊 즉석생성형 통화방 복구 완료: {recovered}개 복구, {cleaned}개 정리됨.")
 
     # ============================================================
     # 슬래시 명령어 로직 (cog가 그대로 호출)
@@ -425,7 +428,7 @@ class DynamicRoomEngine:
                 await interaction.followup.send("⚠️ 채널 삭제 권한이 없어요. 관리자에게 문의해주세요.", ephemeral=True)
                 return
 
-        print(f"🗑️ {interaction.user.display_name}님이 {room_label}을 직접 닫았어요.")
+        log.info(f"🗑️ {interaction.user.display_name}님이 {room_label}을 직접 닫았어요.")
         await interaction.followup.send(f"🗑️ {room_label}을 닫았어요.", ephemeral=True)
 
     # ============================================================
@@ -455,7 +458,7 @@ class DynamicRoomEngine:
             self._cleanup_tracking(channel.id)
             try:
                 await channel.delete(reason=f"{room_label}에 아무도 없어서 자동 삭제")
-                print(f"🗑️ '{channel.name}' {room_label}을 자동 삭제했어요. (인원 0명)")
+                log.info(f"🗑️ '{channel.name}' {room_label}을 자동 삭제했어요. (인원 0명)")
             except (discord.Forbidden, discord.NotFound):
                 pass
             return
@@ -475,6 +478,6 @@ class DynamicRoomEngine:
         if current.connect or current.view_channel:
             try:
                 await channel.set_permissions(member, overwrite=None, reason=f"{room_label} 퇴장으로 입장 권한 자동 회수")
-                print(f"🚪 {member.display_name}님의 '{channel.name}' {room_label} 입장 권한을 회수했어요. (퇴장)")
+                log.info(f"🚪 {member.display_name}님의 '{channel.name}' {room_label} 입장 권한을 회수했어요. (퇴장)")
             except (discord.Forbidden, discord.NotFound):
                 pass

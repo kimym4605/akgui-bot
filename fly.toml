@@ -1,0 +1,20 @@
+app = 'akgui-bot'
+primary_region = 'nrt'
+
+[build]
+
+[[mounts]]
+  source = 'bot_data'
+  destination = '/app/data'
+
+# bot.py의 워치독이 이벤트 루프 멈춤을 감지하면 exit(1)로 죽어요.
+# 그때 Fly가 다시 띄워줘야 자동 복구가 완성돼요. (현재 머신 기본값과 동일하지만,
+# 나중에 누가 모르고 바꾸지 않도록 명시해둬요.)
+[[restart]]
+  policy = 'on-failure'
+  retries = 10
+
+[[vm]]
+  memory = '256mb'
+  cpu_kind = 'shared'
+  cpus = 1

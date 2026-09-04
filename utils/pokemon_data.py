@@ -80,6 +80,15 @@ BRANCH_EVOLUTIONS = {
 
 STARTER_POOL = list(EVOLUTION.keys())
 
+# 웹(악귀포켓몬)의 정식 스타팅 3종이에요. 웹 `backend/pokemon_data.py`의 CUSTOM_STARTERS와
+# 반드시 같은 값이어야 해요 — 여기가 어긋나면 "스타팅 골랐는데 안 골랐다고 나옴" 버그가 나요.
+#
+# 이게 왜 봇에도 필요하냐면: 정식 스타팅 제도가 생기기 전에 만들어진 계정들은 메인 포켓몬이
+# **랜덤으로 배정된 것**(위 STARTER_POOL에서 뽑음)이라 본인이 고른 적이 없어요.
+# 웹은 이런 계정을 `needsStarterChoice`로 판별해 스타팅 재선택을 띄우는데, 봇 `/프로필`만
+# 그 규칙을 몰라서 고른 적 없는 포켓몬을 계속 보여주고 있었어요. (2026-09-04 수정)
+CUSTOM_STARTERS = ["까멍이", "오로리", "타누비"]
+
 STAT_KEYS = ["hp", "attack", "defense", "spAttack", "spDefense", "speed"]
 
 NATURES = {

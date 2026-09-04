@@ -1,3 +1,4 @@
+import logging
 import calendar
 import datetime
 import os
@@ -10,6 +11,8 @@ from discord.ext import commands, tasks
 
 from utils.birthday_store import delete_birthday, get_all_birthdays, get_birthday, set_birthday
 from utils.settings_store import get_setting, set_setting
+
+log = logging.getLogger(__name__)
 
 KST = ZoneInfo("Asia/Seoul")
 ANNOUNCE_TIME = datetime.time(hour=9, minute=0, tzinfo=KST)  # 매일 오전 9시(한국시간)에 확인해요
@@ -69,7 +72,7 @@ class Birthday(commands.Cog):
         existing = discord.utils.get(guild.text_channels, name=DEFAULT_CHANNEL_NAME)
         if existing is not None:
             set_setting(setting_key, existing.id)
-            print(f"🎂 '{guild.name}' 서버의 기존 '#{existing.name}' 채널을 생일 알림용으로 재사용해요.")
+            log.info(f"🎂 '{guild.name}' 서버의 기존 '#{existing.name}' 채널을 생일 알림용으로 재사용해요.")
             return existing
 
         try:
@@ -77,11 +80,11 @@ class Birthday(commands.Cog):
                 DEFAULT_CHANNEL_NAME, reason="생일 알림용 채널 자동 생성"
             )
         except discord.Forbidden:
-            print(f"⚠️ '{guild.name}' 서버에 채널을 만들 권한이 없어요. (봇 권한에 '채널 관리'가 필요해요)")
+            log.warning(f"⚠️ '{guild.name}' 서버에 채널을 만들 권한이 없어요. (봇 권한에 '채널 관리'가 필요해요)")
             return None
 
         set_setting(setting_key, channel.id)
-        print(f"🎂 '{guild.name}' 서버에 '#{channel.name}' 채널을 자동으로 만들었어요.")
+        log.info(f"🎂 '{guild.name}' 서버에 '#{channel.name}' 채널을 자동으로 만들었어요.")
         return channel
 
     @app_commands.command(name="생일등록", description="생일을 등록합니다. (매년 그날 자동으로 축하 메시지가 올라가요)")

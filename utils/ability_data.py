@@ -31,14 +31,14 @@ def get_ability_pool(species_name: str) -> dict:
     return _ABILITIES_CACHE.get(species_name, {"normal": [], "hidden": None})
 
 
-def roll_ability(species_name: str) -> str:
+def roll_ability(species_name: str, hidden_chance: float = HIDDEN_ABILITY_CHANCE) -> str:
     """해당 포켓몬의 특성을 하나 확률적으로 뽑아요.
-    숨겨진 특성이 있으면 0.5% 확률로 그걸, 나머지는 일반 특성 중 랜덤 1개예요."""
+    숨겨진 특성이 있으면 hidden_chance 확률로 그걸, 나머지는 일반 특성 중 랜덤 1개예요."""
     pool = get_ability_pool(species_name)
     normal = pool.get("normal") or []
     hidden = pool.get("hidden")
 
-    if hidden and random.random() < HIDDEN_ABILITY_CHANCE:
+    if hidden and random.random() < hidden_chance:
         return hidden
     if normal:
         return random.choice(normal)

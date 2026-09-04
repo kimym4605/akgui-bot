@@ -21,6 +21,7 @@
 설정 방법 (.env):
   KARAOKE_VOICE_CHANNEL_ID=노래방_채널ID   ← 없으면 채널 제한 없이 아무 음성채널에서나 동작해요.
 """
+import logging
 import asyncio
 import os
 import random
@@ -31,6 +32,10 @@ import discord
 import yt_dlp
 from discord import app_commands
 from discord.ext import commands
+
+from utils.channel_check import get_allowed_channel_id
+
+log = logging.getLogger(__name__)
 
 YTDL_OPTIONS = {
     "format": "bestaudio/best",
@@ -128,16 +133,22 @@ def _build_track_embed(track: "Track", *, status: str, extra_field: tuple[str, s
     return embed
 
 
+# 노래방 음성채널도 /채널설정("노래방 음성채널")로 지정해요.
+# .env의 KARAOKE_VOICE_CHANNEL_ID는 설정이 없을 때만 쓰는 기본값으로 남겨뒀어요.
+KARAOKE_CHANNEL_GROUP = "karaoke"
+KARAOKE_CHANNEL_ENV = "KARAOKE_VOICE_CHANNEL_ID"
+
+
 def _get_karaoke_channel_id() -> int | None:
-    raw = os.getenv("KARAOKE_VOICE_CHANNEL_ID")
-    if not raw or not raw.isdigit():
-        return None
-    return int(raw)
+    return get_allowed_channel_id(KARAOKE_CHANNEL_GROUP, KARAOKE_CHANNEL_ENV)
 
 
 def require_karaoke_channel():
-    """이 데코레이터를 붙인 명령어는 KARAOKE_VOICE_CHANNEL_ID로 지정한 음성채널에
-    들어가 있는 사람만 쓸 수 있어요. 설정 안 했으면 제한 없이 아무 음성채널에서나 동작해요."""
+    """이 데코레이터를 붙인 명령어는 지정한 노래방 음성채널에 들어가 있는 사람만 쓸 수 있어요.
+    설정도 .env도 없으면 제한 없이 아무 음성채널에서나 동작해요.
+
+    ⚠️ 다른 명령어들과 달리 "명령어를 친 채널"이 아니라 "지금 들어가 있는 음성채널"을 보기
+    때문에, 공용 restrict_to_channel을 쓰지 않고 여기서 따로 판단해요."""
 
     async def predicate(interaction: discord.Interaction) -> bool:
         channel_id = _get_karaoke_channel_id()
@@ -170,6 +181,18 @@ class Track:
     thumbnail: str | None = None
 
 
+# 반복 재생 모드예요. /반복 으로 바꿔요.
+REPEAT_OFF = "off"
+REPEAT_ONE = "one"
+REPEAT_ALL = "all"
+
+REPEAT_LABELS = {
+    REPEAT_OFF: "➡️ 반복 끄기",
+    REPEAT_ONE: "🔂 한 곡 반복",
+    REPEAT_ALL: "🔁 전체 반복",
+}
+
+
 @dataclass
 class GuildMusicState:
     queue: deque[Track] = field(default_factory=deque)
@@ -177,6 +200,10 @@ class GuildMusicState:
     text_channel: discord.abc.Messageable | None = None
     idle_task: asyncio.Task | None = None
     volume: float = 1.0  # 0.0~2.0 (0~200%)
+    repeat_mode: str = REPEAT_OFF
+    # /스킵으로 넘어온 경우엔 "한 곡 반복"이라도 같은 곡을 다시 틀면 안 되니까(영원히 안 넘어가요)
+    # 이 표시를 세워두고 _play_next에서 한 번만 건너뛰어요.
+    skip_repeat_once: bool = False
 
 
 # ============================================================
@@ -281,23 +308,37 @@ class Music(commands.Cog):
         if voice_client is None:
             return
 
-        if not state.queue:
-            state.current = None
-            self._schedule_idle_leave(guild)
-            return
+        # 방금 끝난 곡을 반복 설정에 따라 대기열에 돌려놔요. 큐가 비었는지 확인하기 **전에**
+        # 해야, 마지막 곡이 끝나도 반복이 이어져요.
+        previous = state.current
+        if previous is not None:
+            if state.repeat_mode == REPEAT_ONE and not state.skip_repeat_once:
+                state.queue.appendleft(previous)  # 같은 곡을 바로 다시
+            elif state.repeat_mode == REPEAT_ALL:
+                state.queue.append(previous)  # 맨 뒤로 보내서 한 바퀴 돌게
+        state.skip_repeat_once = False
 
-        track = state.queue.popleft()
-        state.current = track
+        # 추출에 실패한 곡은 건너뛰고 다음 곡으로 넘어가요. 예전엔 여기서 자기 자신을
+        # 다시 호출(재귀)했는데, 연속으로 실패하면 재귀가 계속 깊어져서 반복문으로 바꿨어요.
+        loop = asyncio.get_running_loop()
+        while True:
+            if not state.queue:
+                state.current = None
+                self._schedule_idle_leave(guild)
+                return
 
-        try:
-            loop = asyncio.get_running_loop()
-            info = await loop.run_in_executor(None, _extract_sync, track.webpage_url)
-            stream_url = info["url"]
-        except Exception as e:  # noqa: BLE001
-            if state.text_channel is not None:
-                await state.text_channel.send(f"⚠️ **{track.title}** 재생 준비 중 오류가 나서 건너뛸게요. ({e})")
-            await self._play_next(guild)
-            return
+            track = state.queue.popleft()
+            state.current = track
+
+            try:
+                info = await loop.run_in_executor(None, _extract_sync, track.webpage_url)
+                stream_url = info["url"]
+                break
+            except Exception as e:  # noqa: BLE001
+                if state.text_channel is not None:
+                    await state.text_channel.send(
+                        f"⚠️ **{track.title}** 재생 준비 중 오류가 나서 건너뛸게요. ({e})"
+                    )
 
         source = discord.PCMVolumeTransformer(
             discord.FFmpegPCMAudio(stream_url, before_options=FFMPEG_BEFORE_OPTIONS, options=FFMPEG_OPTIONS),
@@ -305,13 +346,24 @@ class Music(commands.Cog):
         )
 
         def _after(error):
+            # ⚠️ 이 콜백은 이벤트 루프가 아니라 **오디오 재생 스레드**에서 불려요.
+            # 예전엔 여기서 fut.result()로 다음 곡 준비가 끝날 때까지 기다렸는데, 그러면
+            # 재생 스레드가 묶인 채 이벤트 루프까지 같은 락을 기다리다 통째로 멈춰버려요.
+            # (2026-09-02 프로덕션에서 "heartbeat blocked for more than 10 seconds" 발생 →
+            #  소리가 끊기고 봇이 잠깐 먹통이 됨.) 그래서 기다리지 않고 예약만 하고,
+            # 실패하면 콜백으로 로그만 남겨요.
             if error:
-                print(f"⚠️ 음악 재생 중 오류: {error}")
-            fut = asyncio.run_coroutine_threadsafe(self._play_next(guild), self.bot.loop)
-            try:
-                fut.result()
-            except Exception as e:  # noqa: BLE001
-                print(f"⚠️ 다음 곡 재생 예약 실패: {e}")
+                log.warning(f"⚠️ 음악 재생 중 오류: {error}")
+
+            future = asyncio.run_coroutine_threadsafe(self._play_next(guild), self.bot.loop)
+
+            def _log_failure(done):
+                try:
+                    done.result()
+                except Exception as e:  # noqa: BLE001
+                    log.warning(f"⚠️ 다음 곡 재생 예약 실패: {e}")
+
+            future.add_done_callback(_log_failure)
 
         voice_client.play(source, after=_after)
 
@@ -493,8 +545,37 @@ class Music(commands.Cog):
         if voice_client is None or (not voice_client.is_playing() and not voice_client.is_paused()):
             await interaction.response.send_message("지금 재생 중인 노래가 없어요.", ephemeral=True)
             return
+        # "한 곡 반복" 중에 스킵하면 같은 곡이 또 나와서 영영 안 넘어가요. 이번 한 번만
+        # 반복을 건너뛰게 표시해두고 넘겨요(반복 설정 자체는 그대로 유지돼요).
+        self._get_state(interaction.guild.id).skip_repeat_once = True
         voice_client.stop()  # after 콜백이 자동으로 다음 곡을 재생해요.
         await interaction.response.send_message("⏭️ 건너뛸게요.")
+
+    @app_commands.command(name="반복", description="반복 재생을 설정해요. (끄기 / 한 곡 반복 / 전체 반복)")
+    @app_commands.describe(모드="비우면 지금 설정이 뭔지만 알려줘요.")
+    @app_commands.choices(모드=[
+        app_commands.Choice(name="➡️ 반복 끄기", value=REPEAT_OFF),
+        app_commands.Choice(name="🔂 한 곡 반복 (지금 곡만 계속)", value=REPEAT_ONE),
+        app_commands.Choice(name="🔁 전체 반복 (대기열을 한 바퀴씩)", value=REPEAT_ALL),
+    ])
+    @require_karaoke_channel()
+    async def repeat(self, interaction: discord.Interaction, 모드: app_commands.Choice[str] = None):
+        state = self._get_state(interaction.guild.id)
+
+        if 모드 is None:
+            await interaction.response.send_message(
+                f"지금 반복 설정: **{REPEAT_LABELS[state.repeat_mode]}**", ephemeral=True
+            )
+            return
+
+        state.repeat_mode = 모드.value
+        if 모드.value == REPEAT_OFF:
+            message = "➡️ 반복을 껐어요. 대기열이 끝나면 그대로 멈춰요."
+        elif 모드.value == REPEAT_ONE:
+            message = "🔂 **한 곡 반복**으로 바꿨어요. 지금 곡이 계속 다시 재생돼요. (`/스킵`으로 다음 곡 이동)"
+        else:
+            message = "🔁 **전체 반복**으로 바꿨어요. 대기열이 끝나면 처음부터 다시 돌아요."
+        await interaction.response.send_message(message)
 
     @app_commands.command(name="정지", description="재생을 멈추고 대기열을 비운 뒤 음성채널에서 나가요.")
     @require_karaoke_channel()
@@ -505,12 +586,16 @@ class Music(commands.Cog):
             await interaction.response.send_message("지금 음성채널에 있지 않아요.", ephemeral=True)
             return
 
+        # 음성 연결 끊기는 게이트웨이 상태가 나쁠 때 늘어질 수 있어요(2026-09-04 사고 때
+        # 음성 재연결이 계속 실패했었죠). 응답을 먼저 잡아두고 진행해요.
+        await interaction.response.defer()
+
         self._cancel_idle_timer(guild.id)
         state = self._get_state(guild.id)
         state.queue.clear()
         await voice_client.disconnect(force=True)
         self.states.pop(guild.id, None)
-        await interaction.response.send_message("🛑 재생을 멈추고 나갔어요.")
+        await interaction.followup.send("🛑 재생을 멈추고 나갔어요.")
 
     @app_commands.command(name="음량", description="재생 음량을 조절해요. (0~200%, 기본 100%)")
     @app_commands.describe(퍼센트="설정할 음량 (0~200). 비우면 현재 음량만 확인해요.")
@@ -564,6 +649,10 @@ class Music(commands.Cog):
         else:
             embed.add_field(name="대기 중", value="(없음)", inline=False)
 
+        # 반복이 켜져 있으면 "대기열이 비었는데 왜 안 끝나지?" 하고 헷갈리니 같이 보여줘요.
+        if state.repeat_mode != REPEAT_OFF:
+            embed.set_footer(text=f"{REPEAT_LABELS[state.repeat_mode]} 중 · /반복 으로 변경")
+
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="대기열삭제", description="대기열에서 특정 곡을 삭제해요.")
@@ -615,7 +704,7 @@ class Music(commands.Cog):
             state.queue.clear()
             await voice_client.disconnect(force=True)
             self.states.pop(guild.id, None)
-            print(f"🎤 '{before.channel.name}'에 아무도 없어서 음악 재생을 멈추고 나갔어요.")
+            log.info(f"🎤 '{before.channel.name}'에 아무도 없어서 음악 재생을 멈추고 나갔어요.")
 
 
 async def setup(bot: commands.Bot):

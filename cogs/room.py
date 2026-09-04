@@ -7,6 +7,7 @@
 새 종류의 방을 추가하려면 ROOM_KINDS에 항목 하나만 추가하면 돼요. (필요하면 .env에
 카테고리_ID 환경변수도 같이 추가 — 안 넣으면 서버 최상위에 방이 생성돼요)
 """
+import logging
 import json
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from discord.ext import commands
 from utils import room_store
 from utils.channel_check import restrict_to_channel
 from utils.dynamic_room import DynamicRoomEngine
+
+log = logging.getLogger(__name__)
 
 # 예전에는 방 종류별로 파일이 따로 있었어요(rank_room_store.py, practice_room_store.py).
 # 통합 시스템(room_store.py)으로 바뀌면서, 이미 만들어져 있던 방들이 관리 대상에서
@@ -46,7 +49,7 @@ def _migrate_legacy_stores():
                 migrated += 1
         path.unlink(missing_ok=True)  # 다 옮겼으니 예전 파일은 정리해요.
     if migrated:
-        print(f"🔁 예전 방 시스템에서 {migrated}개 방을 새 통합 시스템으로 옮겼어요.")
+        log.info(f"🔁 예전 방 시스템에서 {migrated}개 방을 새 통합 시스템으로 옮겼어요.")
 
 ROOM_KINDS: dict[str, dict] = {
     "rank": {

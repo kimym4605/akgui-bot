@@ -6,6 +6,8 @@
 그래서 "본인이 미리 등록해둔 계정을 조회할 때만" 역할이 갱신되도록, 등록 여부를 여기서 관리해요.
 """
 import json
+
+from utils import atomic_json
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -23,8 +25,8 @@ def _load() -> dict:
 
 
 def _save(data: dict):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 원자적 쓰기 - 도중에 죽어도 기존 파일이 안 깨져요. (utils/atomic_json.py 주석 참고)
+    atomic_json.write_json(DATA_FILE, data)
 
 
 def set_account(discord_id: int, name: str, tag: str):

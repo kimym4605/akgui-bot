@@ -11,6 +11,7 @@ from utils.pokemon_store import (
     attend,
     exp_needed,
     get_trainer,
+    has_custom_starter,
     has_trainer,
     reset_user,
     save_trainer,
@@ -49,16 +50,18 @@ class Attendance(commands.Cog):
     @app_commands.command(name="출석", description="오늘의 출석체크를 합니다. (하루 1회, 악귀코인 획득)")
     @restrict_to_channel("attend")
     async def do_attend(self, interaction: discord.Interaction):
-        if not has_trainer(interaction.user.id):
-            await interaction.response.send_message(
+        # DB를 건드리기 전에 먼저 defer해요. DB 왕복이 3초를 넘기면 디스코드가
+        # "애플리케이션이 응답하지 않았습니다"로 끊어버리거든요.
+        await interaction.response.defer()
+
+        if not await has_trainer(interaction.user.id):
+            await interaction.followup.send(
                 "아직 포켓몬을 키우기 전이에요! 악귀포켓몬 웹사이트에서 먼저 스타팅 포켓몬을 선택해주세요.",
                 ephemeral=True,
             )
             return
 
-        await interaction.response.defer()
-
-        success, result = attend(interaction.user.id)
+        success, result = await attend(interaction.user.id)
 
         if not success:
             trainer = result
@@ -87,10 +90,24 @@ class Attendance(commands.Cog):
     @app_commands.command(name="프로필", description="내 포켓몬 트레이너 프로필을 봐요.")
     @restrict_to_channel("attendance")
     async def profile(self, interaction: discord.Interaction):
-        trainer = get_trainer(interaction.user.id)
+        await interaction.response.defer()
+
+        trainer = await get_trainer(interaction.user.id)
         if trainer is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "아직 포켓몬을 키우기 전이에요! 악귀포켓몬 웹사이트에서 먼저 스타팅 포켓몬을 선택해주세요.",
+                ephemeral=True,
+            )
+            return
+
+        # 정식 스타팅 제도 이전 계정은 메인 포켓몬이 **랜덤으로 배정된 것**이라,
+        # 본인이 고른 적이 없는 포켓몬이에요. 웹은 이미 이런 계정에 스타팅 재선택을 띄우는데
+        # 봇만 그 포켓몬을 자기 포켓몬처럼 보여주고 있었어요. 고르기 전엔 안 보여줘요.
+        if not has_custom_starter(trainer):
+            await interaction.followup.send(
+                "아직 스타팅 포켓몬을 고르지 않으셨어요!\n"
+                "악귀포켓몬 웹사이트에서 **까멍이 · 오로리 · 타누비** 중 하나를 고르면 바로 시작할 수 있어요.\n"
+                f"-# 지금까지 `/출석`으로 모은 악귀코인 **{trainer.get('coin', 0)}개**는 그대로 남아있어요.",
                 ephemeral=True,
             )
             return
@@ -125,7 +142,7 @@ class Attendance(commands.Cog):
         embed.set_image(url=sprite_url(trainer["currentPokemon"]))
         embed.set_footer(text=f"기본형: {trainer['basePokemon']}")
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="출석리셋", description="[서버 소유자 전용/테스트용] 내 트레이너 데이터를 전부 초기화해요.")
     @restrict_to_channel("attendance")
@@ -134,13 +151,15 @@ class Attendance(commands.Cog):
             await interaction.response.send_message("이 명령어는 서버 소유자만 쓸 수 있어요.", ephemeral=True)
             return
 
-        had_data = reset_user(interaction.user.id)
+        await interaction.response.defer(ephemeral=True)
+
+        had_data = await reset_user(interaction.user.id)
 
         if not had_data:
-            await interaction.response.send_message("초기화할 데이터가 없어요.", ephemeral=True)
+            await interaction.followup.send("초기화할 데이터가 없어요.", ephemeral=True)
             return
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "🧹 트레이너 데이터를 초기화했어요. `/시작`으로 새로 시작해보세요!",
             ephemeral=True,
         )
@@ -169,9 +188,11 @@ class Attendance(commands.Cog):
             )
             return
 
-        trainer = get_trainer(interaction.user.id)
+        await interaction.response.defer(ephemeral=True)
+
+        trainer = await get_trainer(interaction.user.id)
         if trainer is None:
-            trainer = start_trainer(interaction.user.id)
+            trainer = await start_trainer(interaction.user.id)
 
         trainer["basePokemon"] = target_base
         trainer["currentPokemon"] = 포켓몬
@@ -181,7 +202,7 @@ class Attendance(commands.Cog):
         trainer["ability"] = roll_ability(포켓몬)
         trainer["stats"] = calculate_stats(포켓몬, 레벨, trainer["iv"], trainer["nature"])
 
-        save_trainer(interaction.user.id, trainer)
+        await save_trainer(interaction.user.id, trainer)
 
         embed = discord.Embed(
             title="🛠️ 테스트용 포켓몬 설정 완료",
@@ -189,7 +210,7 @@ class Attendance(commands.Cog):
             color=0xE67E22,
         )
         embed.set_image(url=sprite_url(포켓몬))
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @set_pokemon.autocomplete("포켓몬")
     async def set_pokemon_autocomplete(self, interaction: discord.Interaction, current: str):
@@ -204,22 +225,49 @@ class Attendance(commands.Cog):
 
         return [app_commands.Choice(name=n, value=n) for n in matches]
 
-    @app_commands.command(name="채널설정", description="[서버 소유자 전용] 포켓몬/방 명령어를 쓸 수 있는 채널을 지정해요.")
-    @app_commands.describe(기능="채널을 지정할 명령어 그룹", 채널="이 그룹의 명령어를 허용할 채널")
+    # 노래방만 "명령어를 친 채널"이 아니라 "들어가 있는 음성채널"을 보기 때문에 음성채널을 받아요.
+    VOICE_GROUPS = {"karaoke"}
+
+    @app_commands.command(name="채널설정", description="[서버 소유자 전용] 각 명령어를 쓸 수 있는 채널을 지정해요.")
+    @app_commands.describe(기능="채널을 지정할 명령어 그룹", 채널="이 그룹의 명령어를 허용할 채널 (노래방만 음성채널)")
     @app_commands.choices(기능=[
         app_commands.Choice(name="출석 명령어 (/출석)", value="attend"),
         app_commands.Choice(name="육성 명령어 (/시작, /프로필 등)", value="attendance"),
         app_commands.Choice(name="즉석생성형 통화방 명령어 (/방만들기 등)", value="room"),
         app_commands.Choice(name="전적 조회 명령어 (/전적)", value="tier_lookup"),
+        app_commands.Choice(name="발로란트 개인 상점 (/오상)", value="valorant_shop"),
+        app_commands.Choice(name="노래방 음성채널 (/재생 등) — 음성채널을 골라주세요", value="karaoke"),
     ])
-    async def set_channel(self, interaction: discord.Interaction, 기능: app_commands.Choice[str], 채널: discord.TextChannel):
+    async def set_channel(
+        self,
+        interaction: discord.Interaction,
+        기능: app_commands.Choice[str],
+        채널: discord.TextChannel | discord.VoiceChannel,
+    ):
         if interaction.guild is None or interaction.user.id != interaction.guild.owner_id:
             await interaction.response.send_message("이 명령어는 서버 소유자만 쓸 수 있어요.", ephemeral=True)
             return
 
+        # 그룹마다 필요한 채널 종류가 달라서, 잘못 고르면 저장하기 전에 막아줘요.
+        wants_voice = 기능.value in self.VOICE_GROUPS
+        is_voice = isinstance(채널, discord.VoiceChannel)
+        if wants_voice and not is_voice:
+            await interaction.response.send_message(
+                f"**{기능.name}**는 음성채널을 골라주세요. (지금 고른 {채널.mention}은 텍스트 채널이에요)",
+                ephemeral=True,
+            )
+            return
+        if not wants_voice and is_voice:
+            await interaction.response.send_message(
+                f"**{기능.name}**는 텍스트 채널을 골라주세요. (지금 고른 {채널.mention}은 음성채널이에요)",
+                ephemeral=True,
+            )
+            return
+
         set_setting(channel_key(기능.value), 채널.id)
+        where = "음성채널에 들어가 있어야" if wants_voice else "채널에서만"
         await interaction.response.send_message(
-            f"✅ **{기능.name}**는 이제 {채널.mention} 채널에서만 사용할 수 있어요.",
+            f"✅ **{기능.name}**는 이제 {채널.mention} {where} 사용할 수 있어요.",
             ephemeral=True,
         )
 

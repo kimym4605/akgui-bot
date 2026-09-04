@@ -7,6 +7,8 @@
 "이 서버에서 조회된 유저 중 상위 X%" 처럼 모수를 명시해야 해요.
 """
 import json
+
+from utils import atomic_json
 from pathlib import Path
 from typing import Optional
 
@@ -27,8 +29,8 @@ def _load() -> dict:
 
 
 def _save(data: dict):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 원자적 쓰기 - 도중에 죽어도 기존 파일이 안 깨져요. (utils/atomic_json.py 주석 참고)
+    atomic_json.write_json(DATA_FILE, data)
 
 
 def record_stats(riot_id: str, kd: float, agwi_score: float):

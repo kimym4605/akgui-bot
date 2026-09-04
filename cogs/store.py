@@ -9,6 +9,7 @@
 HenrikDev의 store-featured 엔드포인트는 라이엇 원본 포맷(아이템 UUID)을 그대로 주기 때문에,
 valorant-api.com의 스킨 목록(utils/valorant_skins.py)으로 UUID -> 실제 이름/이미지를 매칭해요.
 """
+import logging
 import os
 from typing import Optional
 
@@ -18,6 +19,8 @@ from discord.ext import commands
 import aiohttp
 
 from utils import valorant_skins
+
+log = logging.getLogger(__name__)
 
 HENRIK_BASE = "https://api.henrikdev.xyz"
 
@@ -48,7 +51,7 @@ class Store(commands.Cog):
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
         if not valorant_skins.is_loaded():
             count = await valorant_skins.load(self.session)
-            print(f"🛒 스킨 매칭 데이터 {count}개를 불러왔어요.")
+            log.info(f"🛒 스킨 매칭 데이터 {count}개를 불러왔어요.")
 
     async def cog_unload(self):
         if self.session is not None:
@@ -123,7 +126,7 @@ class Store(commands.Cog):
                 status = resp.status
                 payload = await resp.json()
         except Exception as error:  # noqa: BLE001
-            print(error)
+            log.exception("피처드 상점 조회 중 예외: %s", error)
             await interaction.followup.send("피처드 번들 조회 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.")
             return
 

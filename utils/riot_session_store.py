@@ -7,6 +7,8 @@
 쓰면 돼요. 그래도 "봇 서버가 뚫리면 이 쿠키가 유출될 수 있다"는 리스크는 남아있어요.
 """
 import json
+
+from utils import atomic_json
 from pathlib import Path
 from typing import Optional
 
@@ -26,8 +28,8 @@ def _load() -> dict:
 
 
 def _save(data: dict):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 원자적 쓰기 - 도중에 죽어도 기존 파일이 안 깨져요. (utils/atomic_json.py 주석 참고)
+    atomic_json.write_json(DATA_FILE, data)
 
 
 def save_session(discord_id: int, cookie_header: str):
