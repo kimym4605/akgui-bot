@@ -267,6 +267,13 @@ class DynamicRoomEngine:
             self.channel_to_kind[channel_id] = kind
             recovered += 1
 
+            # 지금 방 안에 있는데 권한이 없는 사람을 여기서 같이 풀어줘요.
+            # 봇이 꺼져있는 동안 끌어와졌거나, 이 기능이 생기기 전에 들어와 있던 사람들이에요.
+            # (자세한 이유는 _grant_entry_on_join 주석 참고)
+            for m in channel.members:
+                if not m.bot:
+                    await self._grant_entry_on_join(channel, m)
+
         log.info(f"🔊 즉석생성형 통화방 복구 완료: {recovered}개 복구, {cleaned}개 정리됨.")
 
     # ============================================================
@@ -297,17 +304,30 @@ class DynamicRoomEngine:
             self._cleanup_tracking(existing_channel_id)  # 남아있던 오래된 기록 정리
 
         everyone = interaction.guild.default_role
-        overwrites = {
-            everyone: discord.PermissionOverwrite(view_channel=True, connect=False),
-            interaction.user: discord.PermissionOverwrite(
-                view_channel=True, connect=True, speak=True, send_messages=True
-            ),
-        }
+        category = self._get_category(interaction.guild, kind)
+
+        # ⚠️ `overwrites=`를 직접 넘기면 디스코드가 **카테고리 권한 동기화를 대체**해버려요.
+        # 그래서 예전엔 카테고리에 걸어둔 제한(예: 랭크방 카테고리의 `신입 역할 채널보기 차단`)이
+        # 봇이 만든 방에는 안 걸려서, 신입도 방 목록을 볼 수 있었어요. (2026-09-05 수정)
+        # 카테고리 권한을 먼저 그대로 물려받고, 그 위에 방 전용 권한을 얹어요.
+        overwrites: dict = {}
+        if category is not None:
+            overwrites.update(category.overwrites)
+
+        # @everyone: 목록에는 보이되 아무나 못 들어오게(잠금). 카테고리에 이미 @everyone 제한이
+        # 있으면 그걸 지우지 않고 이 두 개만 덮어써요.
+        everyone_ow = overwrites.get(everyone) or discord.PermissionOverwrite()
+        everyone_ow.update(view_channel=True, connect=False)
+        overwrites[everyone] = everyone_ow
+
+        owner_ow = overwrites.get(interaction.user) or discord.PermissionOverwrite()
+        owner_ow.update(view_channel=True, connect=True, speak=True, send_messages=True)
+        overwrites[interaction.user] = owner_ow
 
         try:
             channel = await interaction.guild.create_voice_channel(
                 name=f"{emoji}{interaction.user.display_name}의 {room_label}",
-                category=self._get_category(interaction.guild, kind),
+                category=category,
                 overwrites=overwrites,
                 user_limit=인원수 if 인원수 else 0,
                 reason=f"/방만들기 {room_label} 사용 (방장: {interaction.user.display_name})",
@@ -434,6 +454,45 @@ class DynamicRoomEngine:
     # ============================================================
     # 자동 삭제(방이 완전히 비면) + 퇴장 시 입장 권한 자동 회수 (cog의 on_voice_state_update에서 호출)
     # ============================================================
+    async def _grant_entry_on_join(self, channel: discord.VoiceChannel, member: discord.Member):
+        """방에 들어와 있는데 개인 권한이 없는 사람에게 입장 권한을 만들어줘요.
+
+        ⚠️ 왜 필요한가 (2026-09-05 "랭크방에서 채팅을 못 불러와요" 신고):
+
+        `/방초대`·`/방신청`을 거치지 않고도 방에 들어오는 경로가 하나 있어요 —
+        **방장(또는 멤버 이동 권한이 있는 사람)이 다른 음성채널에서 끌어오는 경우**예요.
+        이때는 봇을 안 거치니까 개인 오버라이드가 안 생겨요.
+
+        그러면 그 사람에게는 방 생성 시 걸어둔 `@everyone: 연결(connect) 거부`가 그대로
+        적용돼요. 음성으로는 이미 들어와 있으니 대화는 되는데, **디스코드는 연결 권한이 없으면
+        그 음성채널의 채팅(text-in-voice)을 못 쓰게 막아요.** 그래서 "방 안에 있는데 채팅만
+        안 불러와지는" 이상한 상태가 됐어요.
+
+        실제로 신고 당시 `🔒피츄민영의 랭크방`에는 4명이 끌려 들어와 있었는데
+        권한 목록에는 방장 1명뿐이었어요.
+
+        나갈 때 회수하는 로직은 그대로라, 이 권한도 방을 나가면 같이 사라져요.
+        """
+        if channel.overwrites_for(member).connect:
+            return  # 초대/신청으로 이미 권한이 있는 사람 (방장 포함)
+
+        room_label = self.label_for(channel.id)
+        try:
+            await channel.set_permissions(
+                member,
+                view_channel=True,
+                connect=True,
+                speak=True,
+                send_messages=True,
+                reason=f"{room_label}에 이동으로 들어와서 입장 권한 자동 부여 (채팅 사용 가능하도록)",
+            )
+            log.info(
+                f"🔑 {member.display_name}님이 권한 없이 '{channel.name}' {room_label}에 들어와 있어서 "
+                f"입장 권한을 부여했어요. (끌어오기로 입장한 것으로 보임)"
+            )
+        except (discord.Forbidden, discord.NotFound):
+            pass
+
     async def handle_voice_state_update(
         self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
     ):
@@ -442,6 +501,15 @@ class DynamicRoomEngine:
             task = self.owner_leave_tasks.pop(after.channel.id, None)
             if task is not None and not task.done():
                 task.cancel()
+
+        # 방에 새로 들어왔으면, 개인 권한이 없는 사람에게 만들어줘요. (아래 주석 참고)
+        entered_room = (
+            after.channel is not None
+            and after.channel.id in self.channel_to_owner
+            and (before.channel is None or before.channel.id != after.channel.id)
+        )
+        if entered_room and not member.bot:
+            await self._grant_entry_on_join(after.channel, member)
 
         if before.channel is None or before.channel.id not in self.channel_to_owner:
             return
