@@ -8,7 +8,6 @@ from utils.ability_data import roll_ability
 from utils.channel_check import channel_key, restrict_to_channel
 from utils.pokemon_data import EVOLUTION, STAT_KEYS, calculate_stats, sprite_url
 from utils.pokemon_store import (
-    attend,
     exp_needed,
     get_trainer,
     has_custom_starter,
@@ -17,6 +16,7 @@ from utils.pokemon_store import (
     save_trainer,
     start_trainer,
 )
+from utils import attend_service
 from utils.settings_store import set_setting
 
 COIN_IMAGE_PATH = Path(__file__).resolve().parent.parent / "assets" / "coin.png"
@@ -54,33 +54,32 @@ class Attendance(commands.Cog):
         # "애플리케이션이 응답하지 않았습니다"로 끊어버리거든요.
         await interaction.response.defer()
 
-        if not await has_trainer(interaction.user.id):
-            await interaction.followup.send(
-                "아직 포켓몬을 키우기 전이에요! 악귀포켓몬 웹사이트에서 먼저 스타팅 포켓몬을 선택해주세요.",
-                ephemeral=True,
-            )
-            return
-
-        success, result = await attend(interaction.user.id)
+        # 포켓몬을 시작하지 않았어도 출석할 수 있어요. 코인은 지갑에 쌓였다가, 나중에 웹에서
+        # 스타팅을 고르면 연속 출석 기록까지 그대로 따라가요. (utils/attend_service.py)
+        success, info = await attend_service.attend(interaction.user.id)
 
         if not success:
-            trainer = result
             await interaction.followup.send(
-                f"오늘은 이미 출석하셨어요. 보유 악귀코인: **{trainer.get('coin', 0)}개** "
-                f"· 연속 출석 **{trainer.get('attendanceStreak', 0)}일째** · 내일 또 출석해주세요!",
+                f"오늘은 이미 출석하셨어요. 보유 악귀코인: **{info['coin']}개** "
+                f"· 연속 출석 **{info['streak']}일째** · 내일 또 출석해주세요!",
                 ephemeral=True,
             )
             return
 
-        trainer = result["trainer"]
+        description = (
+            f"획득 악귀코인: **+{info['coinGain']}개**\n"
+            f"보유 악귀코인: **{info['coin']}개**\n"
+            f"🔥 연속 출석: **{info['streak']}일째**"
+        )
+        if not info["isTrainer"]:
+            description += (
+                "\n\n-# 아직 포켓몬을 시작하지 않았어요. 모아둔 코인과 연속 출석은 그대로 보관되고, "
+                "악귀포켓몬 웹사이트에서 스타팅을 고르면 **그대로 이어져요.**"
+            )
 
         embed = discord.Embed(
             title="✅ 출석 완료!",
-            description=(
-                f"획득 악귀코인: **+{result['coin_gain']}개**\n"
-                f"보유 악귀코인: **{trainer['coin']}개**\n"
-                f"🔥 연속 출석: **{trainer['attendanceStreak']}일째**"
-            ),
+            description=description,
             color=0x57F287,
         )
         embed.set_thumbnail(url="attachment://coin.png")
