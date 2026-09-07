@@ -19,10 +19,12 @@
       get_region() + get_entitlement()으로 정보를 모아서 get_storefront()까지.
 재로그인은 reauth_with_cookies()로 비밀번호 없이 쿠키만으로 처리해요.
 """
+import asyncio
 import logging
 import base64
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -47,6 +49,13 @@ class LoginResult:
     error: str = ""
     access_token: str = ""
     id_token: str = ""
+    # ⚠️ expired=True는 "라이엇이 이 쿠키를 더 이상 안 받아준다"가 확인된 경우에만이에요.
+    # 프록시 장애·타임아웃·라이엇 5xx 같은 일시적 실패는 ok=False지만 expired=False라,
+    # 이걸 만료로 오해해서 저장된 쿠키를 지우면 안 돼요(멀쩡한 유저가 재로그인하게 돼요).
+    expired: bool = False
+    # 재인증 직후 라이엇이 새로 내려준 쿠키예요. 라이엇은 재인증할 때마다 ssid를 새로 발급하고
+    # 이전 값을 무효화해서, 이걸 저장해두지 않으면 다음 조회부터 "만료"로 튕겨요.
+    cookie_header: str = ""
 
 # curl_cffi가 흉내낼 브라우저 TLS/HTTP2 지문이에요. 로그인 자체는 유저의 실제 브라우저가
 # 하니까 이건 우회 목적이 아니라, 그냥 이후 API 호출에 쓰는 HTTP 클라이언트예요.
@@ -130,14 +139,72 @@ def parse_redirect_url(url: str) -> Optional[tuple[str, str]]:
     return access_token, id_token
 
 
+# 유저가 붙여넣는 형태는 정말 제각각이에요. 아래 사례들을 전부 받아주려고 관대하게 파싱해요.
+#   ssid=eyJ...                                   ← 안내대로 붙여넣은 정상 케이스
+#   ssid=eyJ...; tdid=...; clid=...               ← Network 탭의 cookie 헤더를 통째로 복사
+#   cookie: ssid=eyJ...                           ← 헤더 이름까지 같이 복사
+#   eyJ...                                        ← Application 탭에서 "값" 칸만 복사
+#   ssid⇥eyJ...⇥auth.riotgames.com⇥/⇥…            ← Application 탭에서 "행"을 통째로 복사(탭 구분)
+#   "ssid=eyJ..."                                 ← 따옴표째 복사
+#   ssid: eyJ...                                  ← 콜론으로 적어 넣음
+#   여러 줄에 걸쳐 나뉜 형태                        ← 개행 구분
+_COOKIE_SPLIT = re.compile(r"[;\r\n]+")
+_QUOTES = "\"'“”‘’`"
+
+
 def _cookie_header_to_dict(cookie_header: str) -> dict:
-    cookies = {}
-    for part in cookie_header.split(";"):
-        if "=" not in part:
+    cookies: dict[str, str] = {}
+    for part in _COOKIE_SPLIT.split(cookie_header):
+        part = part.strip().strip(_QUOTES).strip()
+        if not part:
             continue
-        key, _, value = part.strip().partition("=")
-        cookies[key] = value
+
+        # Application 탭에서 행을 드래그해 복사하면 "ssid⇥값⇥도메인⇥경로⇥…"처럼 탭으로 갈려요.
+        # 이 경우 앞의 두 칸이 이름/값이고, 뒤는 도메인·만료일 같은 메타라 버리면 돼요.
+        if "\t" in part:
+            fields = [f.strip() for f in part.split("\t") if f.strip()]
+            if len(fields) >= 2:
+                cookies[fields[0].strip(_QUOTES)] = fields[1].strip(_QUOTES)
+                continue
+
+        key, sep, value = part.partition("=")
+        if not sep:
+            # "ssid: eyJ..."처럼 콜론으로 적은 경우도 받아줘요. JWT 값 안에는 콜론이 없어서
+            # 이렇게 폴백해도 멀쩡한 값을 잘못 자를 일이 없어요.
+            key, sep, value = part.partition(":")
+        if not sep:
+            continue
+
+        key = key.strip().strip(_QUOTES).strip()
+        value = value.strip().strip(_QUOTES).strip()
+        if key and value:
+            cookies[key] = value
     return cookies
+
+
+def _looks_like_jwt(value: str) -> bool:
+    """라이엇 ssid는 JWT라서 'eyJ'로 시작하고 점이 두 개 들어있어요."""
+    return value.startswith("ey") and value.count(".") >= 2
+
+
+def _normalize_cookie_input(raw: str) -> str:
+    """유저가 붙여넣은 원문을 표준 cookie 헤더 형태에 가깝게 다듬어요."""
+    text = raw.strip().strip(_QUOTES).strip()
+
+    # "cookie: ssid=..." / "Cookie ssid=..." 처럼 헤더 이름까지 복사해온 경우를 떼어내요.
+    lowered = text.lower()
+    for prefix in ("cookie:", "set-cookie:", "cookie ="):
+        if lowered.startswith(prefix):
+            text = text[len(prefix):].strip()
+            break
+
+    # 값만 복사해온 경우(ssid= 앞부분 없이 JWT만)엔 이름을 붙여줘요. 예전엔 이 보정이 없어서
+    # "세션 만료"라는 엉뚱한 안내가 나갔어요. 중간에 줄바꿈이 섞여 들어오는 일도 잦아서
+    # 공백류를 먼저 걷어내고 판단해요.
+    compact = "".join(text.split())
+    if "=" not in compact and ":" not in compact and _looks_like_jwt(compact):
+        return f"ssid={compact}"
+    return text
 
 
 def _dict_to_cookie_header(cookies: dict) -> str:
@@ -148,15 +215,8 @@ async def reauth_with_cookies(cookie_header: str) -> tuple[LoginResult, AsyncSes
     """저장해둔 쿠키(ssid 등)로 비밀번호 없이 재로그인해요. 세션이 아직 살아있으면
     바로 access_token이 담긴 리다이렉트가 돌아오고, 만료됐으면 ok=False로 다시
     로그인(또는 쿠키 재등록)을 해달라고 해야 해요."""
-    # DevTools에서 "cookie: ssid=..." 처럼 헤더 이름까지 통째로 복사해오는 실수를 방지해요.
-    cookie_header = cookie_header.strip()
-    if cookie_header.lower().startswith("cookie:"):
-        cookie_header = cookie_header.split(":", 1)[1].strip()
-
-    # Application 탭에서 ssid의 "값"만 복사해오는 경우도 많아요(ssid= 앞부분 없이 JWT만).
-    # 그럴 땐 파싱 결과가 비어서 "세션 만료"라는 엉뚱한 안내가 나가니까 여기서 보정해요.
-    if "=" not in cookie_header and cookie_header.startswith("eyJ"):
-        cookie_header = f"ssid={cookie_header}"
+    # 붙여넣기 형태가 제각각이라(헤더 이름째 복사, 값만 복사, 탭/개행 섞임 등) 여기서 다듬어요.
+    cookie_header = _normalize_cookie_input(cookie_header)
 
     session = new_session()
     cookies = _cookie_header_to_dict(cookie_header)
@@ -164,7 +224,28 @@ async def reauth_with_cookies(cookie_header: str) -> tuple[LoginResult, AsyncSes
         return (
             LoginResult(
                 ok=False,
-                error="쿠키 값을 읽지 못했어요. `ssid=eyJ...` 형태로 붙여넣어주세요.",
+                # 값 자체가 깨진 거라 재시도해도 안 살아나요. 저장돼 있었다면 지우는 게 맞아요.
+                expired=True,
+                error=(
+                    "붙여넣은 값에서 쿠키를 읽지 못했어요. `ssid=eyJ...` 형태로 붙여넣어주세요. "
+                    "(`❔ 쿠키 등록 방법` 버튼에 그림처럼 순서가 적혀 있어요.)"
+                ),
+            ),
+            session,
+        )
+    # ssid가 없으면 라이엇은 그냥 "로그인 안 된 상태"로 처리해서, 아래에서 만료와 똑같은 응답이
+    # 돌아와요. 그러면 멀쩡한 사람에게 "세션 만료"라고 안내하게 되니 여기서 미리 갈라줘요.
+    if "ssid" not in cookies:
+        found = ", ".join(f"`{k}`" for k in sorted(cookies)[:6]) or "없음"
+        return (
+            LoginResult(
+                ok=False,
+                expired=True,
+                error=(
+                    "붙여넣은 값에 로그인 세션 쿠키인 **`ssid`** 가 없어요 (읽어낸 쿠키: "
+                    f"{found}). 쿠키 목록에서 **`auth.riotgames.com`** 을 고른 뒤 이름이 "
+                    "정확히 **`ssid`** 인 줄의 값을 복사해주세요."
+                ),
             ),
             session,
         )
@@ -182,50 +263,153 @@ async def reauth_with_cookies(cookie_header: str) -> tuple[LoginResult, AsyncSes
             allow_redirects=False,
         )
         location = resp.headers.get("Location", "")
+        status = resp.status_code
     except Exception as error:  # noqa: BLE001
+        # 프록시/네트워크 문제예요. 쿠키는 멀쩡할 수 있으니 expired로 올리지 않아요.
+        log.warning(f"⚠️ 오상 재인증 연결 실패: {error}")
         return LoginResult(ok=False, error=f"라이엇 서버 연결에 실패했어요: {error}"), session
+
+    # 재인증 직후의 쿠키를 여기서 바로 떠둬요. 이 뒤에 게임 서버(pd.*.pvp.net) 호출이 이어지면
+    # 그쪽 쿠키까지 같은 병에 섞여서, 나중에 뜨면 auth용 쿠키 헤더가 지저분해져요.
+    refreshed = _dict_to_cookie_header(dict(session.cookies))
 
     parsed = parse_redirect_url(location)
     if not parsed:
-        return LoginResult(ok=False, error="저장된 세션이 만료됐어요. 쿠키를 다시 등록해주세요."), session
+        # 라이엇/프록시가 잠깐 맛이 간 것과, 쿠키가 진짜 죽은 걸 구분해요.
+        if status >= 500 or status in (408, 429):
+            log.warning(f"⚠️ 오상 재인증 일시 실패(status={status}) — 만료로 취급하지 않아요.")
+            return (
+                LoginResult(
+                    ok=False,
+                    error="라이엇 서버가 일시적으로 응답하지 않아요. 잠시 후 다시 시도해주세요.",
+                ),
+                session,
+            )
+
+        # ⚠️ 여기까지 왔다는 건 "라이엇이 토큰을 안 줬다"는 것뿐이라, 원인이 여러 가지예요
+        # (쿠키가 진짜 만료 / 값이 잘려서 복사됨 / 복사한 뒤 브라우저에서 ssid가 회전됨 등).
+        # 예전엔 전부 "세션 만료"로 뭉뚱그려 안내하고 로그도 안 남겨서 원인을 못 좁혔어요.
+        # 실패 응답엔 토큰이 없으니 Location을 찍어도 민감정보가 새지 않아요.
+        fragment = location.split("#", 1)[1] if "#" in location else ""
+        riot_error = dict(parse_qsl(fragment)).get("error", "") if fragment else ""
+        ssid_len = len(cookies.get("ssid", ""))
+        log.warning(
+            f"⚠️ 오상 재인증 거부: status={status} riot_error={riot_error or '-'} "
+            f"쿠키={sorted(cookies)} ssid길이={ssid_len} location={location[:120] or '(없음)'}"
+        )
+
+        # 라이엇이 "이 세션 못 쓴다"고 판단하면 로그인 페이지로 303 리다이렉트를 보내요
+        # (2026-09-07 죽은 쿠키로 직접 확인: status=303 → authenticate.riotgames.com/login).
+        # 그게 아닌 예상 밖 응답(프록시·클라우드플레어의 403 같은 것)까지 만료로 단정하면,
+        # 멀쩡한 유저의 저장된 쿠키를 지워서 괜히 재등록하게 만들어요.
+        redirected_to_login = "authenticate.riotgames.com" in location or "/login" in location
+        if not redirected_to_login and not riot_error:
+            return (
+                LoginResult(
+                    ok=False,
+                    error=(
+                        f"라이엇 서버가 예상 밖의 응답을 보냈어요(status={status}). "
+                        "잠시 후 다시 시도해주세요."
+                    ),
+                ),
+                session,
+            )
+
+        # ssid는 JWT라 보통 800자 안팎이에요. 눈에 띄게 짧으면 값이 잘려서 복사된 거예요.
+        if ssid_len and (ssid_len < 200 or not _looks_like_jwt(cookies["ssid"])):
+            return (
+                LoginResult(
+                    ok=False,
+                    expired=True,
+                    error=(
+                        f"`ssid` 값이 잘려서 들어온 것 같아요(길이 {ssid_len}자). 값 칸을 "
+                        "**더블클릭한 뒤 `Ctrl+A` → `Ctrl+C`** 로 전체를 복사해주세요. "
+                        "드래그로 긁으면 화면에 보이는 데까지만 복사돼요."
+                    ),
+                ),
+                session,
+            )
+
+        return (
+            LoginResult(
+                ok=False,
+                expired=True,
+                error=(
+                    "라이엇이 이 쿠키로는 로그인을 안 받아줬어요(세션이 만료됐거나 값이 이미 "
+                    "바뀐 경우예요). 브라우저에서 라이엇에 **다시 로그인한 뒤 새로 복사해서 "
+                    "바로** 등록해주세요 — 복사한 다음 라이엇 페이지를 새로고침하거나 발로란트를 "
+                    "켜면 값이 바뀌어서 못 쓰게 돼요."
+                ),
+            ),
+            session,
+        )
 
     access_token, id_token = parsed
-    return LoginResult(ok=True, access_token=access_token, id_token=id_token), session
+    return (
+        LoginResult(
+            ok=True, access_token=access_token, id_token=id_token, cookie_header=refreshed
+        ),
+        session,
+    )
 
 
-async def refresh_stored_session(discord_id: int) -> bool:
+def persist_refreshed_cookie(discord_id: int, result: LoginResult) -> None:
+    """재인증에 성공했으면 라이엇이 새로 내려준 쿠키로 갈아끼워요.
+
+    ⚠️ 이걸 빼먹으면 안 돼요. 라이엇은 재인증할 때마다 ssid를 새로 발급하면서 이전 값을
+    무효화해서, 저장된 쿠키가 그대로 남아있으면 다음 조회에서 "만료"로 튕겨요. 예전엔 새벽 4시
+    갱신 루프에서만 저장하고 /오상·새로고침·위시리스트·/vp계산 경로는 회전된 쿠키를 버려서,
+    쿠키를 등록해둔 유저가 며칠에 한 번씩 재등록해야 하는 증상이 있었어요."""
+    from utils import riot_session_store  # 순환 import 방지용 지연 import
+
+    if not result.ok or not result.cookie_header:
+        return
+    riot_session_store.save_session(discord_id, result.cookie_header)
+
+
+async def refresh_stored_session(discord_id: int) -> str:
     """등록해둔 쿠키로 재인증하고, 라이엇이 새로 내려준 쿠키로 다시 저장해요(SkinPeek 등의
     발로란트 봇들이 쓰는 방식과 동일: 매번 갱신된 쿠키로 덮어써서 만료 시점을 계속 미뤄요).
-    성공하면 True, 쿠키가 아예 만료돼서 저장된 세션을 지웠으면 False."""
+
+    "refreshed"(갱신 성공) / "expired"(만료 확인돼서 삭제함) / "failed"(일시 실패, 그대로 둠)."""
     from utils import riot_session_store  # 순환 import 방지용 지연 import
 
     cookie_header = riot_session_store.get_session(discord_id)
     if not cookie_header:
-        return False
+        return "expired"
 
     result, session = await reauth_with_cookies(cookie_header)
     try:
-        if not result.ok:
+        if result.ok:
+            persist_refreshed_cookie(discord_id, result)
+            return "refreshed"
+        # 만료가 "확인된" 경우에만 지워요. 프록시가 잠깐 죽은 날 이걸 안 가리면
+        # 등록된 유저 쿠키가 한 번에 전부 날아가요(재로그인 반복 신고의 원인이었어요).
+        if result.expired:
             riot_session_store.delete_session(discord_id)
-            return False
-        riot_session_store.save_session(discord_id, _dict_to_cookie_header(dict(session.cookies)))
-        return True
+            return "expired"
+        return "failed"
     finally:
         await session.close()
 
 
-async def refresh_all_stored_sessions() -> tuple[int, int]:
-    """등록된 모든 유저 세션을 순회하며 재인증+쿠키 재저장을 해요. (갱신 성공수, 만료로 삭제된 수)를 반환해요."""
+async def refresh_all_stored_sessions() -> tuple[int, int, int]:
+    """등록된 모든 유저 세션을 순회하며 재인증+쿠키 재저장을 해요.
+    (갱신 성공수, 만료로 삭제된 수, 일시 실패해서 그대로 둔 수)를 반환해요."""
     from utils import riot_session_store  # 순환 import 방지용 지연 import
 
     refreshed = 0
     expired = 0
+    failed = 0
     for discord_id in riot_session_store.all_discord_ids():
-        if await refresh_stored_session(discord_id):
+        status = await refresh_stored_session(discord_id)
+        if status == "refreshed":
             refreshed += 1
-        else:
+        elif status == "expired":
             expired += 1
-    return refreshed, expired
+        else:
+            failed += 1
+    return refreshed, expired, failed
 
 
 def _decode_jwt_payload(token: str) -> Optional[dict]:
@@ -257,21 +441,57 @@ def riot_id_from_id_token(id_token: str) -> Optional[str]:
     return f"{game_name}#{tag_line}"
 
 
-async def get_entitlement(session: AsyncSession, access_token: str) -> Optional[str]:
+async def get_entitlement(
+    session: AsyncSession, access_token: str, attempts: int = 2, who: str = ""
+) -> Optional[str]:
+    """권한 토큰(entitlements_token)을 받아와요. 실패하면 None.
+
+    ⚠️ 이 호출은 주거용 프록시를 거쳐요(데이터센터 IP는 라이엇이 403으로 막아요). 프록시가
+    잠깐 흔들리면 여기서만 터지는데, 예전엔 그 예외가 `_fetch_storefront`의
+    `return_exceptions=True`에 그대로 삼켜져서 **로그가 한 줄도 안 남았어요.** 유저에겐
+    "권한 토큰을 못 받았어요"만 뜨고 서버 쪽엔 단서가 없어서 원인을 못 좁혔죠. 그래서
+    여기서 직접 잡아 로그를 남기고, 일시적인 실패는 한 번 더 시도해요."""
     headers = {"Authorization": f"Bearer {access_token}", "User-Agent": _RIOT_CLIENT_USER_AGENT}
-    resp = await session.post(ENTITLEMENT_URL, json={}, headers=headers)
-    if resp.status_code != 200:
-        # 진단용 로그예요(토큰 값은 절대 안 찍어요). 원인 파악되면 지울 예정이에요.
-        log.info(f"🔍 오상 entitlement 디버그: status={resp.status_code} body={resp.text[:300]!r}")
+    tag = f"[{who}] " if who else ""
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = await session.post(ENTITLEMENT_URL, json={}, headers=headers)
+        except Exception as error:  # noqa: BLE001
+            log.warning(f"⚠️ {tag}오상 entitlement 연결 실패({attempt}/{attempts}): {error}")
+            if attempt < attempts:
+                await asyncio.sleep(1)
+                continue
+            return None
+
+        if resp.status_code == 200:
+            return resp.json().get("entitlements_token")
+
+        # 진단용 로그예요(토큰 값은 절대 안 찍어요).
+        log.info(
+            f"🔍 {tag}오상 entitlement 디버그({attempt}/{attempts}): "
+            f"status={resp.status_code} body={resp.text[:300]!r}"
+        )
+        # 429(요청 과다)·5xx는 잠깐 뒤에 다시 하면 되는 경우가 많아요. 403/400은 다시 해도
+        # 똑같으니(계정/IP 문제) 바로 포기해요.
+        if (resp.status_code in (408, 429) or resp.status_code >= 500) and attempt < attempts:
+            await asyncio.sleep(1)
+            continue
         return None
-    data = resp.json()
-    return data.get("entitlements_token")
+    return None
 
 
-async def get_region(session: AsyncSession, access_token: str, id_token: str) -> Optional[str]:
+async def get_region(
+    session: AsyncSession, access_token: str, id_token: str, who: str = ""
+) -> Optional[str]:
     headers = {"Authorization": f"Bearer {access_token}", "User-Agent": _RIOT_CLIENT_USER_AGENT}
-    resp = await session.put(GEO_URL, json={"id_token": id_token}, headers=headers)
+    tag = f"[{who}] " if who else ""
+    try:
+        resp = await session.put(GEO_URL, json={"id_token": id_token}, headers=headers)
+    except Exception as error:  # noqa: BLE001
+        log.warning(f"⚠️ {tag}오상 지역 확인 연결 실패: {error}")
+        return None
     if resp.status_code != 200:
+        log.info(f"🔍 {tag}오상 지역 확인 디버그: status={resp.status_code} body={resp.text[:200]!r}")
         return None
     data = resp.json()
     return (data.get("affinities") or {}).get("live")
@@ -405,9 +625,13 @@ async def get_owned_skin_ids(
     return {item.get("ItemID") for item in entitlements if item.get("ItemID")}
 
 
-async def get_wallet_with_cookies(cookie_header: str) -> tuple[Optional[dict], str]:
+async def get_wallet_with_cookies(
+    cookie_header: str, discord_id: Optional[int] = None
+) -> tuple[Optional[dict], str]:
     """등록해둔 쿠키만으로 지갑(보유 재화)까지 한 번에 가져와요.
     상점은 안 부르고 지갑만 필요할 때 쓰는 가벼운 경로예요(/vp계산이 씁니다).
+
+    discord_id를 주면 재인증으로 회전된 쿠키를 저장까지 해줘요(안 주면 조회만 하고 버려요).
 
     돌려주는 값: (지갑 dict, 오류메시지). 성공하면 오류메시지가 빈 문자열이에요.
     """
@@ -415,6 +639,8 @@ async def get_wallet_with_cookies(cookie_header: str) -> tuple[Optional[dict], s
     try:
         if not result.ok:
             return None, result.error or "저장된 로그인이 만료됐어요."
+        if discord_id is not None:
+            persist_refreshed_cookie(discord_id, result)
 
         puuid = puuid_from_access_token(result.access_token)
         if not puuid:

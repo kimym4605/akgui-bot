@@ -29,7 +29,9 @@ async def _fetch_my_vp(discord_id: int) -> tuple[int | None, str]:
     if not cookie_header:
         return None, ""
 
-    wallet, error = await riot_auth.get_wallet_with_cookies(cookie_header)
+    # discord_id를 같이 넘겨야 재인증으로 회전된 쿠키가 저장돼요(안 넘기면 저장된 쿠키가
+    # 낡은 채로 남아서 다음 /오상이 만료로 튕겨요).
+    wallet, error = await riot_auth.get_wallet_with_cookies(cookie_header, discord_id)
     if wallet is None:
         return None, f"⚠️ 보유 VP를 못 불러왔어요 ({error}) — 0 VP 기준으로 계산했어요."
 

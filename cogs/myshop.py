@@ -673,14 +673,21 @@ class ShopResultView(TimeoutDisablingView):
         result, session = await riot_auth.reauth_with_cookies(cookie_header)
         try:
             if not result.ok:
-                riot_session_store.delete_session(self._owner_id)
-                await interaction.followup.send(
-                    "등록해둔 로그인이 만료됐어요. `/오상`으로 다시 로그인(또는 쿠키 재등록)해주세요.",
-                    ephemeral=True,
-                )
+                # 일시적인 실패(프록시·라이엇 장애)로 쿠키를 지우면 멀쩡한 유저가 재등록하게 돼요.
+                if result.expired:
+                    riot_session_store.delete_session(self._owner_id)
+                    await interaction.followup.send(
+                        "등록해둔 로그인이 만료됐어요. `/오상`으로 다시 로그인(또는 쿠키 재등록)해주세요.",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.followup.send(
+                        f"⚠️ {result.error} (등록해둔 쿠키는 그대로 두었어요)", ephemeral=True
+                    )
                 return
+            riot_auth.persist_refreshed_cookie(self._owner_id, result)
             storefront, wallet, owned, error = await _fetch_storefront(
-                session, result.access_token, result.id_token
+                session, result.access_token, result.id_token, who=str(self._owner_id)
             )
         finally:
             await session.close()
@@ -767,7 +774,7 @@ async def _ensure_static_data():
 
 
 async def _fetch_storefront(
-    session, access_token: str, id_token: str
+    session, access_token: str, id_token: str, who: str = ""
 ) -> tuple[dict | None, dict | None, set[str] | None, str]:
     """(storefront, wallet, 보유스킨UUID들, 오류메시지)를 돌려줘요.
     성공하면 오류메시지가 빈 문자열이에요. /오상 명령어와 위시리스트 자동 알림이 같이 써요.
@@ -781,10 +788,17 @@ async def _fetch_storefront(
 
     # 지역과 권한 토큰은 서로를 안 기다려도 돼요(둘 다 access_token만 있으면 됨).
     region, entitlement = await asyncio.gather(
-        riot_auth.get_region(session, access_token, id_token),
-        riot_auth.get_entitlement(session, access_token),
+        riot_auth.get_region(session, access_token, id_token, who=who),
+        riot_auth.get_entitlement(session, access_token, who=who),
         return_exceptions=True,
     )
+    # ⚠️ return_exceptions=True라서 예외가 조용히 값으로 바뀌어 돌아와요. 여기서 안 찍으면
+    # 서버 로그엔 아무 흔적도 안 남고 유저에게만 실패 문구가 떠서 원인을 못 좁혀요.
+    if isinstance(region, BaseException):
+        log.warning(f"⚠️ [{who}] 오상 지역 확인 예외: {region!r}")
+    if isinstance(entitlement, BaseException):
+        log.warning(f"⚠️ [{who}] 오상 권한 토큰 예외: {entitlement!r}")
+
     if isinstance(region, BaseException) or not region:
         return None, None, None, "라이엇 서버 지역 확인에 실패했어요. 다시 시도해주세요."
     if isinstance(entitlement, BaseException) or not entitlement:
@@ -868,7 +882,9 @@ async def _send_shop(
     interaction: discord.Interaction, session, access_token: str, id_token: str, public: bool = True
 ) -> bool:
     """access_token/id_token으로 상점까지 조회해서 결과를 보여줘요. 성공하면 True."""
-    storefront, wallet, owned, error = await _fetch_storefront(session, access_token, id_token)
+    storefront, wallet, owned, error = await _fetch_storefront(
+        session, access_token, id_token, who=str(interaction.user.id)
+    )
     if storefront is None:
         await interaction.followup.send(error, ephemeral=True)
         return False
@@ -930,7 +946,7 @@ class RegisterCookieModal(discord.ui.Modal, title="🔫 오상 · 쿠키 등록(
     cookie_input = discord.ui.TextInput(
         label="ssid 쿠키 값 (또는 cookie 헤더 전체)",
         style=discord.TextStyle.paragraph,
-        placeholder="ssid=eyJhbGciOi... 형태로 붙여넣으면 돼요. 자세한 방법은 '쿠키 등록 방법' 버튼을 눌러보세요.",
+        placeholder="ssid=eyJhbGciOi...  (값만 붙여넣어도 돼요. 방법은 '❔ 쿠키 등록 방법' 버튼)",
         max_length=4000,
     )
 
@@ -945,8 +961,18 @@ class RegisterCookieModal(discord.ui.Modal, title="🔫 오상 · 쿠키 등록(
         result, session = await riot_auth.reauth_with_cookies(cookie_header)
         if not result.ok:
             await session.close()
+            # ⚠️ 예전엔 여기서 로그를 안 남겨서, "쿠키 등록이 안 된다"는 신고가 들어와도 무엇이
+            # 문제였는지 서버 쪽에 흔적이 하나도 없었어요. 값 자체는 계정이라 절대 찍지 않고,
+            # 길이·형태만 남겨요(riot_auth 쪽에서 status/riot_error도 같이 찍혀요).
+            log.warning(
+                f"⚠️ [{interaction.user.id}] 오상 쿠키 등록 실패: {result.error} "
+                f"(expired={result.expired}, 입력길이={len(cookie_header)}, "
+                f"줄수={cookie_header.count(chr(10)) + 1})"
+            )
             await interaction.followup.send(
-                f"❌ {result.error or '등록에 실패했어요.'} Cookie 값을 다시 확인해서 시도해주세요.", ephemeral=True
+                f"❌ {result.error or '등록에 실패했어요.'}\n"
+                "-# 계속 안 되면 `❔ 쿠키 등록 방법` 버튼의 **자주 막히는 곳**을 확인해보세요.",
+                ephemeral=True,
             )
             return
 
@@ -958,9 +984,14 @@ class RegisterCookieModal(discord.ui.Modal, title="🔫 오상 · 쿠키 등록(
             await session.close()
 
         if ok:
-            riot_session_store.save_session(interaction.user.id, cookie_header)
+            # 유저가 붙여넣은 원본이 아니라, 재인증으로 회전된 쿠키를 저장해요(원본은 이미
+            # 라이엇 쪽에서 무효화됐을 수 있어요). 회전 값이 없을 때만 원본으로 폴백해요.
+            riot_session_store.save_session(
+                interaction.user.id, result.cookie_header or cookie_header
+            )
             await interaction.followup.send(
-                "✅ 쿠키가 등록됐어요. 이제부터는 로그인 없이 `/오상`만 실행하면 돼요(약 한 달간, 만료되면 다시 등록).",
+                "✅ 쿠키가 등록됐어요! 이제부터는 로그인 없이 `/오상`만 실행하면 돼요.\n"
+                "-# 매일 새벽 4시에 봇이 알아서 갱신해서 계속 이어져요. 혹시 만료되면 그때 다시 등록해주세요.",
                 ephemeral=True,
             )
 
@@ -972,20 +1003,85 @@ class RegisterCookieModal(discord.ui.Modal, title="🔫 오상 · 쿠키 등록(
             await interaction.response.send_message("처리 중 오류가 발생했어요.", ephemeral=True)
 
 
-COOKIE_GUIDE = (
-    "**쿠키를 한 번 등록해두면** 그 다음부터는 `/오상`만 치면 바로 상점이 떠요 "
-    "(쿠키가 만료되는 약 한 달 뒤까지, 매일 새벽 4시에 봇이 알아서 갱신해요).\n"
-    "비밀번호는 받지도 저장하지도 않고, 등록한 쿠키는 암호화해서 보관해요.\n\n"
-    "**PC 크롬 기준 방법**\n"
-    "① 크롬에서 <https://auth.riotgames.com/login> 접속 후 **로그인**\n"
-    "② `F12` (또는 `Ctrl+Shift+I`) 눌러 개발자도구 열기\n"
-    "③ 위쪽 탭에서 **Application**(응용 프로그램) 선택\n"
-    "④ 왼쪽 목록에서 **Storage → Cookies → https://auth.riotgames.com** 클릭\n"
-    "⑤ 목록에서 **`ssid`** 를 찾아 **Value(값)** 칸을 더블클릭 → 전체 복사\n"
-    "⑥ **③ 쿠키 등록** 버튼을 눌러 `ssid=복사한값` 형태로 붙여넣기\n\n"
-    "-# ⚠️ 이 값은 로그인된 본인 계정 그 자체예요. 절대 다른 사람이나 다른 봇에 주지 마세요.\n"
+COOKIE_GUIDE_INTRO = (
+    "**한 번만 등록해두면** 그 다음부터는 `/오상`만 쳐도 바로 상점이 떠요. "
+    "매일 새벽 4시에 봇이 알아서 갱신해서 계속 이어져요.\n"
+    "비밀번호는 받지도 저장하지도 않고, 등록한 값은 암호화해서 보관해요.\n\n"
+    "🖥️ **PC에서만 할 수 있어요.** 휴대폰 브라우저에는 개발자도구가 없어서 안 돼요.\n"
+    "⏱️ **복사한 뒤 곧바로 등록**하는 게 제일 중요해요 (아래 3️⃣ 설명 참고)."
+)
+
+# ⚠️ F12가 아예 없는 키보드(텐키리스·미니배열·일부 노트북)를 쓰는 사람이 있어서, 키를 하나도
+# 안 눌러도 되는 "우클릭 → 검사"를 맨 앞에 뒀어요. 라이엇 로그인 페이지가 우클릭을 막지
+# 않는다는 건 2026-09-07에 직접 확인했어요.
+COOKIE_GUIDE_STEP1 = (
+    "먼저 크롬에서 <https://auth.riotgames.com/login> 에 **로그인**한 뒤,\n"
+    "**아래 넷 중 아무거나** 하나로 개발자도구를 열어요.\n\n"
+    "🖱️ **페이지 빈 곳에 우클릭 → `검사`(Inspect)** ← 키보드 없이 되는 방법\n"
+    "🧭 크롬 오른쪽 위 **`⋮` → 도구 더보기 → 개발자 도구**\n"
+    "⌨️ `Ctrl` + `Shift` + `I`  (F12 대신 쓰는 단축키)\n"
+    "💻 노트북이면 `Fn` + `F12` / 맥이면 `⌘` + `⌥` + `I`\n\n"
+    "-# 엣지·웨일·브레이브도 방법이 똑같아요. 파이어폭스는 우클릭 → `요소 검사`."
+)
+
+COOKIE_GUIDE_STEP2 = (
+    "① 개발자도구 위쪽 탭에서 **`Application`**(애플리케이션) 클릭\n"
+    "-# 탭이 안 보이면 탭 줄 오른쪽 끝의 **`≫`** 를 눌러 펼치면 있어요.\n"
+    "② 왼쪽 목록에서 **`Storage`(저장용량) → `Cookies` → `https://auth.riotgames.com`** 클릭\n"
+    "③ 표에서 **`Name`(이름)이 정확히 `ssid`** 인 줄을 찾아요\n"
+    "④ 그 줄의 **`Value`(값) 칸을 더블클릭** → `Ctrl`+`A` → `Ctrl`+`C`\n\n"
+    "⚠️ **드래그해서 긁으면 안 돼요.** 값이 800자쯤 되는데 화면에 보이는 데까지만 복사돼서 "
+    "잘린 값이 들어가요. 꼭 더블클릭한 뒤 전체선택(`Ctrl`+`A`)으로 복사해주세요."
+)
+
+# ⚠️ 라이엇은 재인증할 때마다 ssid를 새로 발급하고 이전 값을 무효화해요. 그래서 복사해두고
+# 시간이 지나거나, 그 사이 라이엇 페이지가 갱신되거나 발로란트를 켜면 복사해둔 값이 죽어요.
+# "되는 사람 / 안 되는 사람"이 갈리는 가장 큰 이유라서 따로 떼어 강조해요.
+COOKIE_GUIDE_STEP3 = (
+    "**`③ 쿠키 등록`** 버튼을 눌러 복사한 값을 붙여넣으면 끝이에요.\n"
+    "`ssid=eyJ...` 형태가 정석이지만, **값만 붙여넣어도** 봇이 알아서 처리해요.\n\n"
+    "⏱️ **복사한 즉시 붙여넣어 주세요.**\n"
+    "라이엇은 로그인 세션이 갱신될 때마다 이 값을 새로 발급하고 **예전 값을 즉시 못 쓰게** 해요. "
+    "복사해두고 딴짓을 하거나, 그 사이에 **라이엇 페이지를 새로고침**하거나 **발로란트를 켜면** "
+    "복사한 값이 죽어서 `만료됐다`는 안내가 떠요.\n\n"
+    "-# 💡 등록하기 전에 **발로란트와 라이엇 클라이언트를 꺼두면** 훨씬 잘 돼요."
+)
+
+COOKIE_GUIDE_TROUBLE = (
+    "**`ssid`가 없다고 나와요**\n"
+    "-# 왼쪽 목록에서 고른 주소가 `auth.riotgames.com` 이 맞는지 확인해주세요. "
+    "`playvalorant.com`이나 `riotgames.com`에는 `ssid`가 없어요.\n"
+    "-# 로그인을 안 한 상태여도 안 보여요. 먼저 로그인부터 해주세요.\n\n"
+    "**값이 잘렸다고 나와요**\n"
+    "-# 드래그 대신 값 칸을 **더블클릭 → `Ctrl`+`A` → `Ctrl`+`C`** 로 복사해주세요.\n\n"
+    "**만료됐다고 나와요**\n"
+    "-# 발로란트·라이엇 클라이언트를 끄고 → 라이엇 페이지에서 **다시 로그인** → "
+    "값을 **새로 복사해서 바로** 등록해보세요. 한 번 실패한 값은 다시 시도해도 안 살아나요.\n\n"
+    "**계속 안 돼요**\n"
+    "-# 쿠키 등록은 안 해도 괜찮아요. `/오상` → **`① 라이엇 로그인하기`** → "
+    "**`② 로그인 후 URL 붙여넣기`** 로 매번 조회하는 방법이 그대로 있어요."
+)
+
+COOKIE_GUIDE_SAFETY = (
+    "⚠️ 이 값은 **로그인된 본인 계정 그 자체**예요. 다른 사람이나 다른 봇에게 절대 주지 마세요.\n"
+    "-# 봇은 이 값을 암호화해서 보관하고, 상점 조회 외에는 쓰지 않아요.\n"
     "-# 등록 해제는 `/오상쿠키삭제` 로 언제든 할 수 있어요."
 )
+
+
+def _build_cookie_guide_embed() -> discord.Embed:
+    """`❔ 쿠키 등록 방법` 버튼에서 보여주는 안내예요. 한 덩어리 글이면 안 읽혀서 단계별로 쪼갰어요."""
+    embed = discord.Embed(
+        title="🍪 쿠키 등록 방법",
+        description=COOKIE_GUIDE_INTRO,
+        color=0xFF4655,
+    )
+    embed.add_field(name="1️⃣ 개발자도구 열기 (F12 없어도 돼요)", value=COOKIE_GUIDE_STEP1, inline=False)
+    embed.add_field(name="2️⃣ ssid 값 복사하기", value=COOKIE_GUIDE_STEP2, inline=False)
+    embed.add_field(name="3️⃣ 봇에 붙여넣기 — 복사하고 바로!", value=COOKIE_GUIDE_STEP3, inline=False)
+    embed.add_field(name="😵 안 될 때 확인할 것", value=COOKIE_GUIDE_TROUBLE, inline=False)
+    embed.add_field(name="🔒 안전 안내", value=COOKIE_GUIDE_SAFETY, inline=False)
+    return embed
 
 
 class StartView(TimeoutDisablingView):
@@ -1004,8 +1100,7 @@ class StartView(TimeoutDisablingView):
 
     @discord.ui.button(label="❔ 쿠키 등록 방법", style=discord.ButtonStyle.secondary)
     async def cookie_guide(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(title="🍪 쿠키 등록 방법", description=COOKIE_GUIDE, color=0xFF4655)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=_build_cookie_guide_embed(), ephemeral=True)
 
 
 def _build_wishlist_alert_embed(
@@ -1195,8 +1290,11 @@ class MyShop(commands.Cog):
             try:
                 if not result.ok:
                     continue  # 만료된 세션은 새벽 4시 갱신 루프 쪽에서 정리돼요.
+                # 여기서도 회전된 쿠키를 저장해둬야 해요. 안 그러면 이 조회가 라이엇 쪽 ssid를
+                # 돌려버린 뒤라, 정작 유저가 /오상을 부르면 낡은 쿠키로 만료 판정이 나요.
+                riot_auth.persist_refreshed_cookie(discord_id, result)
                 storefront, _wallet, owned, _error = await _fetch_storefront(
-                    session, result.access_token, result.id_token
+                    session, result.access_token, result.id_token, who=str(discord_id)
                 )
             finally:
                 await session.close()
@@ -1255,9 +1353,12 @@ class MyShop(commands.Cog):
 
     @tasks.loop(time=SESSION_REFRESH_TIME)
     async def refresh_sessions(self):
-        refreshed, expired = await riot_auth.refresh_all_stored_sessions()
-        if refreshed or expired:
-            log.info(f"🔫 오상 세션 자동 재인증: 갱신 {refreshed}건, 만료(재로그인 필요) {expired}건")
+        refreshed, expired, failed = await riot_auth.refresh_all_stored_sessions()
+        if refreshed or expired or failed:
+            log.info(
+                f"🔫 오상 세션 자동 재인증: 갱신 {refreshed}건, 만료(재로그인 필요) {expired}건, "
+                f"일시 실패(유지) {failed}건"
+            )
 
     @refresh_sessions.before_loop
     async def before_refresh_sessions(self):
@@ -1293,13 +1394,21 @@ class MyShop(commands.Cog):
             result, session = await riot_auth.reauth_with_cookies(cookie_header)
             try:
                 if not result.ok:
-                    riot_session_store.delete_session(interaction.user.id)
-                    _invalidate_shop_cache(interaction.user.id)
-                    await interaction.followup.send(
-                        "등록해둔 로그인이 만료됐어요. `/오상`으로 다시 로그인(또는 쿠키 재등록)해주세요.",
-                        ephemeral=True,
-                    )
+                    # 라이엇이 "이 쿠키 못 쓴다"고 한 경우에만 지워요. 프록시가 잠깐 죽었을 뿐인데
+                    # 지워버리면, 유저 입장에선 멀쩡한 등록이 자꾸 풀리는 걸로 보여요.
+                    if result.expired:
+                        riot_session_store.delete_session(interaction.user.id)
+                        _invalidate_shop_cache(interaction.user.id)
+                        await interaction.followup.send(
+                            "등록해둔 로그인이 만료됐어요. `/오상`으로 다시 로그인(또는 쿠키 재등록)해주세요.",
+                            ephemeral=True,
+                        )
+                    else:
+                        await interaction.followup.send(
+                            f"⚠️ {result.error} (등록해둔 쿠키는 그대로 두었어요)", ephemeral=True
+                        )
                     return
+                riot_auth.persist_refreshed_cookie(interaction.user.id, result)
                 await _send_shop(interaction, session, result.access_token, result.id_token, public=공개)
             finally:
                 await session.close()
