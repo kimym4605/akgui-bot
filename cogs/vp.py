@@ -25,13 +25,17 @@ VP_CURRENCY_ID = "85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741"
 async def _fetch_my_vp(discord_id: int) -> tuple[int | None, str]:
     """`/오상`에 쿠키를 등록해둔 유저면 현재 보유 VP를 대신 읽어와요.
     (VP, 안내문). 등록을 안 했거나 실패하면 VP는 None이에요."""
-    cookie_header = riot_session_store.get_session(discord_id)
+    # 계정을 여러 개 등록해뒀으면 기본 계정(마지막으로 `/오상`에서 본 계정)의 VP를 봐요.
+    account_key = riot_session_store.default_account_key(discord_id)
+    if not account_key:
+        return None, ""
+    cookie_header = riot_session_store.get_session(discord_id, account_key)
     if not cookie_header:
         return None, ""
 
-    # discord_id를 같이 넘겨야 재인증으로 회전된 쿠키가 저장돼요(안 넘기면 저장된 쿠키가
-    # 낡은 채로 남아서 다음 /오상이 만료로 튕겨요).
-    wallet, error = await riot_auth.get_wallet_with_cookies(cookie_header, discord_id)
+    # discord_id와 계정 키를 같이 넘겨야 재인증으로 회전된 쿠키가 제자리에 저장돼요
+    # (안 넘기면 저장된 쿠키가 낡은 채로 남아서 다음 /오상이 만료로 튕겨요).
+    wallet, error = await riot_auth.get_wallet_with_cookies(cookie_header, discord_id, account_key)
     if wallet is None:
         return None, f"⚠️ 보유 VP를 못 불러왔어요 ({error}) — 0 VP 기준으로 계산했어요."
 

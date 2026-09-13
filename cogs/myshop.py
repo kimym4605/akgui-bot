@@ -173,12 +173,13 @@ def _vp_balance(wallet: dict | None) -> int | None:
 
 # 보유 스킨은 /오상을 부를 때만 받아올 수 있어요(라이엇 API 호출이 필요해서요).
 # 위시리스트 자동완성처럼 네트워크를 쓸 수 없는 곳에서도 "이미 가진 스킨"을 알려주려고,
-# 마지막으로 조회한 결과를 유저별로 메모리에 담아둬요. 봇이 재시작되면 비워지는데,
+# 마지막으로 조회한 결과를 (유저, 계정)별로 메모리에 담아둬요. 봇이 재시작되면 비워지는데,
 # 그땐 표시가 안 될 뿐이라 동작에는 지장이 없어요.
-_owned_skin_names: dict[int, set[str]] = {}
+# 계정 키가 빈 문자열("")인 건 쿠키를 등록하지 않고 URL 붙여넣기로 한 번만 조회한 경우예요.
+_owned_skin_names: dict[tuple[int, str], set[str]] = {}
 
 
-def _remember_owned(discord_id: int, owned_ids: set[str] | None):
+def _remember_owned(discord_id: int, account_key: str, owned_ids: set[str] | None):
     """보유 스킨 UUID를 이름 집합으로 바꿔서 기억해둬요. 조회 실패(None)면 기존 값을 유지해요."""
     if owned_ids is None:
         return
@@ -187,11 +188,38 @@ def _remember_owned(discord_id: int, owned_ids: set[str] | None):
         info = valorant_skins.get(item_id)
         if info and info.get("name"):
             names.add(info["name"])
-    _owned_skin_names[discord_id] = names
+    _owned_skin_names[(discord_id, account_key)] = names
 
 
-def _owned_names(discord_id: int) -> set[str]:
-    return _owned_skin_names.get(discord_id, set())
+def _owned_names(discord_id: int, account_key: str) -> set[str]:
+    return _owned_skin_names.get((discord_id, account_key), set())
+
+
+def _owned_names_any(discord_id: int) -> set[str]:
+    """등록해둔 계정 중 **어느 하나라도** 가지고 있는 스킨 이름들이에요.
+    위시리스트 자동완성의 '이미 보유' 표시에 써요. 본계로 가진 스킨을 부계 기준으로
+    "없음"이라고 표시하면 오히려 헷갈리거든요."""
+    names: set[str] = set()
+    for (owner_id, _key), owned in _owned_skin_names.items():
+        if owner_id == discord_id:
+            names |= owned
+    return names
+
+
+def _forget_owned(discord_id: int, account_key: str | None = None):
+    """계정을 지웠을 때 그 계정의 보유 목록도 같이 잊어요. account_key가 None이면 전부."""
+    for key in [
+        cached_key for cached_key in _owned_skin_names
+        if cached_key[0] == discord_id and (account_key is None or cached_key[1] == account_key)
+    ]:
+        _owned_skin_names.pop(key, None)
+
+
+def _forget_account_data(discord_id: int, account_key: str | None = None):
+    """등록을 해제할 때 메모리에 남은 상점·잔액·보유목록까지 같이 치워요.
+    (지웠는데 캐시 때문에 계속 보이면 곤란해요.) account_key가 None이면 그 유저 전부."""
+    _invalidate_shop_cache(discord_id, account_key)
+    _forget_owned(discord_id, account_key)
 
 
 def _shop_offers(storefront: dict, owned: set[str] | None = None) -> list[dict]:
@@ -595,11 +623,13 @@ class ShopResultView(TimeoutDisablingView):
         can_refresh: bool = False,
         public: bool = True,
         owner_id: int = 0,
+        account_key: str = "",
     ):
         super().__init__(timeout=600)
         self.shop_embeds = shop_embeds
         self._public = public
         self._owner_id = owner_id  # 이 상점을 부른 사람. 새로고침은 본인만 할 수 있어요.
+        self._account_key = account_key  # 지금 화면에 떠 있는 계정
         self._accessory_embeds = _build_accessory_embeds(storefront)
         self._nightmarket_embeds = _build_nightmarket_embeds(storefront, owned)
         self._bundle_embeds = _build_bundle_embeds(storefront)
@@ -615,9 +645,10 @@ class ShopResultView(TimeoutDisablingView):
         # 살 게 하나도 없으면(가격을 못 읽었거나 이미 다 보유) 계산할 게 없으니 버튼을 빼요.
         if not _need_to_buy(self._offers):
             self.remove_item(self.show_vp_topup)
-        # 새로고침은 봇이 대신 다시 조회할 수 있어야(=쿠키 등록) 되는 기능이에요.
+        # 새로고침·계정 전환은 봇이 대신 다시 조회할 수 있어야(=쿠키 등록) 되는 기능이에요.
         if not can_refresh:
             self.remove_item(self.refresh_shop)
+            self.remove_item(self.switch_account)
 
     async def _switch(self, interaction: discord.Interaction, embeds: list[discord.Embed]):
         child = BackToShopView(self)
@@ -660,59 +691,209 @@ class ShopResultView(TimeoutDisablingView):
             return
 
         await interaction.response.defer()
-        _invalidate_shop_cache(self._owner_id)
-
-        cookie_header = riot_session_store.get_session(self._owner_id)
-        if not cookie_header:
-            await interaction.followup.send(
-                "등록해둔 쿠키가 없어서 다시 조회할 수 없어요. `/오상`을 다시 실행해주세요.",
-                ephemeral=True,
-            )
-            return
-
-        result, session = await riot_auth.reauth_with_cookies(cookie_header)
-        try:
-            if not result.ok:
-                # 일시적인 실패(프록시·라이엇 장애)로 쿠키를 지우면 멀쩡한 유저가 재등록하게 돼요.
-                if result.expired:
-                    riot_session_store.delete_session(self._owner_id)
-                    await interaction.followup.send(
-                        "등록해둔 로그인이 만료됐어요. `/오상`으로 다시 로그인(또는 쿠키 재등록)해주세요.",
-                        ephemeral=True,
-                    )
-                else:
-                    await interaction.followup.send(
-                        f"⚠️ {result.error} (등록해둔 쿠키는 그대로 두었어요)", ephemeral=True
-                    )
-                return
-            riot_auth.persist_refreshed_cookie(self._owner_id, result)
-            storefront, wallet, owned, error = await _fetch_storefront(
-                session, result.access_token, result.id_token, who=str(self._owner_id)
-            )
-        finally:
-            await session.close()
-
-        if storefront is None:
+        payload, error = await _load_shop_for_account(
+            self._owner_id, self._account_key, use_cache=False
+        )
+        if payload is None:
             await interaction.followup.send(error, ephemeral=True)
             return
 
-        _remember_owned(self._owner_id, owned)
-        riot_id = riot_auth.riot_id_from_id_token(result.id_token) or ""
-        _cache_shop(self._owner_id, storefront, wallet, owned, riot_id)
-
         # 원래 메시지를 그 자리에서 갈아끼워요(새 메시지를 또 쌓지 않게).
-        embeds = _fit_embeds(
-            _build_shop_embeds(interaction.user, storefront, riot_id, wallet, owned)
-        )
-        view = ShopResultView(
-            embeds, storefront, wallet, owned,
-            can_refresh=True, public=self._public, owner_id=self._owner_id,
+        embeds, view = _shop_screen(
+            interaction.user, payload, public=self._public,
+            owner_id=self._owner_id, account_key=self._account_key,
         )
         await interaction.edit_original_response(embeds=embeds, view=view)
         try:
             view.message = await interaction.original_response()
         except Exception:  # noqa: BLE001
             view.message = interaction.message
+
+    @discord.ui.button(label="👤 계정", style=discord.ButtonStyle.secondary, row=1)
+    async def switch_account(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """본계/부계 전환과 계정 추가를 여기서 해요.
+
+        상점 메시지에 드롭다운을 바로 붙이지 않고 버튼을 한 번 거치는 이유가 있어요.
+        `/오상`은 기본이 채널 공개라, 드롭다운을 붙여버리면 **부계 라이엇 ID가 채널의
+        모두에게 보여요.** 버튼을 누른 사람에게만 나만 보기로 목록을 띄우면 그 일이 없어요."""
+        if interaction.user.id != self._owner_id:
+            await interaction.response.send_message(
+                "이 상점을 부른 사람만 계정을 바꿀 수 있어요. `/오상`으로 본인 상점을 열어주세요.",
+                ephemeral=True,
+            )
+            return
+
+        view = AccountPickerView(self)
+        await interaction.response.send_message(
+            embed=view.build_embed(), view=view, ephemeral=True
+        )
+        try:
+            view.message = await interaction.original_response()
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def show_account(self, interaction: discord.Interaction, account_key: str):
+        """고른 계정으로 상점 메시지를 그 자리에서 갈아끼워요.
+        (계정 선택은 나만 보기 메시지에서 하니까, 원본 상점 메시지를 직접 수정해야 해요.)"""
+        payload, error = await _load_shop_for_account(self._owner_id, account_key)
+        if payload is None:
+            await interaction.followup.send(error, ephemeral=True)
+            return
+
+        self._account_key = account_key
+        embeds, view = _shop_screen(
+            interaction.user, payload, public=self._public,
+            owner_id=self._owner_id, account_key=account_key,
+        )
+        if self.message is not None:
+            try:
+                await self.message.edit(embeds=embeds, view=view)
+                view.message = self.message
+                self.stop()  # 갈아끼운 뒤엔 이전 뷰가 더 반응할 필요가 없어요.
+                await interaction.followup.send(
+                    f"🔀 **{payload['riot_id'] or '다른 계정'}** 상점으로 바꿨어요.", ephemeral=True
+                )
+                return
+            except discord.HTTPException as error_edit:
+                # 원본 메시지가 지워졌거나 수정 시한(15분)이 지난 경우예요.
+                log.debug(f"상점 메시지 갱신 실패, 새 메시지로 보내요: {error_edit}")
+
+        message = await interaction.followup.send(
+            embeds=embeds, view=view, ephemeral=not self._public, wait=True
+        )
+        view.message = message
+        self.stop()
+
+
+class AccountPickerView(TimeoutDisablingView):
+    """상점 화면의 `👤 계정` 버튼을 누르면 나만 보기로 뜨는 계정 목록이에요.
+    등록해둔 계정 사이를 오가거나, 새 계정(부계)을 추가할 수 있어요."""
+
+    def __init__(self, parent: ShopResultView):
+        super().__init__(timeout=300)
+        self._parent = parent
+        self._owner_id = parent._owner_id
+        self._accounts = riot_session_store.list_accounts(self._owner_id)
+
+        if self._accounts:
+            select = discord.ui.Select(
+                placeholder="상점을 볼 계정을 고르세요",
+                options=[
+                    discord.SelectOption(
+                        label=account["label"][:100],
+                        value=account["key"],
+                        description="지금 보고 있는 계정" if account["key"] == parent._account_key else None,
+                        default=account["key"] == parent._account_key,
+                        emoji="🔫",
+                    )
+                    for account in self._accounts
+                ],
+            )
+            select.callback = self._on_select
+            self.add_item(select)
+
+        if len(self._accounts) >= riot_session_store.MAX_ACCOUNTS:
+            self.remove_item(self.add_account)
+
+    def build_embed(self) -> discord.Embed:
+        lines = []
+        for account in self._accounts:
+            marks = []
+            if account["key"] == self._parent._account_key:
+                marks.append("지금 보는 중")
+            elif account["is_default"]:
+                marks.append("`/오상` 기본")
+            suffix = f" — {', '.join(marks)}" if marks else ""
+            lines.append(f"• **{account['label']}**{suffix}")
+
+        embed = discord.Embed(
+            title="👤 오상 · 내 계정",
+            description="\n".join(lines) or "등록해둔 계정이 없어요.",
+            color=0xFF4655,
+        )
+        remaining = riot_session_store.MAX_ACCOUNTS - len(self._accounts)
+        if remaining > 0:
+            embed.set_footer(
+                text=f"{remaining}개 더 등록할 수 있어요 · 등록 해제는 /오상쿠키삭제"
+            )
+        else:
+            embed.set_footer(
+                text=f"계정은 최대 {riot_session_store.MAX_ACCOUNTS}개까지예요 · 등록 해제는 /오상쿠키삭제"
+            )
+        return embed
+
+    async def _on_select(self, interaction: discord.Interaction):
+        # 고른 계정의 상점을 받아오는 데 몇 초 걸려서 먼저 defer해요.
+        await interaction.response.defer()
+        account_key = interaction.data["values"][0]
+        self.stop()
+        await self._parent.show_account(interaction, account_key)
+
+    @discord.ui.button(label="➕ 다른 계정 추가", style=discord.ButtonStyle.secondary, row=1)
+    async def add_account(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🔫 오상 · 계정 추가하기",
+            description=(
+                "추가할 계정으로 **쿠키를 등록**하면 그때부터 `👤 계정` 버튼으로 오갈 수 있어요.\n\n"
+                "① 아래 **라이엇 로그인하기**로 추가할 계정에 로그인하세요.\n"
+                "-# 이미 다른 계정으로 로그인돼 있으면 시크릿 창을 쓰거나 로그아웃 후 진행하세요.\n"
+                "② **③ 쿠키 등록**으로 그 계정의 ssid를 등록하면 끝이에요.\n\n"
+                "-# ② 로그인 후 URL 붙여넣기는 이번 한 번만 보는 방식이라 계정으로 저장되지 않아요."
+            ),
+            color=0xFF4655,
+        )
+        # 부계 라이엇 ID가 채널에 노출되지 않도록 추가 과정은 항상 나만 보기로 진행해요.
+        view = StartView(public=False)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        try:
+            view.message = await interaction.original_response()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class DeleteAccountView(TimeoutDisablingView):
+    """`/오상쿠키삭제`에서 계정이 둘 이상일 때 어느 걸 지울지 고르는 화면이에요."""
+
+    def __init__(self, owner_id: int, accounts: list[dict]):
+        super().__init__(timeout=300)
+        self._owner_id = owner_id
+        self._labels = {account["key"]: account["label"] for account in accounts}
+
+        select = discord.ui.Select(
+            placeholder="등록을 해제할 계정을 고르세요",
+            options=[
+                discord.SelectOption(
+                    label=account["label"][:100], value=account["key"], emoji="🔫"
+                )
+                for account in accounts
+            ],
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        account_key = interaction.data["values"][0]
+        label = self._labels.get(account_key, "그 계정")
+        _forget_account_data(self._owner_id, account_key)
+        riot_session_store.delete_session(self._owner_id, account_key)
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"🗑️ **{label}** 등록을 해제했어요.", embed=None, view=None
+        )
+
+    @discord.ui.button(label="전부 등록 해제", style=discord.ButtonStyle.danger, row=1)
+    async def delete_every(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _forget_account_data(self._owner_id)
+        count = riot_session_store.delete_all_sessions(self._owner_id)
+        self.stop()
+        await interaction.response.edit_message(
+            content=(
+                f"🗑️ 등록해둔 계정 **{count}개**를 전부 해제했어요. "
+                "이제 `/오상`은 매번 로그인 방식으로 동작해요."
+            ),
+            embed=None,
+            view=None,
+        )
 
 
 # ── 상점 결과 캐시 ──────────────────────────────────────────────────────────
@@ -723,10 +904,19 @@ class ShopResultView(TimeoutDisablingView):
 # 있게 했어요. (로테이션 갱신이 5분 안 남았으면 그 시각에 맞춰 더 짧게 잡아요.)
 _SHOP_CACHE_TTL_SECONDS = 300
 
-_shop_cache: dict[int, dict] = {}
+# 계정을 여러 개 등록할 수 있어서 캐시도 (유저, 계정)별로 따로 담아요. 유저 단위로만 담으면
+# 본계를 보고 부계로 전환했을 때 본계 상점이 그대로 떠요.
+_shop_cache: dict[tuple[int, str], dict] = {}
 
 
-def _cache_shop(discord_id: int, storefront: dict, wallet: dict | None, owned: set[str] | None, riot_id: str):
+def _cache_shop(
+    discord_id: int,
+    account_key: str,
+    storefront: dict,
+    wallet: dict | None,
+    owned: set[str] | None,
+    riot_id: str,
+):
     panel = storefront.get("SkinsPanelLayout") or {}
     remaining = panel.get("SingleItemOffersRemainingDurationInSeconds") or 0
     ttl = _SHOP_CACHE_TTL_SECONDS
@@ -735,10 +925,10 @@ def _cache_shop(discord_id: int, storefront: dict, wallet: dict | None, owned: s
 
     # 안 쓰는 사람 몫이 계속 쌓이지 않게, 저장할 때 만료된 것들을 같이 치워요.
     now = time.monotonic()
-    for expired_id in [key for key, value in _shop_cache.items() if now >= value["expires"]]:
-        _shop_cache.pop(expired_id, None)
+    for expired_key in [key for key, value in _shop_cache.items() if now >= value["expires"]]:
+        _shop_cache.pop(expired_key, None)
 
-    _shop_cache[discord_id] = {
+    _shop_cache[(discord_id, account_key)] = {
         "expires": time.monotonic() + ttl,
         "storefront": storefront,
         "wallet": wallet,
@@ -747,18 +937,108 @@ def _cache_shop(discord_id: int, storefront: dict, wallet: dict | None, owned: s
     }
 
 
-def _get_cached_shop(discord_id: int) -> dict | None:
-    entry = _shop_cache.get(discord_id)
+def _get_cached_shop(discord_id: int, account_key: str) -> dict | None:
+    entry = _shop_cache.get((discord_id, account_key))
     if entry is None:
         return None
     if time.monotonic() >= entry["expires"]:
-        _shop_cache.pop(discord_id, None)
+        _shop_cache.pop((discord_id, account_key), None)
         return None
     return entry
 
 
-def _invalidate_shop_cache(discord_id: int):
-    _shop_cache.pop(discord_id, None)
+def _invalidate_shop_cache(discord_id: int, account_key: str | None = None):
+    """account_key를 안 주면 그 유저의 모든 계정 캐시를 비워요."""
+    for key in [
+        cached_key for cached_key in _shop_cache
+        if cached_key[0] == discord_id and (account_key is None or cached_key[1] == account_key)
+    ]:
+        _shop_cache.pop(key, None)
+
+
+async def _load_shop_for_account(
+    discord_id: int, account_key: str, use_cache: bool = True
+) -> tuple[dict | None, str]:
+    """등록해둔 계정 하나의 상점을 가져와요. ({storefront, wallet, owned, riot_id}, 오류문구).
+
+    `/오상`·새로고침·계정 전환이 전부 이 함수를 거쳐요. 예전엔 같은 절차(재인증 → 회전된
+    쿠키 저장 → 상점 조회 → 캐시)가 세 군데에 각각 적혀 있었는데, 그중 한 곳에서
+    쿠키 재저장을 빠뜨려서 "등록이 자꾸 풀린다"는 신고로 이어진 적이 있어요."""
+    if use_cache:
+        cached = _get_cached_shop(discord_id, account_key)
+        if cached is not None:
+            # 캐시로 보여줬어도 '방금 본 계정'인 건 같아요. 여기서 안 찍으면 5분 안에 계정을
+            # 바꿨을 때 다음 `/오상`이 이전 계정으로 되돌아가요.
+            riot_session_store.touch(discord_id, account_key)
+            return cached, ""
+    else:
+        _invalidate_shop_cache(discord_id, account_key)
+
+    cookie_header = riot_session_store.get_session(discord_id, account_key)
+    if not cookie_header:
+        return None, "등록해둔 쿠키가 없어서 다시 조회할 수 없어요. `/오상`을 다시 실행해주세요."
+
+    result, session = await riot_auth.reauth_with_cookies(cookie_header)
+    try:
+        if not result.ok:
+            # 일시적인 실패(프록시·라이엇 장애)로 쿠키를 지우면 멀쩡한 유저가 재등록하게 돼요.
+            if result.expired:
+                riot_session_store.delete_session(discord_id, account_key)
+                _invalidate_shop_cache(discord_id, account_key)
+                _forget_owned(discord_id, account_key)
+                return None, (
+                    "등록해둔 로그인이 만료됐어요. `/오상`으로 다시 로그인(또는 쿠키 재등록)해주세요."
+                )
+            return None, f"⚠️ {result.error} (등록해둔 쿠키는 그대로 두었어요)"
+
+        riot_auth.persist_refreshed_cookie(discord_id, result, account_key)
+        storefront, wallet, owned, error = await _fetch_storefront(
+            session, result.access_token, result.id_token, who=str(discord_id)
+        )
+    finally:
+        await session.close()
+
+    if storefront is None:
+        return None, error
+
+    _remember_owned(discord_id, account_key, owned)
+    riot_id = riot_auth.riot_id_from_id_token(result.id_token) or ""
+    _cache_shop(discord_id, account_key, storefront, wallet, owned, riot_id)
+    # 다음에 그냥 `/오상`만 쳤을 때 방금 본 계정이 뜨도록 기억해둬요.
+    riot_session_store.touch(discord_id, account_key)
+    return {"storefront": storefront, "wallet": wallet, "owned": owned, "riot_id": riot_id}, ""
+
+
+def _shop_screen(
+    user: discord.abc.User,
+    payload: dict,
+    *,
+    public: bool,
+    owner_id: int,
+    account_key: str,
+) -> tuple[list[discord.Embed], "ShopResultView"]:
+    """상점 데이터를 임베드+뷰 한 쌍으로 만들어요. 처음 조회든 새로고침이든 계정 전환이든
+    똑같은 화면이 나오도록 여기 한 곳에서만 만들어요."""
+    embeds = _fit_embeds(
+        _build_shop_embeds(
+            user, payload["storefront"], payload["riot_id"], payload["wallet"], payload["owned"]
+        )
+    )
+    view = ShopResultView(
+        embeds,
+        payload["storefront"],
+        payload["wallet"],
+        payload["owned"],
+        # 새로고침·계정 전환은 봇이 대신 다시 조회할 수 있어야 되는데, 그러려면 이 화면이
+        # 어느 등록 계정의 것인지 알아야 해요. URL 붙여넣기로 한 번만 본 화면은 계정 키가
+        # 없어서(빈 문자열) 버튼을 빼요. 예전처럼 "쿠키를 하나라도 등록했으면 켜기"로 두면,
+        # 부계를 URL로 본 화면에서 새로고침했을 때 엉뚱하게 본계 상점이 떠요.
+        can_refresh=bool(account_key),
+        public=public,
+        owner_id=owner_id,
+        account_key=account_key,
+    )
+    return embeds, view
 
 
 async def _ensure_static_data():
@@ -858,20 +1138,16 @@ def _offered_skin_names(storefront: dict) -> list[str]:
 
 async def _render_shop(
     interaction: discord.Interaction,
-    storefront: dict,
-    wallet: dict | None,
-    owned: set[str] | None,
-    riot_id: str,
+    payload: dict,
     public: bool = True,
-    can_refresh: bool = False,
+    account_key: str = "",
 ) -> bool:
     """이미 받아온 상점 데이터를 화면으로 그려요. 새로 조회한 경우와 캐시를 쓴 경우가
     똑같은 화면을 내도록 여기 한 곳에서만 만들어요."""
     # 기본값은 제트봇처럼 채널에 공개로 올려요(로그인 과정 자체만 항상 본인만 보이게 처리).
-    embeds = _fit_embeds(_build_shop_embeds(interaction.user, storefront, riot_id, wallet, owned))
-    view = ShopResultView(
-        embeds, storefront, wallet, owned,
-        can_refresh=can_refresh, public=public, owner_id=interaction.user.id,
+    embeds, view = _shop_screen(
+        interaction.user, payload,
+        public=public, owner_id=interaction.user.id, account_key=account_key,
     )
     message = await interaction.followup.send(embeds=embeds, view=view, ephemeral=not public, wait=True)
     view.message = message
@@ -879,9 +1155,17 @@ async def _render_shop(
 
 
 async def _send_shop(
-    interaction: discord.Interaction, session, access_token: str, id_token: str, public: bool = True
+    interaction: discord.Interaction,
+    session,
+    access_token: str,
+    id_token: str,
+    public: bool = True,
+    account_key: str = "",
 ) -> bool:
-    """access_token/id_token으로 상점까지 조회해서 결과를 보여줘요. 성공하면 True."""
+    """access_token/id_token으로 상점까지 조회해서 결과를 보여줘요. 성공하면 True.
+
+    account_key는 이 조회가 '등록해둔 어느 계정'의 것인지예요. URL 붙여넣기처럼 저장 없이
+    한 번만 보는 경우엔 빈 문자열이고, 그땐 캐시도 새로고침도 하지 않아요."""
     storefront, wallet, owned, error = await _fetch_storefront(
         session, access_token, id_token, who=str(interaction.user.id)
     )
@@ -890,16 +1174,15 @@ async def _send_shop(
         return False
 
     # 위시리스트 자동완성에서도 "이미 보유"를 알려주려고 결과를 기억해둬요.
-    _remember_owned(interaction.user.id, owned)
+    _remember_owned(interaction.user.id, account_key, owned)
 
     riot_id = riot_auth.riot_id_from_id_token(id_token) or ""
-    # 쿠키를 등록해둔 유저만 봇이 알아서 다시 조회할 수 있어서, 그 경우에만 캐시해요.
-    can_refresh = riot_session_store.has_session(interaction.user.id)
-    if can_refresh:
-        _cache_shop(interaction.user.id, storefront, wallet, owned, riot_id)
-    return await _render_shop(
-        interaction, storefront, wallet, owned, riot_id, public=public, can_refresh=can_refresh
-    )
+    payload = {"storefront": storefront, "wallet": wallet, "owned": owned, "riot_id": riot_id}
+    # 등록해둔 계정일 때만 캐시해요(다시 조회할 수단이 있어야 캐시가 의미 있어요).
+    if account_key:
+        _cache_shop(interaction.user.id, account_key, storefront, wallet, owned, riot_id)
+        riot_session_store.touch(interaction.user.id, account_key)
+    return await _render_shop(interaction, payload, public=public, account_key=account_key)
 
 
 class PasteUrlModal(discord.ui.Modal, title="🔫 오상 · URL 붙여넣기"):
@@ -976,22 +1259,47 @@ class RegisterCookieModal(discord.ui.Modal, title="🔫 오상 · 쿠키 등록(
             )
             return
 
+        # 상점을 부르기 전에 먼저 저장해요. 순서가 반대면 어느 계정 슬롯에 들어갈지 모르는
+        # 채로 화면을 그리게 돼서, 방금 등록한 계정의 새로고침·전환 버튼이 엉뚱한 계정을
+        # 가리켜요. 재인증이 성공한 시점에 이미 쿠키가 쓸 수 있다는 건 확인된 상태예요.
+        #
+        # 유저가 붙여넣은 원본이 아니라, 재인증으로 회전된 쿠키를 저장해요(원본은 이미
+        # 라이엇 쪽에서 무효화됐을 수 있어요). 회전 값이 없을 때만 원본으로 폴백해요.
+        riot_id = riot_auth.riot_id_from_id_token(result.id_token) or ""
+        had_accounts = riot_session_store.account_count(interaction.user.id)
+        account_key = riot_session_store.save_session(
+            interaction.user.id,
+            result.cookie_header or cookie_header,
+            riot_id=riot_id,
+        )
+        if account_key is None:
+            await session.close()
+            await interaction.followup.send(
+                f"⚠️ 계정은 최대 **{riot_session_store.MAX_ACCOUNTS}개**까지만 등록할 수 있어요.\n"
+                "`/오상쿠키삭제`로 안 쓰는 계정을 먼저 지운 다음 다시 등록해주세요.",
+                ephemeral=True,
+            )
+            return
+
         try:
             ok = await _send_shop(
-                interaction, session, result.access_token, result.id_token, public=self.public
+                interaction, session, result.access_token, result.id_token,
+                public=self.public, account_key=account_key,
             )
         finally:
             await session.close()
 
         if ok:
-            # 유저가 붙여넣은 원본이 아니라, 재인증으로 회전된 쿠키를 저장해요(원본은 이미
-            # 라이엇 쪽에서 무효화됐을 수 있어요). 회전 값이 없을 때만 원본으로 폴백해요.
-            riot_session_store.save_session(
-                interaction.user.id, result.cookie_header or cookie_header
+            is_additional = riot_session_store.account_count(interaction.user.id) > max(had_accounts, 1)
+            extra = (
+                "\n-# 계정이 여러 개예요. 상점 화면의 **👤 계정** 버튼으로 오갈 수 있어요."
+                if is_additional else ""
             )
             await interaction.followup.send(
-                "✅ 쿠키가 등록됐어요! 이제부터는 로그인 없이 `/오상`만 실행하면 돼요.\n"
-                "-# 매일 새벽 4시에 봇이 알아서 갱신해서 계속 이어져요. 혹시 만료되면 그때 다시 등록해주세요.",
+                f"✅ **{riot_id or '이 계정'}** 쿠키가 등록됐어요! "
+                "이제부터는 로그인 없이 `/오상`만 실행하면 돼요.\n"
+                "-# 매일 새벽 4시에 봇이 알아서 갱신해서 계속 이어져요. 혹시 만료되면 그때 다시 등록해주세요."
+                + extra,
                 ephemeral=True,
             )
 
@@ -1104,13 +1412,18 @@ class StartView(TimeoutDisablingView):
 
 
 def _build_wishlist_alert_embed(
-    hits: list[str], nightmarket_hits: list[tuple[str, int, int, bool]]
+    hits: list[str],
+    nightmarket_hits: list[tuple[str, int, int, bool]],
+    account_label: str = "",
 ) -> discord.Embed:
-    """위시리스트에 담아둔 스킨이 상점/야시장에 떴을 때 DM으로 보내는 임베드예요."""
+    """위시리스트에 담아둔 스킨이 상점/야시장에 떴을 때 DM으로 보내는 임베드예요.
+    계정을 여러 개 등록해둔 사람에겐 어느 계정 상점인지 같이 알려줘요."""
     embed = discord.Embed(
         title="🔔 위시리스트 스킨이 상점에 떴어요!",
         color=0xFF4655,
     )
+    if account_label:
+        embed.set_author(name=account_label)
 
     if hits:
         embed.add_field(
@@ -1206,7 +1519,7 @@ class MyShop(commands.Cog):
         await _ensure_static_data()
         # 이미 가진 스킨은 지우지 않고 표시만 해요. 목록에서 아예 빼버리면 "왜 검색이 안 되지?"
         # 하고 헷갈리거든요. 라벨만 바꾸고 실제 값(value)은 스킨 이름 그대로 보내요.
-        owned = _owned_names(interaction.user.id)
+        owned = _owned_names_any(interaction.user.id)
         choices = []
         for name in valorant_skins.search_names(current, limit=25):
             label = f"{name} (이미 보유)" if name in owned else name
@@ -1240,7 +1553,7 @@ class MyShop(commands.Cog):
             )
             return
 
-        owned = _owned_names(interaction.user.id)
+        owned = _owned_names_any(interaction.user.id)
         embed = discord.Embed(
             title="⭐ 내 위시리스트",
             description="\n".join(
@@ -1282,42 +1595,66 @@ class MyShop(commands.Cog):
         for discord_id, wanted in watchers.items():
             if wishlist_store.was_notified_today(discord_id, today):
                 continue
-            cookie_header = riot_session_store.get_session(discord_id)
-            if not cookie_header:
+            accounts = riot_session_store.list_accounts(discord_id)
+            if not accounts:
                 continue  # 쿠키 미등록 유저는 대신 조회할 수 없어요.
 
-            result, session = await riot_auth.reauth_with_cookies(cookie_header)
-            try:
-                if not result.ok:
-                    continue  # 만료된 세션은 새벽 4시 갱신 루프 쪽에서 정리돼요.
-                # 여기서도 회전된 쿠키를 저장해둬야 해요. 안 그러면 이 조회가 라이엇 쪽 ssid를
-                # 돌려버린 뒤라, 정작 유저가 /오상을 부르면 낡은 쿠키로 만료 판정이 나요.
-                riot_auth.persist_refreshed_cookie(discord_id, result)
-                storefront, _wallet, owned, _error = await _fetch_storefront(
-                    session, result.access_token, result.id_token, who=str(discord_id)
-                )
-            finally:
-                await session.close()
+            # 계정을 여러 개 등록해뒀으면 전부 확인해요. 부계 상점에 뜬 걸 놓치면
+            # 위시리스트를 걸어둔 의미가 없으니까요. DM은 계정별로 따로 보내지 않고
+            # 아래에서 임베드만 여러 장으로 묶어서 하루 한 통으로 보내요.
+            alerts: list[discord.Embed] = []
+            multi = len(accounts) > 1
+            for account in accounts:
+                account_key = account["key"]
+                cookie_header = riot_session_store.get_session(discord_id, account_key)
+                if not cookie_header:
+                    continue
 
-            if storefront is None:
-                continue
+                result, session = await riot_auth.reauth_with_cookies(cookie_header)
+                try:
+                    if not result.ok:
+                        continue  # 만료된 세션은 새벽 4시 갱신 루프 쪽에서 정리돼요.
+                    # 여기서도 회전된 쿠키를 저장해둬야 해요. 안 그러면 이 조회가 라이엇 쪽 ssid를
+                    # 돌려버린 뒤라, 정작 유저가 /오상을 부르면 낡은 쿠키로 만료 판정이 나요.
+                    riot_auth.persist_refreshed_cookie(discord_id, result, account_key)
+                    storefront, _wallet, owned, _error = await _fetch_storefront(
+                        session, result.access_token, result.id_token, who=str(discord_id)
+                    )
+                finally:
+                    await session.close()
 
-            # 매일 도는 루프라, 여기서 갱신해두면 /오상을 안 써도 보유 정보가 최신으로 유지돼요.
-            _remember_owned(discord_id, owned)
+                if storefront is None:
+                    continue
 
-            checked += 1
+                # 매일 도는 루프라, 여기서 갱신해두면 /오상을 안 써도 보유 정보가 최신으로 유지돼요.
+                _remember_owned(discord_id, account_key, owned)
 
-            # 이미 가진 스킨은 알려봤자 살 일이 없어서 알림에서 빼요.
-            # 보유 조회에 실패했으면 빈 집합이라 아무것도 안 걸러지고 전부 알려줘요.
-            owned_names = _owned_names(discord_id)
-            hits = [
-                name for name in _offered_skin_names(storefront)
-                if name in wanted and name not in owned_names
-            ]
-            night_hits = [
-                hit for hit in _nightmarket_hits(storefront, wanted) if hit[0] not in owned_names
-            ]
-            if not hits and not night_hits:
+                checked += 1
+
+                # 이미 가진 스킨은 알려봤자 살 일이 없어서 알림에서 빼요. 보유 판정은 그 계정
+                # 기준이에요(본계로 가진 스킨이 부계 상점에 떴으면 부계엔 여전히 살 만해요).
+                # 보유 조회에 실패했으면 빈 집합이라 아무것도 안 걸러지고 전부 알려줘요.
+                owned_names = _owned_names(discord_id, account_key)
+                hits = [
+                    name for name in _offered_skin_names(storefront)
+                    if name in wanted and name not in owned_names
+                ]
+                night_hits = [
+                    hit for hit in _nightmarket_hits(storefront, wanted)
+                    if hit[0] not in owned_names
+                ]
+                if hits or night_hits:
+                    alerts.append(
+                        _build_wishlist_alert_embed(
+                            hits, night_hits,
+                            account_label=account["label"] if multi else "",
+                        )
+                    )
+
+                # 라이엇 API를 연달아 두들기지 않도록 계정마다 조금씩 쉬어요.
+                await asyncio.sleep(2)
+
+            if not alerts:
                 wishlist_store.mark_notified(discord_id, today)
                 continue
 
@@ -1326,7 +1663,7 @@ class MyShop(commands.Cog):
                 wishlist_store.mark_notified(discord_id, today)
                 continue
             try:
-                await user.send(embed=_build_wishlist_alert_embed(hits, night_hits))
+                await user.send(embeds=alerts)
                 notified += 1
                 wishlist_store.mark_notified(discord_id, today)
                 wishlist_store.set_dm_blocked(discord_id, False)
@@ -1341,11 +1678,8 @@ class MyShop(commands.Cog):
                 # 그래야 봇이 재시작돼 루프가 다시 돌 때 한 번 더 시도해요.
                 log.warning(f"⚠️ 위시리스트 알림 DM 실패: {discord_id} — {error}")
 
-            # 라이엇 API를 연달아 두들기지 않도록 유저마다 조금씩 쉬어요.
-            await asyncio.sleep(2)
-
         if checked:
-            log.info(f"⭐ 위시리스트 확인: {checked}명 조회, {notified}명에게 알림 전송")
+            log.info(f"⭐ 위시리스트 확인: 계정 {checked}개 조회, {notified}명에게 알림 전송")
 
     @check_wishlists.before_loop
     async def before_check_wishlists(self):
@@ -1371,47 +1705,20 @@ class MyShop(commands.Cog):
     @app_commands.describe(공개="끄면 나만 보이게 조회해요 (기본: 채널에 공개)")
     @require_shop_channel()
     async def my_shop(self, interaction: discord.Interaction, 공개: bool = True):
-        cookie_header = riot_session_store.get_session(interaction.user.id)
-        if cookie_header:
+        # 계정을 여러 개 등록해뒀으면 '마지막으로 본 계정'이 떠요. 다른 계정은 상점 화면의
+        # 👤 계정 버튼으로 오갈 수 있고, 거기서 고른 계정이 다음 기본값이 돼요.
+        account_key = riot_session_store.default_account_key(interaction.user.id)
+        if account_key:
             # defer도 공개 여부를 따라가야 해요. 여기를 공개로 고정해두면 공개:False로 불러도
             # "생각 중…" 표시가 채널에 그대로 노출돼서, 숨기려던 의도가 절반 깨져요.
             await interaction.response.defer(ephemeral=not 공개)
 
             # 방금 본 상점이면 라이엇을 다시 부르지 않고 바로 보여줘요(몇 초 → 즉시).
-            cached = _get_cached_shop(interaction.user.id)
-            if cached is not None:
-                await _render_shop(
-                    interaction,
-                    cached["storefront"],
-                    cached["wallet"],
-                    cached["owned"],
-                    cached["riot_id"],
-                    public=공개,
-                    can_refresh=True,
-                )
+            payload, error = await _load_shop_for_account(interaction.user.id, account_key)
+            if payload is None:
+                await interaction.followup.send(error, ephemeral=True)
                 return
-
-            result, session = await riot_auth.reauth_with_cookies(cookie_header)
-            try:
-                if not result.ok:
-                    # 라이엇이 "이 쿠키 못 쓴다"고 한 경우에만 지워요. 프록시가 잠깐 죽었을 뿐인데
-                    # 지워버리면, 유저 입장에선 멀쩡한 등록이 자꾸 풀리는 걸로 보여요.
-                    if result.expired:
-                        riot_session_store.delete_session(interaction.user.id)
-                        _invalidate_shop_cache(interaction.user.id)
-                        await interaction.followup.send(
-                            "등록해둔 로그인이 만료됐어요. `/오상`으로 다시 로그인(또는 쿠키 재등록)해주세요.",
-                            ephemeral=True,
-                        )
-                    else:
-                        await interaction.followup.send(
-                            f"⚠️ {result.error} (등록해둔 쿠키는 그대로 두었어요)", ephemeral=True
-                        )
-                    return
-                riot_auth.persist_refreshed_cookie(interaction.user.id, result)
-                await _send_shop(interaction, session, result.access_token, result.id_token, public=공개)
-            finally:
-                await session.close()
+            await _render_shop(interaction, payload, public=공개, account_key=account_key)
             return
 
         embed = discord.Embed(
@@ -1435,15 +1742,37 @@ class MyShop(commands.Cog):
 
     @app_commands.command(name="오상쿠키삭제", description="등록해둔 라이엇 로그인 쿠키를 봇에서 지워요.")
     async def delete_cookie(self, interaction: discord.Interaction):
-        # 쿠키를 지우면 캐시에 남은 상점/잔액도 같이 지워야 해요(지웠는데 계속 보이면 곤란해요).
-        _invalidate_shop_cache(interaction.user.id)
-        _owned_skin_names.pop(interaction.user.id, None)
-        if riot_session_store.delete_session(interaction.user.id):
+        accounts = riot_session_store.list_accounts(interaction.user.id)
+        if not accounts:
+            await interaction.response.send_message("등록해둔 쿠키가 없어요.", ephemeral=True)
+            return
+
+        # 계정이 하나뿐이면 물어볼 게 없어요. 예전처럼 바로 지워요.
+        if len(accounts) == 1:
+            _forget_account_data(interaction.user.id, accounts[0]["key"])
+            riot_session_store.delete_session(interaction.user.id, accounts[0]["key"])
             await interaction.response.send_message(
                 "🗑️ 등록해둔 쿠키를 지웠어요. 이제 `/오상`은 매번 로그인 방식으로 동작해요.", ephemeral=True
             )
-        else:
-            await interaction.response.send_message("등록해둔 쿠키가 없어요.", ephemeral=True)
+            return
+
+        view = DeleteAccountView(interaction.user.id, accounts)
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                title="🗑️ 오상 · 등록 해제할 계정",
+                description=(
+                    "\n".join(f"• **{account['label']}**" for account in accounts)
+                    + "\n\n지울 계정을 고르세요. 전부 지우려면 아래 버튼을 눌러요."
+                ),
+                color=0xFF4655,
+            ),
+            view=view,
+            ephemeral=True,
+        )
+        try:
+            view.message = await interaction.original_response()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def setup(bot: commands.Bot):

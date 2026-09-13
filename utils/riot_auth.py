@@ -353,40 +353,53 @@ async def reauth_with_cookies(cookie_header: str) -> tuple[LoginResult, AsyncSes
     )
 
 
-def persist_refreshed_cookie(discord_id: int, result: LoginResult) -> None:
+def persist_refreshed_cookie(
+    discord_id: int, result: LoginResult, account_key: Optional[str] = None
+) -> None:
     """재인증에 성공했으면 라이엇이 새로 내려준 쿠키로 갈아끼워요.
 
     ⚠️ 이걸 빼먹으면 안 돼요. 라이엇은 재인증할 때마다 ssid를 새로 발급하면서 이전 값을
     무효화해서, 저장된 쿠키가 그대로 남아있으면 다음 조회에서 "만료"로 튕겨요. 예전엔 새벽 4시
     갱신 루프에서만 저장하고 /오상·새로고침·위시리스트·/vp계산 경로는 회전된 쿠키를 버려서,
-    쿠키를 등록해둔 유저가 며칠에 한 번씩 재등록해야 하는 증상이 있었어요."""
+    쿠키를 등록해둔 유저가 며칠에 한 번씩 재등록해야 하는 증상이 있었어요.
+
+    계정을 여러 개 등록해둘 수 있어서, 어느 슬롯에 써야 하는지도 같이 넘겨줘야 해요.
+    account_key를 모르는 호출부를 위해 id_token에서 라이엇 ID를 뽑아 대조하니까,
+    account_key를 안 줘도 엉뚱한 계정의 쿠키를 덮어쓰진 않아요."""
     from utils import riot_session_store  # 순환 import 방지용 지연 import
 
     if not result.ok or not result.cookie_header:
         return
-    riot_session_store.save_session(discord_id, result.cookie_header)
+    riot_session_store.save_session(
+        discord_id,
+        result.cookie_header,
+        riot_id=riot_id_from_id_token(result.id_token) or "",
+        account_key=account_key,
+    )
 
 
-async def refresh_stored_session(discord_id: int) -> str:
+async def refresh_stored_session(discord_id: int, account_key: Optional[str] = None) -> str:
     """등록해둔 쿠키로 재인증하고, 라이엇이 새로 내려준 쿠키로 다시 저장해요(SkinPeek 등의
     발로란트 봇들이 쓰는 방식과 동일: 매번 갱신된 쿠키로 덮어써서 만료 시점을 계속 미뤄요).
+
+    account_key를 안 주면 그 유저의 기본 계정을 갱신해요.
 
     "refreshed"(갱신 성공) / "expired"(만료 확인돼서 삭제함) / "failed"(일시 실패, 그대로 둠)."""
     from utils import riot_session_store  # 순환 import 방지용 지연 import
 
-    cookie_header = riot_session_store.get_session(discord_id)
+    cookie_header = riot_session_store.get_session(discord_id, account_key)
     if not cookie_header:
         return "expired"
 
     result, session = await reauth_with_cookies(cookie_header)
     try:
         if result.ok:
-            persist_refreshed_cookie(discord_id, result)
+            persist_refreshed_cookie(discord_id, result, account_key)
             return "refreshed"
         # 만료가 "확인된" 경우에만 지워요. 프록시가 잠깐 죽은 날 이걸 안 가리면
         # 등록된 유저 쿠키가 한 번에 전부 날아가요(재로그인 반복 신고의 원인이었어요).
         if result.expired:
-            riot_session_store.delete_session(discord_id)
+            riot_session_store.delete_session(discord_id, account_key)
             return "expired"
         return "failed"
     finally:
@@ -394,15 +407,16 @@ async def refresh_stored_session(discord_id: int) -> str:
 
 
 async def refresh_all_stored_sessions() -> tuple[int, int, int]:
-    """등록된 모든 유저 세션을 순회하며 재인증+쿠키 재저장을 해요.
+    """등록된 모든 세션을 순회하며 재인증+쿠키 재저장을 해요. 한 사람이 계정을 여러 개
+    등록해뒀으면 계정마다 각각 갱신해요(하나만 갱신하면 나머지가 만료돼버려요).
     (갱신 성공수, 만료로 삭제된 수, 일시 실패해서 그대로 둔 수)를 반환해요."""
     from utils import riot_session_store  # 순환 import 방지용 지연 import
 
     refreshed = 0
     expired = 0
     failed = 0
-    for discord_id in riot_session_store.all_discord_ids():
-        status = await refresh_stored_session(discord_id)
+    for discord_id, account_key, _cookie in riot_session_store.all_sessions():
+        status = await refresh_stored_session(discord_id, account_key)
         if status == "refreshed":
             refreshed += 1
         elif status == "expired":
@@ -626,12 +640,14 @@ async def get_owned_skin_ids(
 
 
 async def get_wallet_with_cookies(
-    cookie_header: str, discord_id: Optional[int] = None
+    cookie_header: str, discord_id: Optional[int] = None, account_key: Optional[str] = None
 ) -> tuple[Optional[dict], str]:
     """등록해둔 쿠키만으로 지갑(보유 재화)까지 한 번에 가져와요.
     상점은 안 부르고 지갑만 필요할 때 쓰는 가벼운 경로예요(/vp계산이 씁니다).
 
     discord_id를 주면 재인증으로 회전된 쿠키를 저장까지 해줘요(안 주면 조회만 하고 버려요).
+    이때 **어느 쿠키를 넘겼는지(account_key)도 같이 줘야 해요.** 안 그러면 계정을 여러 개
+    등록한 사람의 회전된 쿠키가 엉뚱한 슬롯에 저장될 수 있어요.
 
     돌려주는 값: (지갑 dict, 오류메시지). 성공하면 오류메시지가 빈 문자열이에요.
     """
@@ -640,7 +656,7 @@ async def get_wallet_with_cookies(
         if not result.ok:
             return None, result.error or "저장된 로그인이 만료됐어요."
         if discord_id is not None:
-            persist_refreshed_cookie(discord_id, result)
+            persist_refreshed_cookie(discord_id, result, account_key)
 
         puuid = puuid_from_access_token(result.access_token)
         if not puuid:
