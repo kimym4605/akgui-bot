@@ -11,6 +11,7 @@
    기다리지 않아요(봇이 중간에 재시작돼도 그때까지 있던 시간은 반영돼요).
 3. **발로란트 전적** - `/미션`을 칠 때만 조회해요. 상시 조회하면 API 호출량이 감당이 안 돼요.
 """
+import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -20,8 +21,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from cogs.rank import HENRIK_BASE, _extract_player_match_stats
-from utils import coin_wallet, mission_store, riot_account_store
+from cogs.rank import _extract_player_match_stats
+from utils import coin_wallet, henrik_api, mission_store, riot_account_store
 from utils.channel_check import restrict_to_channel
 from utils.mission_store import MISSIONS, ONE_TIME_MISSIONS
 
@@ -183,17 +184,21 @@ class Mission(commands.Cog):
             return None
 
         session = await self._get_session()
-        url = f"{HENRIK_BASE}/valorant/v3/matches/{DEFAULT_REGION}/{name}/{tag}"
         try:
-            async with session.get(
-                url, headers={"Authorization": api_key}, params={"size": MATCH_FETCH_SIZE}
-            ) as resp:
-                if resp.status != 200:
-                    log.info("전적 조회 실패 (%s#%s status=%s)", name, tag, resp.status)
-                    return None
-                payload = await resp.json()
-        except (aiohttp.ClientError, TimeoutError):
+            # /전적·/오늘의번들과 같은 API 키를 나눠 쓰고 있어서, 호출량 조절은 게이트웨이에 맡겨요.
+            # (utils/henrik_api.py 주석 참고)
+            status, payload = await henrik_api.request(
+                session,
+                f"/valorant/v3/matches/{DEFAULT_REGION}/{name}/{tag}",
+                headers={"Authorization": api_key},
+                params={"size": MATCH_FETCH_SIZE},
+            )
+        except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError):
             log.warning("전적 조회 중 네트워크 오류 (%s#%s)", name, tag, exc_info=True)
+            return None
+
+        if status != 200:
+            log.info("전적 조회 실패 (%s#%s status=%s)", name, tag, status)
             return None
 
         matches = payload.get("data") or []

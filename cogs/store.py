@@ -18,11 +18,11 @@ from discord import app_commands
 from discord.ext import commands
 import aiohttp
 
-from utils import valorant_skins
+from utils import henrik_api, valorant_skins
 
 log = logging.getLogger(__name__)
 
-HENRIK_BASE = "https://api.henrikdev.xyz"
+# HenrikDev 주소와 호출량 제한은 utils/henrik_api.py에서 한꺼번에 관리해요.
 
 # 라이엇 상점 API의 아이템 타입 UUID 상수예요. (커뮤니티에 널리 알려진 고정값)
 SKIN_LEVEL_TYPE_ID = "e7c63390-eda7-46e0-bb7a-a6abdacd2433"   # 무기 스킨
@@ -122,12 +122,21 @@ class Store(commands.Cog):
 
         headers = {"Authorization": api_key}
         try:
-            async with self.session.get(f"{HENRIK_BASE}/valorant/v2/store-featured", headers=headers) as resp:
-                status = resp.status
-                payload = await resp.json()
+            # /전적·/미션과 같은 API 키를 나눠 쓰고 있어서, 호출량 조절은 게이트웨이에 맡겨요.
+            # (utils/henrik_api.py 주석 참고)
+            status, payload = await henrik_api.request(
+                self.session, "/valorant/v2/store-featured", headers=headers
+            )
         except Exception as error:  # noqa: BLE001
             log.exception("피처드 상점 조회 중 예외: %s", error)
             await interaction.followup.send("피처드 번들 조회 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.")
+            return
+
+        if status == 429:
+            wait = henrik_api.retry_after_of(payload)
+            await interaction.followup.send(
+                f"⏳ 지금 조회 요청이 몰려서 잠시 막혔어요. **{wait}초쯤 뒤에** 다시 시도해주세요!"
+            )
             return
 
         if status != 200 or "data" not in payload:

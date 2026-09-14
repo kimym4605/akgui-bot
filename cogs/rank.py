@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 import aiohttp
 
+from utils import henrik_api
 from utils.channel_check import restrict_to_channel
 from utils.rank_stats_store import get_kd_percentile, get_sample_size, record_stats
 from utils.riot_account_store import get_account, is_matching_account
@@ -19,7 +20,7 @@ log = logging.getLogger(__name__)
 
 # HenrikDev API (https://docs.henrikdev.xyz) : 라이엇 공식 파트너는 아니지만
 # 활발히 유지보수되고 있는 서드파티(비공식) 발로란트 전적 API예요.
-HENRIK_BASE = "https://api.henrikdev.xyz"
+# 주소와 호출량 제한은 utils/henrik_api.py에서 한꺼번에 관리해요.
 REGION_CHOICES = ["kr", "ap", "na", "eu", "latam", "br"]
 DEFAULT_MATCH_COUNT = 10  # /전적 명령어에서 기본으로 채우려는 총 경기 수예요. (경쟁전 우선, 부족하면 일반전으로 채워요)
 LOW_ACTIVITY_TARGET = 5   # 경쟁전 자체가 이 숫자 미만인 "저활동 계정"은 목표치를 이만큼으로 낮춰요. (일반전 추가 조회량을 줄여서 느려지는 걸 완화해요)
@@ -129,20 +130,25 @@ def get_agwi_grade(score: float) -> tuple[str, int]:
 
 # ============================================================
 # HenrikDev API 호출 헬퍼
+# ------------------------------------------------------------
+# 실제 호출은 utils/henrik_api.py 게이트웨이를 거쳐요. 거기서 분당 호출량을 묶고(한도 초과 방지),
+# 같은 요청은 캐시로 돌려주고, 429를 맞으면 알아서 한 번 재시도해요. (자세한 이유는 그 파일 주석 참고)
 # ============================================================
 async def fetch_current_mmr(session: aiohttp.ClientSession, headers: dict, region: str, name: str, tag: str):
-    url = f"{HENRIK_BASE}/valorant/v3/mmr/{region}/pc/{name}/{tag}"
-    async with session.get(url, headers=headers) as resp:
-        return resp.status, await resp.json()
+    return await henrik_api.request(
+        session, f"/valorant/v3/mmr/{region}/pc/{name}/{tag}", headers=headers
+    )
 
 
 async def fetch_matches_by_mode(
     session: aiohttp.ClientSession, headers: dict, region: str, name: str, tag: str, size: int, mode: str
 ):
-    url = f"{HENRIK_BASE}/valorant/v3/matches/{region}/{name}/{tag}"
-    params = {"mode": mode, "size": size}
-    async with session.get(url, headers=headers, params=params) as resp:
-        return resp.status, await resp.json()
+    return await henrik_api.request(
+        session,
+        f"/valorant/v3/matches/{region}/{name}/{tag}",
+        headers=headers,
+        params={"mode": mode, "size": size},
+    )
 
 
 # ============================================================
@@ -543,6 +549,17 @@ class Rank(commands.Cog):
         except Exception as error:  # noqa: BLE001
             log.exception("전적 조회 중 예외: %s", error)
             await interaction.followup.send("조회 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.")
+            return
+
+        if mmr_status == 429:
+            # 게이트웨이가 한 번 재시도하고도 막힌 경우예요. HenrikDev가 주는 영어 원문
+            # ("Rate limit exceeded, please try again later...")을 그대로 보여주면
+            # 뭘 어쩌라는 건지 알 수 없어서, 몇 초 뒤에 다시 하면 되는지로 안내해요.
+            wait = henrik_api.retry_after_of(mmr_payload)
+            await interaction.followup.send(
+                f"⏳ 지금 전적 조회 요청이 몰려서 잠시 막혔어요. **{wait}초쯤 뒤에** 다시 시도해주세요!\n"
+                f"(발로란트 전적 API가 분당 조회 횟수를 제한하고 있어요)"
+            )
             return
 
         if mmr_status != 200 or "data" not in mmr_payload:
