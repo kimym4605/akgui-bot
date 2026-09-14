@@ -100,6 +100,20 @@ class SpeakGrantButton(
             await interaction.response.send_message("⚠️ 방이 이미 닫혔어요.", ephemeral=True)
             return
 
+        # ⚠️ 여기가 핵심이에요. speak 권한만 풀면 이미 음성에 접속해 있는 사람은 계속
+        # "마이크 사용 권한이 없다"고 떠요. 서버 음소거까지 풀어줘야 바로 말할 수 있어요.
+        # (자세한 이유는 DynamicRoomEngine.apply_server_mute 주석 참고)
+        engine = getattr(interaction.client.get_cog("Room"), "engine", None)
+        if engine is not None:
+            if await engine.apply_server_mute(member, False, "방장이 발언을 허용함"):
+                engine._mark_muted(channel.id, member.id, False)
+        else:
+            # cog를 못 찾는 건 사실상 없는 상황이지만, 그래도 음소거는 꼭 풀어줘야 해요.
+            try:
+                await member.edit(mute=False, reason="방장이 발언을 허용함")
+            except discord.HTTPException:
+                pass
+
         log.info(f"🔊 방장이 '{channel.name}'에서 {member.display_name}님의 발언을 허용했어요.")
 
         # 버튼을 눌린 상태로 굳혀요. (같은 사람한테 두 번 누를 일이 없게)
@@ -235,6 +249,7 @@ class DynamicRoomEngine:
         self.channel_to_owner: dict[int, int] = {}  # channel_id -> owner_id
         self.channel_to_kind: dict[int, str] = {}  # channel_id -> kind_key
         self.channel_to_mute: dict[int, bool] = {}  # channel_id -> 입장시뮤트 옵션 켜짐 여부
+        self.channel_to_muted: dict[int, set[int]] = {}  # channel_id -> 봇이 서버 음소거를 걸어둔 사람들
         self.owner_leave_tasks: dict[int, asyncio.Task] = {}  # channel_id -> 방장 퇴장 후 자동 삭제 타이머
 
     # ============================================================
@@ -247,6 +262,52 @@ class DynamicRoomEngine:
     def is_mute_on_join(self, channel_id: int) -> bool:
         """이 방이 '입장시뮤트'를 켜고 만들어진 방인지 알려줘요."""
         return self.channel_to_mute.get(channel_id, False)
+
+    async def apply_server_mute(self, member: discord.Member, muted: bool, reason: str) -> bool:
+        """서버 음소거를 걸거나 풀어요. 성공하면 True.
+
+        ⚠️ 왜 채널 권한(speak)만으로는 부족한가 (2026-09-15 "발언 허용했는데 마이크 권한이 없대요"):
+
+        디스코드는 **이미 음성에 접속해 있는 사람에게는 speak 권한 변경을 실시간으로 반영하지
+        않아요.** 말하기 권한이 없는 채로 들어가면 그 사람의 음성 세션이 억제된 상태로 굳는데,
+        나중에 채널 권한에서 speak를 허용해줘도 그 세션은 그대로예요. (실제로 감사 로그상
+        `deny: SPEAK -> -`, `allow: ... -> SPEAK`까지 정상 반영됐는데도 유저는 못 썼어요.)
+        방을 나갔다 들어오면 풀리지만, 나가는 순간 입장 권한이 회수돼서 다시 신청해야 해요.
+
+        서버 음소거는 음성 세션에 **즉시** 반영되는 디스코드 네이티브 기능이라 이 문제가 없어요.
+        그래서 speak 권한(방 안에서의 확실한 차단)과 서버 음소거(즉시 효과)를 같이 써요.
+        """
+        try:
+            await member.edit(mute=muted, reason=reason)
+            return True
+        except discord.Forbidden:
+            log.warning("⚠️ 서버 음소거 권한이 없어서 %s님을 처리하지 못했어요.", member.display_name)
+        except discord.HTTPException as error:
+            # 음성에 연결돼 있지 않으면 디스코드가 거부해요(40032). 퇴장 처리 중엔 흔한 일이라
+            # 조용히 넘어가고, 남은 음소거는 나중에 정리 로직이 치워줘요.
+            log.debug("서버 음소거 변경 실패 (%s, muted=%s): %s", member.display_name, muted, error)
+        return False
+
+    def _mark_muted(self, channel_id: int, member_id: int, muted: bool):
+        """봇이 음소거를 건 사람을 기억해둬요. (봇이 재시작돼도 풀어줄 수 있게 파일에도 적어요)"""
+        current = self.channel_to_muted.setdefault(channel_id, set())
+        if muted:
+            current.add(member_id)
+        else:
+            current.discard(member_id)
+        room_store.set_muted(channel_id, list(current))
+
+    async def release_all_mutes(self, guild: discord.Guild, channel_id: int):
+        """방이 닫히기 전에, 그 방에서 봇이 걸어둔 서버 음소거를 전부 풀어줘요.
+
+        방이 사라지면 기록도 같이 사라지니까, **지우기 전에** 풀어야 해요.
+        안 그러면 그 사람은 다른 통화방에 가서도 계속 말을 못 하게 돼요.
+        """
+        member_ids = self.channel_to_muted.pop(channel_id, set())
+        for member_id in member_ids:
+            member = guild.get_member(member_id) if guild else None
+            if member is not None:
+                await self.apply_server_mute(member, False, "방이 닫혀서 음소거 자동 해제")
 
     def _emoji_for(self, channel_id: int) -> str:
         kind = self.channel_to_kind.get(channel_id)
@@ -275,6 +336,7 @@ class DynamicRoomEngine:
             self.owner_to_channel.pop(owner_id, None)
         self.channel_to_kind.pop(channel_id, None)
         self.channel_to_mute.pop(channel_id, None)
+        self.channel_to_muted.pop(channel_id, None)
         room_store.remove_room(channel_id)
 
         task = self.owner_leave_tasks.pop(channel_id, None)
@@ -305,6 +367,8 @@ class DynamicRoomEngine:
             self._cleanup_tracking(channel_id)
             return
 
+        # 방장이 나가서 닫는 경우엔 아직 안에 사람이 남아있을 수 있어요. 기록을 지우기 전에 음소거부터 풀어줘요.
+        await self.release_all_mutes(guild, channel_id)
         self._cleanup_tracking(channel_id)
         try:
             await channel.delete(reason="방장 퇴장으로 자동 삭제")
@@ -345,18 +409,31 @@ class DynamicRoomEngine:
         recovered = 0
         cleaned = 0
 
+        released = 0
         for channel_id, info in stored.items():
             owner_id = info["owner_id"]
             kind = info.get("kind")
             channel = self.bot.get_channel(channel_id)
+            # 봇이 꺼져있는 동안 나간 사람은 음소거가 안 풀린 채로 남아있어요.
+            # 서버 음소거는 서버 전체에 남는 상태라, 방이 어떻게 되든 여기서 꼭 정리해야 해요.
+            muted_ids = set(info.get("muted") or [])
+            self.channel_to_muted[channel_id] = muted_ids
+
             if channel is None or kind not in self.room_kinds:
                 # 채널이 아예 사라졌거나(수동 삭제 등) 모르는 종류면 기록만 지워요.
+                guild = self.bot.get_guild(int(os.getenv("GUILD_ID", 0) or 0))
+                if muted_ids and guild is not None:
+                    await self.release_all_mutes(guild, channel_id)
+                    released += len(muted_ids)
                 room_store.remove_room(channel_id)
                 cleaned += 1
                 continue
 
             if len(channel.members) == 0:
                 # 봇이 꺼져있는 동안 다 나가서 방이 비어버린 경우, 그때 못 지운 거라 지금 정리해요.
+                if muted_ids:
+                    await self.release_all_mutes(channel.guild, channel_id)
+                    released += len(muted_ids)
                 room_store.remove_room(channel_id)
                 try:
                     await channel.delete(reason="봇 재시작 시 정리 - 방이 비어있었음")
@@ -364,6 +441,15 @@ class DynamicRoomEngine:
                     pass
                 cleaned += 1
                 continue
+
+            # 방은 살아있지만, 그 사이에 나가버린 사람의 음소거는 풀어줘야 해요.
+            still_inside = {m.id for m in channel.members}
+            for gone_id in list(muted_ids - still_inside):
+                member = channel.guild.get_member(gone_id)
+                if member is not None:
+                    await self.apply_server_mute(member, False, "봇 재시작 정리 - 방을 이미 나간 사람")
+                self._mark_muted(channel_id, gone_id, False)
+                released += 1
 
             # 아직 사람이 있는 방은 계속 관리해요.
             self.owner_to_channel[owner_id] = channel_id
@@ -380,7 +466,10 @@ class DynamicRoomEngine:
                 if not m.bot:
                     await self._grant_entry_on_join(channel, m)
 
-        log.info(f"🔊 즉석생성형 통화방 복구 완료: {recovered}개 복구, {cleaned}개 정리됨.")
+        log.info(
+            f"🔊 즉석생성형 통화방 복구 완료: {recovered}개 복구, {cleaned}개 정리됨"
+            f"{f', 남아있던 음소거 {released}건 해제' if released else ''}."
+        )
 
     # ============================================================
     # 슬래시 명령어 로직 (cog가 그대로 호출)
@@ -554,6 +643,8 @@ class DynamicRoomEngine:
             return
 
         room_label = self.label_for(channel_id)
+        # 안에 사람이 남아있는 채로 닫을 수 있으니, 기록을 지우기 전에 음소거부터 풀어줘요.
+        await self.release_all_mutes(interaction.guild, channel_id)
         self._cleanup_tracking(channel_id)
         channel = interaction.guild.get_channel(channel_id)
         if channel is not None:
@@ -623,6 +714,11 @@ class DynamicRoomEngine:
         if owner_id is None:
             return
 
+        # speak 권한만으로는 이미 접속한 사람의 마이크가 실제로 막히지 않아요.
+        # 서버 음소거를 같이 걸어야 즉시 먹혀요. (apply_server_mute 주석 참고)
+        if await self.apply_server_mute(member, True, f"{self.label_for(channel.id)} 입장시 뮤트"):
+            self._mark_muted(channel.id, member.id, True)
+
         view = discord.ui.View(timeout=None)
         view.add_item(SpeakGrantButton(channel.id, member.id, owner_id))
         try:
@@ -666,6 +762,13 @@ class DynamicRoomEngine:
         channel = before.channel
         owner_id = self.channel_to_owner[channel.id]
         room_label = self.label_for(channel.id)
+
+        # 이 방에서 봇이 걸어둔 서버 음소거는 나갈 때 꼭 풀어줘야 해요.
+        # 서버 음소거는 채널이 아니라 **서버 전체에 남는 상태**라, 안 풀면 다른 통화방에 가서도
+        # 계속 말을 못 해요. (운영진이 징계로 건 음소거는 우리가 기록해둔 대상이 아니라 건드리지 않아요)
+        if member.id in self.channel_to_muted.get(channel.id, set()):
+            await self.apply_server_mute(member, False, f"{room_label} 퇴장으로 음소거 자동 해제")
+            self._mark_muted(channel.id, member.id, False)
 
         if len(channel.members) == 0:
             self._cleanup_tracking(channel.id)

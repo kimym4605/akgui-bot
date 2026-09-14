@@ -49,3 +49,23 @@ def remove_room(channel_id: int):
     if str(channel_id) in data:
         del data[str(channel_id)]
         _save(data)
+
+
+def set_muted(channel_id: int, member_ids: list[int]):
+    """이 방에서 **봇이 서버 음소거를 걸어둔 사람들**을 기록해요.
+
+    ⚠️ 왜 굳이 기록해두는가: 서버 음소거는 채널 권한과 달리 **서버 전체에 남는 상태**라,
+    방을 나가면 우리가 직접 풀어줘야 다른 통화방에서 말할 수 있어요. 그런데 "음소거된 사람을
+    보이는 대로 풀어주는" 식으로 짜면, 운영진이 징계로 걸어둔 음소거까지 봇이 풀어버려요.
+    그래서 **봇이 건 것만** 여기에 적어두고, 그 사람만 풀어줘요.
+    """
+    data = _load()
+    room = data.get(str(channel_id))
+    if room is None:
+        return
+    room["muted"] = sorted(set(member_ids))
+    _save(data)
+
+
+def get_muted(channel_id: int) -> list[int]:
+    return list((_load().get(str(channel_id)) or {}).get("muted") or [])
