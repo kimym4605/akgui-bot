@@ -17,7 +17,7 @@ from discord.ext import commands
 
 from utils import room_store
 from utils.channel_check import restrict_to_channel
-from utils.dynamic_room import DynamicRoomEngine
+from utils.dynamic_room import DynamicRoomEngine, SpeakGrantButton
 
 log = logging.getLogger(__name__)
 
@@ -90,7 +90,11 @@ class Room(commands.Cog):
         await self.engine.on_ready_recover()
 
     @app_commands.command(name="방만들기", description="원하는 종류의 통화방을 새로 만들어요. (초대/신청해야 남이 입장 가능)")
-    @app_commands.describe(종류="어떤 방을 만들지 선택하세요.", 인원수="방 최대 인원수 (선택, 안 정하면 무제한)")
+    @app_commands.describe(
+        종류="어떤 방을 만들지 선택하세요.",
+        인원수="방 최대 인원수 (선택, 안 정하면 무제한)",
+        입장시뮤트="신청으로 들어오는 사람을 마이크 막힌 상태로 입장시켜요. (방장이 버튼으로 풀어줌)",
+    )
     @app_commands.choices(
         종류=[app_commands.Choice(name=cfg["choice_name"], value=key) for key, cfg in ROOM_KINDS.items()]
     )
@@ -100,8 +104,9 @@ class Room(commands.Cog):
         interaction: discord.Interaction,
         종류: app_commands.Choice[str],
         인원수: app_commands.Range[int, 1, 99] = None,
+        입장시뮤트: bool = False,
     ):
-        await self.engine.create_room(interaction, 종류.value, 인원수)
+        await self.engine.create_room(interaction, 종류.value, 인원수, 입장시뮤트)
 
     @app_commands.command(name="방초대", description="내 방에 원하는 사람을 바로 초대해요.")
     @app_commands.describe(대상="초대할 사람을 선택하세요.")
@@ -128,4 +133,7 @@ class Room(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
+    # "🔊 발언 허용" 버튼은 방장이 눌러줄 때까지 계속 살아있어야 해서, 봇이 재시작돼도
+    # 다시 동작하도록 여기에 등록해둬요. (자세한 이유는 utils/dynamic_room.py의 SpeakGrantButton 주석 참고)
+    bot.add_dynamic_items(SpeakGrantButton)
     await bot.add_cog(Room(bot))

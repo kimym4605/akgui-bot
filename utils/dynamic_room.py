@@ -39,6 +39,83 @@ OWNER_LEAVE_GRACE_SECONDS = 10  # 방장이 나간 뒤 이 시간 뒤에 방을 
 
 
 # ============================================================
+# 발언 허용 버튼 UI (입장시 뮤트 옵션이 켜진 방에서 씀)
+# ------------------------------------------------------------
+# ⚠️ 왜 평범한 View가 아니라 DynamicItem인가:
+# 이 버튼은 "방장이 눌러줄 때까지" 계속 살아있어야 하는데, 보통의 View는 봇이 재시작되면
+# 메모리에서 사라져서 눌러도 "상호작용 실패"만 떠요. 그러면 뮤트를 풀 방법이 없어져요.
+# DynamicItem은 버튼의 custom_id 문자열 자체에 필요한 정보를 다 박아두고, 눌린 순간
+# 그걸 정규식으로 다시 꺼내 쓰는 방식이라 봇이 재시작돼도 그대로 동작해요.
+# (그래서 엔진 인스턴스를 참조하지 않고, 방장 ID까지 custom_id에 같이 넣어요)
+# ============================================================
+class SpeakGrantButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"room:speak:(?P<channel_id>\d+):(?P<member_id>\d+):(?P<owner_id>\d+)",
+):
+    def __init__(self, channel_id: int, member_id: int, owner_id: int):
+        super().__init__(
+            discord.ui.Button(
+                label="🔊 발언 허용",
+                style=discord.ButtonStyle.success,
+                custom_id=f"room:speak:{channel_id}:{member_id}:{owner_id}",
+            )
+        )
+        self.channel_id = channel_id
+        self.member_id = member_id
+        self.owner_id = owner_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match):
+        return cls(int(match["channel_id"]), int(match["member_id"]), int(match["owner_id"]))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("이 버튼은 방장만 누를 수 있어요.", ephemeral=True)
+            return False
+        return True
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        channel = guild.get_channel(self.channel_id) if guild else None
+        member = guild.get_member(self.member_id) if guild else None
+
+        if channel is None or member is None:
+            await interaction.response.send_message(
+                "⚠️ 방이 이미 닫혔거나 그 사람을 찾을 수 없어요.", ephemeral=True
+            )
+            return
+
+        try:
+            # 지금 걸려있는 개인 권한은 그대로 두고 speak만 켜요.
+            # (overwrite 객체를 통째로 새로 만들면 connect/view_channel이 날아가서 튕겨나가요)
+            current = channel.overwrites_for(member)
+            current.update(speak=True)
+            await channel.set_permissions(
+                member, overwrite=current, reason=f"방장이 {member.display_name}님의 발언을 허용함"
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message("⚠️ 권한이 없어서 풀어주지 못했어요.", ephemeral=True)
+            return
+        except discord.NotFound:
+            await interaction.response.send_message("⚠️ 방이 이미 닫혔어요.", ephemeral=True)
+            return
+
+        log.info(f"🔊 방장이 '{channel.name}'에서 {member.display_name}님의 발언을 허용했어요.")
+
+        # 버튼을 눌린 상태로 굳혀요. (같은 사람한테 두 번 누를 일이 없게)
+        view = discord.ui.View(timeout=None)
+        done = discord.ui.Button(label="🔊 발언 허용됨", style=discord.ButtonStyle.secondary, disabled=True)
+        view.add_item(done)
+        try:
+            await interaction.response.edit_message(
+                content=f"🔊 **{member.display_name}**님의 발언이 허용됐어요. 이제 마이크를 쓸 수 있어요!",
+                view=view,
+            )
+        except discord.HTTPException:
+            pass
+
+
+# ============================================================
 # 입장 신청 수락/거절 버튼 UI
 # ============================================================
 class JoinRequestView(discord.ui.View):
@@ -87,18 +164,38 @@ class JoinRequestView(discord.ui.View):
             return
 
         room_label = self.engine.label_for(channel.id)
+        # 방장이 "입장시뮤트"를 켜고 만든 방이면, 신청으로 들어오는 사람은 말하기를 막은 채로 들여보내요.
+        # (방장이 나중에 🔊 발언 허용 버튼을 눌러줘야 풀려요)
+        mute_on_join = self.engine.is_mute_on_join(channel.id)
         try:
             await channel.set_permissions(
-                requester, connect=True, view_channel=True, reason=f"{room_label} 입장 신청 수락 (방장: {self.owner_id})"
+                requester,
+                connect=True,
+                view_channel=True,
+                speak=False if mute_on_join else None,
+                reason=f"{room_label} 입장 신청 수락 (방장: {self.owner_id})",
             )
         except discord.Forbidden:
             await interaction.followup.send("⚠️ 권한이 없어서 수락하지 못했어요.", ephemeral=True)
             self.stop()
             return
 
-        await self._edit_original(f"✅ **{requester.display_name}**님의 입장 신청을 수락했어요!")
+        if mute_on_join:
+            await self._edit_original(
+                f"✅ **{requester.display_name}**님의 입장 신청을 수락했어요! "
+                f"(🔇 마이크가 막힌 상태로 들어와요 — 입장하면 방 채팅에 뜨는 **🔊 발언 허용** 버튼으로 풀어주세요)"
+            )
+        else:
+            await self._edit_original(f"✅ **{requester.display_name}**님의 입장 신청을 수락했어요!")
+
+        mute_notice = (
+            "\n🔇 이 방은 입장하면 마이크가 막혀 있어요. 방장이 발언을 허용해줄 때까지 기다려주세요!"
+            if mute_on_join else ""
+        )
         try:
-            await requester.send(f"✅ {room_label} 입장 신청이 수락됐어요! {channel.mention}에 입장해보세요.")
+            await requester.send(
+                f"✅ {room_label} 입장 신청이 수락됐어요! {channel.mention}에 입장해보세요.{mute_notice}"
+            )
         except discord.Forbidden:
             pass
         self.stop()
@@ -137,6 +234,7 @@ class DynamicRoomEngine:
         self.owner_to_channel: dict[int, int] = {}  # owner_id -> channel_id
         self.channel_to_owner: dict[int, int] = {}  # channel_id -> owner_id
         self.channel_to_kind: dict[int, str] = {}  # channel_id -> kind_key
+        self.channel_to_mute: dict[int, bool] = {}  # channel_id -> 입장시뮤트 옵션 켜짐 여부
         self.owner_leave_tasks: dict[int, asyncio.Task] = {}  # channel_id -> 방장 퇴장 후 자동 삭제 타이머
 
     # ============================================================
@@ -145,6 +243,10 @@ class DynamicRoomEngine:
     def label_for(self, channel_id: int) -> str:
         kind = self.channel_to_kind.get(channel_id)
         return self.room_kinds.get(kind, {}).get("label", "방")
+
+    def is_mute_on_join(self, channel_id: int) -> bool:
+        """이 방이 '입장시뮤트'를 켜고 만들어진 방인지 알려줘요."""
+        return self.channel_to_mute.get(channel_id, False)
 
     def _emoji_for(self, channel_id: int) -> str:
         kind = self.channel_to_kind.get(channel_id)
@@ -158,12 +260,13 @@ class DynamicRoomEngine:
         category = guild.get_channel(int(category_id))
         return category if isinstance(category, discord.CategoryChannel) else None
 
-    def _track(self, channel_id: int, owner_id: int, kind: str):
+    def _track(self, channel_id: int, owner_id: int, kind: str, mute_on_join: bool = False):
         """메모리 + 파일 둘 다에 기록해요."""
         self.owner_to_channel[owner_id] = channel_id
         self.channel_to_owner[channel_id] = owner_id
         self.channel_to_kind[channel_id] = kind
-        room_store.add_room(channel_id, owner_id, kind)
+        self.channel_to_mute[channel_id] = mute_on_join
+        room_store.add_room(channel_id, owner_id, kind, mute_on_join)
 
     def _cleanup_tracking(self, channel_id: int):
         """메모리 + 파일 둘 다에서 지워요."""
@@ -171,6 +274,7 @@ class DynamicRoomEngine:
         if owner_id is not None:
             self.owner_to_channel.pop(owner_id, None)
         self.channel_to_kind.pop(channel_id, None)
+        self.channel_to_mute.pop(channel_id, None)
         room_store.remove_room(channel_id)
 
         task = self.owner_leave_tasks.pop(channel_id, None)
@@ -265,6 +369,8 @@ class DynamicRoomEngine:
             self.owner_to_channel[owner_id] = channel_id
             self.channel_to_owner[channel_id] = owner_id
             self.channel_to_kind[channel_id] = kind
+            # 이 기능이 생기기 전에 만들어진 방 기록에는 이 필드가 아예 없어요. 그땐 꺼진 걸로 봐요.
+            self.channel_to_mute[channel_id] = info.get("mute_on_join", False)
             recovered += 1
 
             # 지금 방 안에 있는데 권한이 없는 사람을 여기서 같이 풀어줘요.
@@ -279,7 +385,9 @@ class DynamicRoomEngine:
     # ============================================================
     # 슬래시 명령어 로직 (cog가 그대로 호출)
     # ============================================================
-    async def create_room(self, interaction: discord.Interaction, kind: str, 인원수: int | None):
+    async def create_room(
+        self, interaction: discord.Interaction, kind: str, 인원수: int | None, 입장시뮤트: bool = False
+    ):
         await interaction.response.defer(ephemeral=True)
 
         if not isinstance(interaction.user, discord.Member):
@@ -338,14 +446,21 @@ class DynamicRoomEngine:
             )
             return
 
-        self._track(channel.id, interaction.user.id, kind)
+        self._track(channel.id, interaction.user.id, kind, 입장시뮤트)
         self._schedule_unused_check(channel)
 
         capacity_text = f" (최대 {인원수}명)" if 인원수 else ""
         minutes = ROOM_EXPIRE_SECONDS // 60
+        mute_text = (
+            "🔇 **입장시 뮤트**가 켜져 있어요. `/방신청`으로 들어오는 사람은 마이크가 막힌 채로 입장하고, "
+            "방 채팅에 뜨는 **🔊 발언 허용** 버튼을 눌러줘야 말할 수 있어요. "
+            "(`/방초대`로 직접 초대한 사람은 바로 말할 수 있어요)\n"
+            if 입장시뮤트 else ""
+        )
         await interaction.followup.send(
             f"{emoji} {room_label}을 만들었어요! {channel.mention}{capacity_text}\n"
             f"다른 사람들은 방을 볼 수는 있지만, `/방초대`로 직접 초대하거나 `/방신청`을 받아서 승인해야 들어올 수 있어요.\n"
+            f"{mute_text}"
             f"(⏳ {minutes}분 안에 아무도 안 들어오면 자동으로 사라져요 · 방이 완전히 비면 바로 사라져요 · "
             f"방장이 나가면 {OWNER_LEAVE_GRACE_SECONDS}초 후 자동으로 사라져요)",
             ephemeral=True,
@@ -493,6 +608,34 @@ class DynamicRoomEngine:
         except (discord.Forbidden, discord.NotFound):
             pass
 
+    async def _post_speak_grant_button(self, channel: discord.VoiceChannel, member: discord.Member):
+        """마이크가 막힌 채로 들어온 사람이 있으면, 방장이 풀어줄 버튼을 방 채팅에 올려요.
+
+        판단 기준을 "이 방이 뮤트 방인가"가 아니라 **그 사람의 실제 speak 권한이 False인가**로 잡았어요.
+        방장이 이미 한 번 풀어준 사람이 잠깐 나갔다 들어오는 경우까지 매번 버튼이 뜨면 시끄러운데,
+        퇴장하면 개인 권한이 통째로 회수되니 재입장하면 다시 막힌 상태가 되는 게 맞고,
+        반대로 `/방초대`로 들어온 사람(speak 제한 없음)에게는 버튼이 안 뜨게 돼요.
+        """
+        if channel.overwrites_for(member).speak is not False:
+            return
+
+        owner_id = self.channel_to_owner.get(channel.id)
+        if owner_id is None:
+            return
+
+        view = discord.ui.View(timeout=None)
+        view.add_item(SpeakGrantButton(channel.id, member.id, owner_id))
+        try:
+            await channel.send(
+                f"🔇 {member.mention}님이 입장했어요. 지금은 마이크가 막혀 있어요.\n"
+                f"<@{owner_id}> 방장님, 아래 버튼으로 발언을 허용해주세요!",
+                view=view,
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            # 방 채팅(text-in-voice)에 못 올리는 상황이면 조용히 넘어가요. 방장이 나중에 다시 신청받아도 되고,
+            # 무엇보다 여기서 예외가 나면 입장 처리 전체가 멈춰버려요.
+            log.warning(f"⚠️ '{channel.name}'에 발언 허용 버튼을 올리지 못했어요.")
+
     async def handle_voice_state_update(
         self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
     ):
@@ -510,6 +653,8 @@ class DynamicRoomEngine:
         )
         if entered_room and not member.bot:
             await self._grant_entry_on_join(after.channel, member)
+            # 마이크가 막힌 채로 들어온 사람이면, 방장이 눌러서 풀어줄 버튼을 방 채팅에 띄워요.
+            await self._post_speak_grant_button(after.channel, member)
 
         if before.channel is None or before.channel.id not in self.channel_to_owner:
             return
