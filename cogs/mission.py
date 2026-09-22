@@ -34,6 +34,14 @@ VOICE_FLUSH_MINUTES = 5   # 통화 중이어도 5분마다 중간 정산해요
 MATCH_FETCH_SIZE = 10     # 전적은 최근 10경기만 봐요 (오늘 것만 걸러서 씀)
 DEFAULT_REGION = "kr"
 
+# ── 발로란트 미션 자동 판정 ────────────────────────────────────────────────
+# 발로란트 미션(오늘 1판·1승·15킬·KD 1.0·경쟁전)은 원래 유저가 `/미션`을 직접 쳐야만
+# 판정됐어요. 게임 끝나고 굳이 디스코드에 와서 `/미션`을 칠 이유가 없다 보니 실제로는
+# 거의 안 깨졌고(2026-09-22 실측: 하루 3개 중 평균 0.35개, 3개를 다 깬 날은 0일),
+# 코인이 설계대로 안 돌았어요. 그래서 봇이 주기적으로 대신 확인해줘요.
+AUTO_CHECK_MINUTES = 30      # 한 판이 보통 30~40분이라 이 정도면 충분해요
+AUTO_CHECK_GAP_SECONDS = 2   # 라이엇 API를 연달아 두들기지 않게 사람마다 쉬어요
+
 
 def _is_today_kst(unix_seconds: int | None) -> bool:
     if not unix_seconds:
@@ -49,9 +57,11 @@ class Mission(commands.Cog):
         # {user_id: 이 채널에 들어온 시각} - 통화방 체류 시간 계산용
         self._voice_since: dict[int, datetime] = {}
         self.flush_voice.start()
+        self.auto_check_valorant.start()
 
     def cog_unload(self):
         self.flush_voice.cancel()
+        self.auto_check_valorant.cancel()
         if self.session and not self.session.closed:
             self.bot.loop.create_task(self.session.close())
 
@@ -240,6 +250,93 @@ class Mission(commands.Cog):
             if achieved:
                 await self._complete(user_id, key, channel)
         return None
+
+    # ------------------------------------------------------------------
+    # 발로란트 미션 자동 판정 (30분마다)
+    # ------------------------------------------------------------------
+    @tasks.loop(minutes=AUTO_CHECK_MINUTES)
+    async def auto_check_valorant(self):
+        """연동해둔 사람들의 오늘 전적을 봇이 대신 확인해서 발로란트 미션을 깨줘요.
+
+        예전엔 `/미션`을 직접 쳐야만 판정돼서 사실상 안 깨지는 미션이었어요."""
+        user_ids = riot_account_store.all_discord_ids()
+        if not user_ids:
+            return
+
+        valorant_keys = {key for key, info in MISSIONS.items() if info["kind"] == "valorant"}
+        looked_up = completed = 0
+        for user_id in user_ids:
+            # 한 사람에서 예외가 새어나가면 나머지가 통째로 밀리고 루프까지 죽어요.
+            try:
+                newly = await self._auto_check_one(user_id, valorant_keys)
+            except Exception as error:  # noqa: BLE001
+                log.warning("⚠️ 발로란트 미션 자동 확인 실패(이 사람만 건너뜀): %s — %r", user_id, error)
+                continue
+            if newly is None:
+                continue  # 확인할 미션이 없어서 API를 아예 안 불렀어요
+            looked_up += 1
+            completed += newly
+            await asyncio.sleep(AUTO_CHECK_GAP_SECONDS)
+
+        if looked_up:
+            log.info("🎯 발로란트 미션 자동 확인: %d명 조회, %d개 완료", looked_up, completed)
+
+    async def _auto_check_one(self, user_id: int, valorant_keys: set[str]) -> int | None:
+        """한 사람 몫이에요. 확인할 게 없으면 None, 확인했으면 이번에 깬 미션 수.
+
+        `ensure_today`를 여기서 부르는 건, 미션 문서가 `/미션`을 쳐야 생기기 때문이에요.
+        문서가 없으면 자동 판정 대상에서 빠져버려요. 뽑히는 미션은 `user_id:날짜` 시드로
+        정해져서, 봇이 미리 만들어도 유저가 직접 만들 때와 **똑같은 미션**이 나와요."""
+        doc = await mission_store.ensure_today(user_id, linked=True)
+        done = set(doc.get("done") or [])
+        pending = [
+            key for key in (doc.get("picks") or [])
+            if key in valorant_keys and key not in done
+        ]
+        if not pending:
+            return None
+
+        await self._check_valorant(user_id, pending, None)  # 알림은 아래에서 묶어서 보내요
+
+        after = await mission_store.ensure_today(user_id, linked=True)
+        done_after = set(after.get("done") or [])
+        newly = [key for key in pending if key in done_after]
+        if newly:
+            await self._notify_auto_complete(user_id, newly)
+        return len(newly)
+
+    async def _notify_auto_complete(self, user_id: int, keys: list[str]):
+        """자동으로 깬 미션은 본인에게만 DM으로 알려줘요.
+
+        채널에 뿌리면 30분마다 알림이 쌓여서 시끄러워요. DM을 막아둔 사람은 그냥 넘어가요
+        (코인은 이미 들어갔고, `/미션`에서 확인할 수 있어요)."""
+        user = self.bot.get_user(user_id)
+        if user is None:
+            try:
+                user = await self.bot.fetch_user(user_id)
+            except discord.HTTPException:
+                return
+
+        titles = " · ".join(MISSIONS[key]["title"] for key in keys)
+        reward = len(keys) * mission_store.REWARD_PER_MISSION
+        try:
+            balance = await coin_wallet.get_balance(user_id)
+            await user.send(
+                f"🎯 발로란트 미션이 자동으로 완료됐어요 — **{titles}**\n"
+                f"악귀코인 **+{reward}개** (보유 **{balance}개**) · 남은 미션은 `/미션`에서 볼 수 있어요"
+            )
+        except discord.HTTPException:
+            log.info("자동 완료 DM을 못 보냈어요(차단/DM 비허용): %s", user_id)
+
+    @auto_check_valorant.before_loop
+    async def _before_auto_check(self):
+        await self.bot.wait_until_ready()
+
+    @auto_check_valorant.error
+    async def _auto_check_error(self, error: BaseException):
+        """루프가 예외로 멈추면 조용히 끝나버려요(로그 한 줄 말고는 티가 안 나요). 다시 켜둬요."""
+        log.error("🚨 발로란트 미션 자동 확인 루프가 멈췄어요 — 다시 켤게요: %r", error, exc_info=error)
+        self.auto_check_valorant.restart()
 
     # ------------------------------------------------------------------
     # /미션

@@ -44,6 +44,20 @@ def get_account(discord_id: int) -> Optional[Tuple[str, str]]:
     return entry["name"], entry["tag"]
 
 
+def all_discord_ids() -> list[int]:
+    """라이엇 계정을 연동해둔 사람들의 디스코드 id 전부.
+
+    발로란트 미션 자동 판정 루프가 '누구 전적을 확인해야 하는지' 고를 때 써요.
+    숫자로 못 바꾸는 키(과거 데이터가 깨진 경우)는 조용히 건너뛰어요."""
+    ids = []
+    for key in _load():
+        try:
+            ids.append(int(key))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
 def delete_account(discord_id: int) -> bool:
     data = _load()
     if str(discord_id) in data:
