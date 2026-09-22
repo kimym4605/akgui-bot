@@ -40,6 +40,27 @@ def record_stats(riot_id: str, kd: float, agwi_score: float):
     _save(data)
 
 
+def get_stats(riot_id: str) -> Optional[dict]:
+    """그 계정의 마지막 `/전적` 기록({"kd", "agwi_score"}). 조회한 적이 없으면 None.
+
+    /팀짜기 밸런싱이 써요. 여기 없으면 그 사람은 티어 역할만으로 점수를 매겨요.
+
+    키는 `/전적`에 **입력된 표기 그대로** 저장돼요(예: `OwO#0583`, `악귀#kr1`). 그래서
+    연동해둔 계정 표기와 대소문자가 어긋나면 그냥 못 찾아요. 그건 실력 점수를 놓치는
+    것뿐이라 조용히 지나가버리니, 여기서 대소문자·공백을 무시하고 한 번 더 찾아봐요."""
+    data = _load()
+    entry = data.get(riot_id)
+    if not isinstance(entry, dict):
+        target = (riot_id or "").strip().lower()
+        if not target:
+            return None
+        for key, value in data.items():
+            if key.strip().lower() == target and isinstance(value, dict):
+                return value
+        return None
+    return entry
+
+
 def get_kd_percentile(kd: float) -> Optional[float]:
     """이 KD보다 낮은 사람이 몇 %인지 반환해요. 표본이 부족하면 None."""
     data = _load()

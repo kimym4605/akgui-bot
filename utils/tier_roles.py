@@ -92,6 +92,44 @@ TIER_ROLE_DISPLAY_NAMES = [display_name_for(t) for t in TIER_OPTIONS]
 TIER_ROLE_NAME_SET = set(TIER_ROLE_DISPLAY_NAMES)
 
 
+# 티어 하나를 숫자 한 개로 바꿔주는 자리예요. `/팀짜기` 밸런싱이 "실력 점수"의 축으로 써요.
+# 순서는 TIER_OPTIONS 그대로라, 아이언1=1 … 실버3=9 … 레디언트=25가 돼요.
+# 실버3=9인 건 우연이 아니라 cogs/rank.py의 티어 배수 기준점(실버3·0RR=1.00배)과 같은 축이에요.
+TIER_INDEX_BY_NAME = {name: index for index, name in enumerate(TIER_OPTIONS, start=1)}
+TIER_INDEX_BY_DISPLAY_NAME = {
+    display_name_for(name): index for name, index in TIER_INDEX_BY_NAME.items()
+}
+# 기준점(실버 3). 티어를 알 수 없는 사람을 어디에 놓을지 정할 때 씁니다.
+BASELINE_TIER_INDEX = TIER_INDEX_BY_NAME["실버 3"]
+MAX_TIER_INDEX = TIER_INDEX_BY_NAME[TOP_TIER]
+
+
+def tier_index_of(tier_name: str) -> Optional[int]:
+    """'실버 3' -> 9, '✨ 레디언트'(역할 이름) -> 25. 못 알아보면 None."""
+    if not tier_name:
+        return None
+    return TIER_INDEX_BY_NAME.get(tier_name) or TIER_INDEX_BY_DISPLAY_NAME.get(tier_name)
+
+
+def tier_name_from_index(index: int) -> str:
+    """9 -> '실버 3'. 범위를 벗어나면 가장 가까운 티어로 잘라줘요."""
+    clamped = max(1, min(MAX_TIER_INDEX, int(round(index))))
+    return TIER_OPTIONS[clamped - 1]
+
+
+def member_tier_index(member: discord.Member) -> Optional[int]:
+    """멤버가 지금 달고 있는 티어 역할에서 숫자를 뽑아요. 역할이 없으면 None.
+
+    역할은 `/전적`을 본인 계정으로 돌릴 때 자동 동기화돼요(sync_tier_role).
+    여러 개가 달려 있으면(비정상) 가장 높은 걸 써요."""
+    indexes = [
+        index
+        for index in (tier_index_of(role.name) for role in member.roles)
+        if index is not None
+    ]
+    return max(indexes) if indexes else None
+
+
 async def get_or_create_tier_role(
     guild: discord.Guild, tier_name: str, icon_bytes: Optional[bytes] = None
 ) -> discord.Role:
