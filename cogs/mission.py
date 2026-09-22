@@ -40,10 +40,20 @@ DEFAULT_REGION = "kr"
 # 거의 안 깨졌고(2026-09-22 실측: 하루 3개 중 평균 0.35개, 3개를 다 깬 날은 0일),
 # 코인이 설계대로 안 돌았어요. 그래서 봇이 주기적으로 대신 확인해줘요.
 AUTO_CHECK_MINUTES = 30      # 한 판이 보통 30~40분이라 이 정도면 충분해요
-AUTO_CHECK_GAP_SECONDS = 2   # 라이엇 API를 연달아 두들기지 않게 사람마다 쉬어요
+# 사람마다 쉬는 간격이에요. 2초로 뒀더니 연동자 18명 기준 36초에 18번을 불러서
+# 게이트웨이 한도(분당 28회)를 `/전적`·`/오상`과 나눠 쓰다가 429가 났어요(2026-09-22 실측).
+# 5초면 18명에 90초가 걸리는데, 30분 주기라 전혀 촉박하지 않아요.
+AUTO_CHECK_GAP_SECONDS = 5
 # HenrikDev가 통째로 죽는 일이 있어요(2026-09-22에 겪음: 모든 엔드포인트가 500).
 # 그때 끝까지 도는 건 헛호출이고 로그만 수백 줄 쌓여요. 연속으로 이만큼 실패하면 접어요.
 AUTO_CHECK_ABORT_AFTER = 3
+
+# 조회 실패 사유를 문자열로 구분해야 해서 상수로 뒀어요(호출하는 쪽이 문구를 그대로 비교해요).
+NOT_LINKED_NOTE = "라이엇 계정이 연동되어 있지 않아요. `/전적`에서 본인 계정을 등록해주세요."
+ACCOUNT_NOT_FOUND_NOTE = (
+    "등록해둔 라이엇 계정을 찾을 수 없어요. 이름이나 태그가 바뀌었다면 "
+    "`/티어 계정등록`으로 다시 등록해주세요."
+)
 
 
 def _is_today_kst(unix_seconds: int | None) -> bool:
@@ -59,6 +69,8 @@ class Mission(commands.Cog):
         self.session: aiohttp.ClientSession | None = None
         # {user_id: 이 채널에 들어온 시각} - 통화방 체류 시간 계산용
         self._voice_since: dict[int, datetime] = {}
+        # {user_id: 날짜} - 그 계정을 라이엇에서 못 찾은 날이에요. 같은 날은 다시 안 불러요.
+        self._account_missing: dict[int, str] = {}
         self.flush_voice.start()
         self.auto_check_valorant.start()
 
@@ -190,11 +202,17 @@ class Mission(commands.Cog):
     # ------------------------------------------------------------------
     # 3. 발로란트 전적 판정
     # ------------------------------------------------------------------
-    async def _fetch_today_matches(self, name: str, tag: str) -> list[dict] | None:
-        """오늘 플레이한 경기만 돌려줘요. 조회 실패면 None."""
+    async def _fetch_today_matches(
+        self, name: str, tag: str
+    ) -> tuple[list[dict] | None, int | None]:
+        """(오늘 플레이한 경기, 응답 상태코드). 조회 실패면 경기는 None이에요.
+
+        상태코드까지 돌려주는 건 **404(그런 계정 없음)와 나머지 실패를 갈라야** 하기 때문이에요.
+        404는 몇 번을 다시 불러도 똑같아서(이름·태그가 바뀐 계정), 자동 확인 루프가 그날은
+        그 사람을 건너뛰게 해요. 안 그러면 30분마다 영원히 헛호출이 나가요."""
         api_key = os.getenv("HENRIKDEV_API_KEY")
         if not api_key:
-            return None
+            return None, None
 
         session = await self._get_session()
         try:
@@ -208,27 +226,29 @@ class Mission(commands.Cog):
             )
         except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError):
             log.warning("전적 조회 중 네트워크 오류 (%s#%s)", name, tag, exc_info=True)
-            return None
+            return None, None
 
         if status != 200:
             log.info("전적 조회 실패 (%s#%s status=%s)", name, tag, status)
-            return None
+            return None, status
 
         matches = payload.get("data") or []
         return [
             m for m in matches
             if m and _is_today_kst((m.get("metadata") or {}).get("game_start"))
-        ]
+        ], status
 
     async def _check_valorant(self, user_id: int, keys: list[str], channel) -> str | None:
         """발로란트 미션들을 오늘 전적으로 판정해요. 조회를 못 하면 사유 문구를 돌려줘요."""
         account = riot_account_store.get_account(user_id)
         if account is None:
-            return "라이엇 계정이 연동되어 있지 않아요. `/전적`에서 본인 계정을 등록해주세요."
+            return NOT_LINKED_NOTE
 
         name, tag = account
-        matches = await self._fetch_today_matches(name, tag)
+        matches, status = await self._fetch_today_matches(name, tag)
         if matches is None:
+            if status == 404:
+                return ACCOUNT_NOT_FOUND_NOTE
             return "전적을 불러오지 못했어요. 잠시 뒤에 다시 시도해주세요."
         if not matches:
             return None  # 오늘 한 경기가 없을 뿐 - 정상이에요
@@ -308,6 +328,10 @@ class Mission(commands.Cog):
         `ensure_today`를 여기서 부르는 건, 미션 문서가 `/미션`을 쳐야 생기기 때문이에요.
         문서가 없으면 자동 판정 대상에서 빠져버려요. 뽑히는 미션은 `user_id:날짜` 시드로
         정해져서, 봇이 미리 만들어도 유저가 직접 만들 때와 **똑같은 미션**이 나와요."""
+        today = mission_store.today_iso()
+        if self._account_missing.get(user_id) == today:
+            return None, False  # 오늘 이미 "그런 계정 없음"을 확인했어요
+
         doc = await mission_store.ensure_today(user_id, linked=True)
         done = set(doc.get("done") or [])
         pending = [
@@ -322,12 +346,36 @@ class Mission(commands.Cog):
         note = await self._check_valorant(user_id, pending, None)  # 알림은 아래에서 묶어 보내요
         fetched = note is None
 
+        if note == ACCOUNT_NOT_FOUND_NOTE:
+            # 이름·태그가 바뀐 계정이에요. 다시 불러도 계속 404라서 오늘은 건너뛰고,
+            # 본인은 이유를 모르면 미션을 영영 못 깨니 하루 한 번만 알려줘요.
+            self._account_missing[user_id] = today
+            log.info("등록된 라이엇 계정을 못 찾았어요(오늘은 건너뛸게요): %s", user_id)
+            await self._notify_account_missing(user_id)
+            return 0, False
+
         after = await mission_store.ensure_today(user_id, linked=True)
         done_after = set(after.get("done") or [])
         newly = [key for key in pending if key in done_after]
         if newly:
             await self._notify_auto_complete(user_id, newly)
         return len(newly), fetched
+
+    async def _notify_account_missing(self, user_id: int):
+        """연동해둔 계정을 라이엇에서 못 찾을 때 본인에게만 한 번 알려줘요."""
+        user = self.bot.get_user(user_id)
+        if user is None:
+            try:
+                user = await self.bot.fetch_user(user_id)
+            except discord.HTTPException:
+                return
+        try:
+            await user.send(
+                f"⚠️ {ACCOUNT_NOT_FOUND_NOTE}\n"
+                "그때까지 발로란트 미션은 자동으로 확인되지 않아요."
+            )
+        except discord.HTTPException:
+            pass  # DM을 막아둔 사람이에요. 로그에는 위에서 이미 남겼어요.
 
     async def _notify_auto_complete(self, user_id: int, keys: list[str]):
         """자동으로 깬 미션은 본인에게만 DM으로 알려줘요.
