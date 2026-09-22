@@ -77,6 +77,11 @@ _client = MongoClient(
 _db = _client[MONGODB_DB_NAME]
 _trainers = _db["trainers"]
 
+# 다른 저장소 모듈이 같은 커넥션 풀을 나눠 쓰라고 내놓는다. 머신 메모리가 256MB라
+# 같은 Atlas에 클라이언트를 하나 더 띄우는 건 낭비다(위 타임아웃 설정도 그대로 물려받는다).
+client = _client
+db = _db
+
 COIN_PER_ATTENDANCE = 1
 
 KST = timezone(timedelta(hours=9))

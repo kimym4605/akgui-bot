@@ -9,7 +9,14 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from utils.birthday_store import delete_birthday, get_all_birthdays, get_birthday, set_birthday
+from utils.birthday_store import (
+    delete_birthday,
+    get_all_birthdays,
+    get_birthday,
+    migrate_from_json,
+    set_birthday,
+    update_name,
+)
 from utils.settings_store import get_setting, set_setting
 
 log = logging.getLogger(__name__)
@@ -54,9 +61,35 @@ class Birthday(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
+        # 예전 파일에 남아 있던 생일을 DB로 옮겨요(이미 옮겼으면 아무 일도 안 해요).
+        await migrate_from_json()
+        # 옮겨온 것들은 이름이 비어 있어요. 서버에서 표시 이름을 읽어 채워둬야
+        # 악귀 매니저 달력에 "누구 생일"인지 뜨거든요.
+        await self._fill_missing_names()
+
         # 봇이 들어가 있는 모든 서버에 대해 생일 알림 채널이 있는지 확인하고, 없으면 만들어요.
         for guild in self.bot.guilds:
             await self._ensure_channel(guild)
+
+    async def _fill_missing_names(self):
+        try:
+            all_birthdays = await get_all_birthdays()
+        except Exception as e:
+            log.warning(f"⚠️ 생일 목록을 못 읽었어요: {e}")
+            return
+
+        for user_id, entry in all_birthdays.items():
+            member = None
+            for guild in self.bot.guilds:
+                member = guild.get_member(int(user_id))
+                if member is not None:
+                    break
+            if member is None or entry.get("name") == member.display_name:
+                continue
+            try:
+                await update_name(user_id, member.display_name)
+            except Exception as e:
+                log.warning(f"⚠️ {user_id} 이름을 저장하지 못했어요: {e}")
 
     async def _ensure_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
         setting_key = f"birthday_channel_{guild.id}"
@@ -102,34 +135,39 @@ class Birthday(commands.Cog):
             )
             return
 
-        set_birthday(interaction.user.id, 월, 일)
-        await interaction.response.send_message(f"🎂 생일이 **{월}월 {일}일**로 등록됐어요!")
+        # 저장이 DB로 바뀌어서 3초 안에 못 끝낼 수도 있어요. 먼저 생각 중이라고 알려둬요.
+        await interaction.response.defer()
+        await set_birthday(interaction.user.id, 월, 일, interaction.user.display_name)
+        await interaction.followup.send(f"🎂 생일이 **{월}월 {일}일**로 등록됐어요!")
 
     @app_commands.command(name="생일삭제", description="등록했던 내 생일을 삭제합니다.")
     async def delete(self, interaction: discord.Interaction):
-        if delete_birthday(interaction.user.id):
-            await interaction.response.send_message("생일 등록을 삭제했어요.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        if await delete_birthday(interaction.user.id):
+            await interaction.followup.send("생일 등록을 삭제했어요.", ephemeral=True)
         else:
-            await interaction.response.send_message("등록된 생일이 없어요.", ephemeral=True)
+            await interaction.followup.send("등록된 생일이 없어요.", ephemeral=True)
 
     @app_commands.command(name="생일확인", description="등록된 생일을 확인합니다.")
     @app_commands.describe(유저="확인할 유저 (비워두면 본인)")
     async def check(self, interaction: discord.Interaction, 유저: Optional[discord.Member] = None):
         target = 유저 or interaction.user
-        bday = get_birthday(target.id)
+        await interaction.response.defer()
+        bday = await get_birthday(target.id)
 
         if bday is None:
-            await interaction.response.send_message(f"{target.display_name}님은 생일이 등록되어 있지 않아요.")
+            await interaction.followup.send(f"{target.display_name}님은 생일이 등록되어 있지 않아요.")
             return
 
-        await interaction.response.send_message(f"🎂 {target.display_name}님의 생일: {bday['month']}월 {bday['day']}일")
+        await interaction.followup.send(f"🎂 {target.display_name}님의 생일: {bday['month']}월 {bday['day']}일")
 
     @app_commands.command(name="다가오는생일", description="다가오는 순서대로 생일 목록을 보여줍니다.")
     async def upcoming(self, interaction: discord.Interaction):
-        all_birthdays = get_all_birthdays()
+        await interaction.response.defer()
+        all_birthdays = await get_all_birthdays()
 
         if not all_birthdays:
-            await interaction.response.send_message("등록된 생일이 없어요.")
+            await interaction.followup.send("등록된 생일이 없어요.")
             return
 
         today = datetime.datetime.now(KST).date()
@@ -148,14 +186,15 @@ class Birthday(commands.Cog):
             lines.append(f"{next_date.month}월 {next_date.day}일 — {name} ({d_text})")
 
         embed = discord.Embed(title="🎂 다가오는 생일", description="\n".join(lines), color=0xFF69B4)
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     @tasks.loop(time=ANNOUNCE_TIME)
     async def birthday_check(self):
         today = datetime.datetime.now(KST).date()
+        all_birthdays = await get_all_birthdays()
         todays_birthdays = [
             (user_id, b)
-            for user_id, b in get_all_birthdays().items()
+            for user_id, b in all_birthdays.items()
             if _is_birthday_today(today, b["month"], b["day"])
         ]
         if not todays_birthdays:
