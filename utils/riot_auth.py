@@ -416,7 +416,20 @@ async def refresh_all_stored_sessions() -> tuple[int, int, int]:
     expired = 0
     failed = 0
     for discord_id, account_key, _cookie in riot_session_store.all_sessions():
-        status = await refresh_stored_session(discord_id, account_key)
+        # ⚠️ 계정 하나에서 예외가 새어나오면 이 for가 중단되고, 이 함수를 부르는
+        #    `@tasks.loop`까지 죽어요(discord.py는 예상 못한 예외가 나면 루프를 영구 정지).
+        #    그러면 매일 04시 재인증이 조용히 멈춘 채로 며칠이 지나고, 등록해둔 쿠키가
+        #    순서대로 만료돼서 "등록이 자꾸 풀린다" 신고로 돌아와요. 그래서 계정 단위로
+        #    가둬두고, 실패한 계정은 그냥 '일시 실패'로 세고 다음 계정으로 넘어가요.
+        try:
+            status = await refresh_stored_session(discord_id, account_key)
+        except Exception as error:  # noqa: BLE001
+            log.warning(
+                f"⚠️ 오상 세션 자동 재인증 실패(계정 하나 건너뜀): "
+                f"{discord_id}/{account_key} — {error!r}"
+            )
+            failed += 1
+            continue
         if status == "refreshed":
             refreshed += 1
         elif status == "expired":

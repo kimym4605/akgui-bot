@@ -31,8 +31,10 @@
 import logging
 import asyncio
 import datetime
+import json
 import os
 import time
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -42,6 +44,7 @@ from discord.ext import commands, tasks
 
 from utils.channel_check import restrict_to_channel
 from utils import (
+    atomic_json,
     riot_auth,
     riot_session_store,
     valorant_accessories,
@@ -88,6 +91,58 @@ def _parse_check_time(raw: str | None, default_hour: int, default_minute: int) -
 # 상점 로테이션이 바뀐 뒤에 돌려야 의미가 있어요. 아시아 서버 기준으로 오전 중에 갱신돼서
 # 기본값을 09:10 KST로 뒀고, 서버 지역이 다르면 .env의 VALORANT_WISHLIST_CHECK_TIME으로 바꿔요.
 WISHLIST_CHECK_TIME = _parse_check_time(os.getenv("VALORANT_WISHLIST_CHECK_TIME"), 9, 10)
+
+
+# ── 놓친 재인증 따라잡기 ──────────────────────────────────────────────────────
+# `@tasks.loop(time=...)`은 그 시각에 봇이 꺼져 있으면 그날을 그냥 건너뛰어요. 배포·재시작이
+# 04시 근처에 걸리면 그날 재인증이 통째로 빠지고, 며칠 연달아 놓치면 등록해둔 쿠키가 순서대로
+# 만료돼서 "등록이 자꾸 풀린다"는 신고로 돌아와요. 그래서 마지막으로 성공한 시각을 볼륨에
+# 적어두고, 봇이 켜질 때 가장 최근 04시를 넘겼는데 기록이 그보다 옛것이면 한 번 따라잡아요.
+_REFRESH_STATE_FILE = Path(__file__).resolve().parent.parent / "data" / "myshop_refresh_state.json"
+
+
+def _last_refresh_at() -> datetime.datetime | None:
+    """마지막으로 세션 재인증을 끝낸 시각(KST). 기록이 없거나 깨졌으면 None."""
+    try:
+        raw = json.loads(_REFRESH_STATE_FILE.read_text(encoding="utf-8")).get("last_refresh")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+    if not raw:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(raw).astimezone(KST)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mark_refreshed():
+    """지금을 마지막 재인증 시각으로 적어둬요. 실패해도 그냥 넘어가요(다음에 또 시도해요)."""
+    try:
+        atomic_json.write_json(
+            _REFRESH_STATE_FILE,
+            {"last_refresh": datetime.datetime.now(KST).isoformat()},
+        )
+    except OSError as error:
+        log.warning(f"⚠️ 오상 재인증 시각 기록 실패: {error}")
+
+
+def _latest_scheduled_refresh(now: datetime.datetime) -> datetime.datetime:
+    """`now` 기준으로 가장 최근에 지나간 04:00(KST)이에요."""
+    boundary = now.astimezone(KST).replace(
+        hour=SESSION_REFRESH_TIME.hour, minute=SESSION_REFRESH_TIME.minute,
+        second=0, microsecond=0,
+    )
+    if boundary > now:
+        boundary -= datetime.timedelta(days=1)
+    return boundary
+
+
+def _refresh_is_overdue() -> bool:
+    """가장 최근 04:00 이후로 재인증이 한 번도 안 돌았으면 True."""
+    last = _last_refresh_at()
+    if last is None:
+        return True  # 기록이 없는 첫 가동이에요. 한 번 돌려두면 다음부터는 기록이 생겨요.
+    return last < _latest_scheduled_refresh(datetime.datetime.now(KST))
 
 # ui_locales=ko를 붙이면 로그인 페이지가 처음부터 한국어로 떠요(안 붙이면 en-US로 시작해요).
 LOGIN_URL = (
@@ -1476,6 +1531,9 @@ def _nightmarket_hits(storefront: dict, wanted: list[str]) -> list[tuple[str, in
 class MyShop(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # 놓친 재인증 따라잡기는 이 프로세스에서 딱 한 번만 해요. 루프가 예외로 죽어서
+        # 다시 켜질 때마다 따라잡으려 들면, 실패가 반복될 때 무한히 재시도하게 돼요.
+        self._refresh_catchup_done = False
         self.refresh_sessions.start()
         self.check_wishlists.start()
 
@@ -1593,101 +1651,147 @@ class MyShop(commands.Cog):
         checked = notified = 0
 
         for discord_id, wanted in watchers.items():
-            if wishlist_store.was_notified_today(discord_id, today):
-                continue
-            accounts = riot_session_store.list_accounts(discord_id)
-            if not accounts:
-                continue  # 쿠키 미등록 유저는 대신 조회할 수 없어요.
-
-            # 계정을 여러 개 등록해뒀으면 전부 확인해요. 부계 상점에 뜬 걸 놓치면
-            # 위시리스트를 걸어둔 의미가 없으니까요. DM은 계정별로 따로 보내지 않고
-            # 아래에서 임베드만 여러 장으로 묶어서 하루 한 통으로 보내요.
-            alerts: list[discord.Embed] = []
-            multi = len(accounts) > 1
-            for account in accounts:
-                account_key = account["key"]
-                cookie_header = riot_session_store.get_session(discord_id, account_key)
-                if not cookie_header:
-                    continue
-
-                result, session = await riot_auth.reauth_with_cookies(cookie_header)
-                try:
-                    if not result.ok:
-                        continue  # 만료된 세션은 새벽 4시 갱신 루프 쪽에서 정리돼요.
-                    # 여기서도 회전된 쿠키를 저장해둬야 해요. 안 그러면 이 조회가 라이엇 쪽 ssid를
-                    # 돌려버린 뒤라, 정작 유저가 /오상을 부르면 낡은 쿠키로 만료 판정이 나요.
-                    riot_auth.persist_refreshed_cookie(discord_id, result, account_key)
-                    storefront, _wallet, owned, _error = await _fetch_storefront(
-                        session, result.access_token, result.id_token, who=str(discord_id)
-                    )
-                finally:
-                    await session.close()
-
-                if storefront is None:
-                    continue
-
-                # 매일 도는 루프라, 여기서 갱신해두면 /오상을 안 써도 보유 정보가 최신으로 유지돼요.
-                _remember_owned(discord_id, account_key, owned)
-
-                checked += 1
-
-                # 이미 가진 스킨은 알려봤자 살 일이 없어서 알림에서 빼요. 보유 판정은 그 계정
-                # 기준이에요(본계로 가진 스킨이 부계 상점에 떴으면 부계엔 여전히 살 만해요).
-                # 보유 조회에 실패했으면 빈 집합이라 아무것도 안 걸러지고 전부 알려줘요.
-                owned_names = _owned_names(discord_id, account_key)
-                hits = [
-                    name for name in _offered_skin_names(storefront)
-                    if name in wanted and name not in owned_names
-                ]
-                night_hits = [
-                    hit for hit in _nightmarket_hits(storefront, wanted)
-                    if hit[0] not in owned_names
-                ]
-                if hits or night_hits:
-                    alerts.append(
-                        _build_wishlist_alert_embed(
-                            hits, night_hits,
-                            account_label=account["label"] if multi else "",
-                        )
-                    )
-
-                # 라이엇 API를 연달아 두들기지 않도록 계정마다 조금씩 쉬어요.
-                await asyncio.sleep(2)
-
-            if not alerts:
-                wishlist_store.mark_notified(discord_id, today)
-                continue
-
-            user = self.bot.get_user(discord_id) or await self.bot.fetch_user(discord_id)
-            if user is None:
-                wishlist_store.mark_notified(discord_id, today)
-                continue
+            # ⚠️ 한 사람을 처리하다 예외가 새어나오면 남은 사람들이 통째로 스킵되는 걸로
+            #    끝나지 않고, 이 @tasks.loop 자체가 영구 정지해요(discord.py는 예상 못한
+            #    예외가 난 루프를 되살리지 않아요). 그러면 다음날부터 알림이 아예 안 가고,
+            #    로그 한 줄 말고는 아무도 눈치채지 못해요. 그래서 사람 단위로 가둬둬요.
             try:
-                await user.send(embeds=alerts)
-                notified += 1
-                wishlist_store.mark_notified(discord_id, today)
-                wishlist_store.set_dm_blocked(discord_id, False)
-            except discord.Forbidden:
-                # DM을 아예 막아둔 경우예요. 다시 시도해도 똑같이 막히니까 오늘은 처리한
-                # 걸로 두고, 대신 표시를 남겨서 /위시리스트에서 본인에게 알려줘요.
-                log.warning(f"⚠️ 위시리스트 알림 DM 실패(차단/DM 비허용): {discord_id}")
-                wishlist_store.mark_notified(discord_id, today)
-                wishlist_store.set_dm_blocked(discord_id, True)
-            except discord.HTTPException as error:
-                # 일시적인 실패(디스코드 장애 등)라 오늘 처리 완료로 찍지 않아요.
-                # 그래야 봇이 재시작돼 루프가 다시 돌 때 한 번 더 시도해요.
-                log.warning(f"⚠️ 위시리스트 알림 DM 실패: {discord_id} — {error}")
+                did_check, did_notify = await self._check_one_watcher(discord_id, wanted, today)
+            except Exception as error:  # noqa: BLE001
+                log.warning(
+                    f"⚠️ 위시리스트 확인 실패(이 사람만 건너뜀): {discord_id} — {error!r}"
+                )
+                continue
+            checked += did_check
+            notified += did_notify
 
         if checked:
             log.info(f"⭐ 위시리스트 확인: 계정 {checked}개 조회, {notified}명에게 알림 전송")
+
+    async def _check_one_watcher(
+        self, discord_id: int, wanted: list[str], today: str
+    ) -> tuple[int, int]:
+        """위시리스트를 걸어둔 한 사람 몫만 처리해요. (조회한 계정 수, 알림 보낸 수).
+
+        위 루프가 사람 단위로 예외를 가두려고 따로 뺀 함수예요."""
+        if wishlist_store.was_notified_today(discord_id, today):
+            return 0, 0
+        accounts = riot_session_store.list_accounts(discord_id)
+        if not accounts:
+            return 0, 0  # 쿠키 미등록 유저는 대신 조회할 수 없어요.
+
+        checked = 0
+
+        # 계정을 여러 개 등록해뒀으면 전부 확인해요. 부계 상점에 뜬 걸 놓치면
+        # 위시리스트를 걸어둔 의미가 없으니까요. DM은 계정별로 따로 보내지 않고
+        # 아래에서 임베드만 여러 장으로 묶어서 하루 한 통으로 보내요.
+        alerts: list[discord.Embed] = []
+        multi = len(accounts) > 1
+        for account in accounts:
+            account_key = account["key"]
+            cookie_header = riot_session_store.get_session(discord_id, account_key)
+            if not cookie_header:
+                continue
+
+            result, session = await riot_auth.reauth_with_cookies(cookie_header)
+            try:
+                if not result.ok:
+                    continue  # 만료된 세션은 새벽 4시 갱신 루프 쪽에서 정리돼요.
+                # 여기서도 회전된 쿠키를 저장해둬야 해요. 안 그러면 이 조회가 라이엇 쪽 ssid를
+                # 돌려버린 뒤라, 정작 유저가 /오상을 부르면 낡은 쿠키로 만료 판정이 나요.
+                riot_auth.persist_refreshed_cookie(discord_id, result, account_key)
+                storefront, _wallet, owned, _error = await _fetch_storefront(
+                    session, result.access_token, result.id_token, who=str(discord_id)
+                )
+            finally:
+                await session.close()
+
+            if storefront is None:
+                continue
+
+            # 매일 도는 루프라, 여기서 갱신해두면 /오상을 안 써도 보유 정보가 최신으로 유지돼요.
+            _remember_owned(discord_id, account_key, owned)
+
+            checked += 1
+
+            # 이미 가진 스킨은 알려봤자 살 일이 없어서 알림에서 빼요. 보유 판정은 그 계정
+            # 기준이에요(본계로 가진 스킨이 부계 상점에 떴으면 부계엔 여전히 살 만해요).
+            # 보유 조회에 실패했으면 빈 집합이라 아무것도 안 걸러지고 전부 알려줘요.
+            owned_names = _owned_names(discord_id, account_key)
+            hits = [
+                name for name in _offered_skin_names(storefront)
+                if name in wanted and name not in owned_names
+            ]
+            night_hits = [
+                hit for hit in _nightmarket_hits(storefront, wanted)
+                if hit[0] not in owned_names
+            ]
+            if hits or night_hits:
+                alerts.append(
+                    _build_wishlist_alert_embed(
+                        hits, night_hits,
+                        account_label=account["label"] if multi else "",
+                    )
+                )
+
+            # 라이엇 API를 연달아 두들기지 않도록 계정마다 조금씩 쉬어요.
+            await asyncio.sleep(2)
+
+        if not alerts:
+            wishlist_store.mark_notified(discord_id, today)
+            return checked, 0
+
+        user = self.bot.get_user(discord_id)
+        if user is None:
+            # 계정이 삭제됐으면 NotFound(HTTPException의 한 종류)가 나요. 예전엔 이게
+            # 그대로 위로 튀어서 루프를 죽일 수 있었어요.
+            try:
+                user = await self.bot.fetch_user(discord_id)
+            except discord.HTTPException as error:
+                log.warning(f"⚠️ 위시리스트 알림 대상 조회 실패: {discord_id} — {error}")
+                return checked, 0
+        if user is None:
+            wishlist_store.mark_notified(discord_id, today)
+            return checked, 0
+
+        try:
+            await user.send(embeds=alerts)
+            wishlist_store.mark_notified(discord_id, today)
+            wishlist_store.set_dm_blocked(discord_id, False)
+            return checked, 1
+        except discord.Forbidden:
+            # DM을 아예 막아둔 경우예요. 다시 시도해도 똑같이 막히니까 오늘은 처리한
+            # 걸로 두고, 대신 표시를 남겨서 /위시리스트에서 본인에게 알려줘요.
+            log.warning(f"⚠️ 위시리스트 알림 DM 실패(차단/DM 비허용): {discord_id}")
+            wishlist_store.mark_notified(discord_id, today)
+            wishlist_store.set_dm_blocked(discord_id, True)
+        except discord.HTTPException as error:
+            # 일시적인 실패(디스코드 장애 등)라 오늘 처리 완료로 찍지 않아요.
+            # 그래야 봇이 재시작돼 루프가 다시 돌 때 한 번 더 시도해요.
+            log.warning(f"⚠️ 위시리스트 알림 DM 실패: {discord_id} — {error}")
+        return checked, 0
 
     @check_wishlists.before_loop
     async def before_check_wishlists(self):
         await self.bot.wait_until_ready()
 
+    @check_wishlists.error
+    async def check_wishlists_error(self, error: BaseException):
+        """루프 밖(위 for를 감싸는 코드)에서 예외가 나면 discord.py는 루프를 끄고 끝내요.
+        여기서 받아서 다시 켜둬요. time= 루프라 재시작해도 곧바로 또 돌지 않고
+        다음 예정 시각까지 기다려서, 예외가 반복돼도 폭주하지 않아요."""
+        log.error(f"🚨 위시리스트 루프가 예외로 멈췄어요 — 다시 켤게요: {error!r}", exc_info=error)
+        self.check_wishlists.restart()
+
     @tasks.loop(time=SESSION_REFRESH_TIME)
     async def refresh_sessions(self):
+        await self._run_session_refresh()
+
+    async def _run_session_refresh(self):
+        """등록된 세션 전부를 재인증해요. 매일 04시 루프와 '놓친 날 따라잡기'가 같이 써요."""
         refreshed, expired, failed = await riot_auth.refresh_all_stored_sessions()
+        # 여기까지 왔으면 한 바퀴는 돈 거예요(계정별 실패는 위에서 이미 세고 넘어갔어요).
+        _mark_refreshed()
         if refreshed or expired or failed:
             log.info(
                 f"🔫 오상 세션 자동 재인증: 갱신 {refreshed}건, 만료(재로그인 필요) {expired}건, "
@@ -1697,6 +1801,26 @@ class MyShop(commands.Cog):
     @refresh_sessions.before_loop
     async def before_refresh_sessions(self):
         await self.bot.wait_until_ready()
+        # 04시에 봇이 꺼져 있었거나 배포 중이었으면 그날 재인증이 통째로 빠져요. 그걸
+        # 여기서 메워요. 플래그를 돌리기 **전에** 세워서, 따라잡기가 실패해도 재시작
+        # 때마다 다시 시도하는 일은 없게 해요.
+        if self._refresh_catchup_done:
+            return
+        self._refresh_catchup_done = True
+        try:
+            if _refresh_is_overdue():
+                log.info("🔫 오상 세션 재인증을 놓친 날이 있어서 지금 한 번 따라잡을게요.")
+                await self._run_session_refresh()
+        except Exception as error:  # noqa: BLE001
+            # before_loop에서 예외가 새어나가면 루프가 아예 시작되지 않아요. 꼭 잡아야 해요.
+            log.warning(f"⚠️ 오상 세션 재인증 따라잡기 실패: {error!r}")
+
+    @refresh_sessions.error
+    async def refresh_sessions_error(self, error: BaseException):
+        """04시 재인증 루프가 예외로 멈추면 조용히 끝나버려요(디스코드에도 로그에도
+        티가 안 나요). 며칠 지나면 쿠키가 순서대로 만료되니 여기서 다시 켜둬요."""
+        log.error(f"🚨 오상 재인증 루프가 예외로 멈췄어요 — 다시 켤게요: {error!r}", exc_info=error)
+        self.refresh_sessions.restart()
 
     @app_commands.command(
         name="오상",
