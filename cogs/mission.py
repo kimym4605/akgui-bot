@@ -41,6 +41,9 @@ DEFAULT_REGION = "kr"
 # 코인이 설계대로 안 돌았어요. 그래서 봇이 주기적으로 대신 확인해줘요.
 AUTO_CHECK_MINUTES = 30      # 한 판이 보통 30~40분이라 이 정도면 충분해요
 AUTO_CHECK_GAP_SECONDS = 2   # 라이엇 API를 연달아 두들기지 않게 사람마다 쉬어요
+# HenrikDev가 통째로 죽는 일이 있어요(2026-09-22에 겪음: 모든 엔드포인트가 500).
+# 그때 끝까지 도는 건 헛호출이고 로그만 수백 줄 쌓여요. 연속으로 이만큼 실패하면 접어요.
+AUTO_CHECK_ABORT_AFTER = 3
 
 
 def _is_today_kst(unix_seconds: int | None) -> bool:
@@ -265,24 +268,42 @@ class Mission(commands.Cog):
 
         valorant_keys = {key for key, info in MISSIONS.items() if info["kind"] == "valorant"}
         looked_up = completed = 0
+        consecutive_failures = 0
+        aborted = False
         for user_id in user_ids:
             # 한 사람에서 예외가 새어나가면 나머지가 통째로 밀리고 루프까지 죽어요.
             try:
-                newly = await self._auto_check_one(user_id, valorant_keys)
+                newly, fetched = await self._auto_check_one(user_id, valorant_keys)
             except Exception as error:  # noqa: BLE001
                 log.warning("⚠️ 발로란트 미션 자동 확인 실패(이 사람만 건너뜀): %s — %r", user_id, error)
                 continue
             if newly is None:
                 continue  # 확인할 미션이 없어서 API를 아예 안 불렀어요
+
             looked_up += 1
             completed += newly
+            # 전적을 못 불러온 게 연달아 이어지면 개인 문제가 아니라 API가 죽은 거예요.
+            consecutive_failures = 0 if fetched else consecutive_failures + 1
+            if consecutive_failures >= AUTO_CHECK_ABORT_AFTER:
+                aborted = True
+                break
             await asyncio.sleep(AUTO_CHECK_GAP_SECONDS)
 
-        if looked_up:
+        if aborted:
+            log.warning(
+                "🎯 발로란트 미션 자동 확인을 중단했어요 — 전적 조회가 %d명 연속 실패했어요 "
+                "(HenrikDev 장애로 보여요). %d분 뒤에 다시 시도해요.",
+                consecutive_failures, AUTO_CHECK_MINUTES,
+            )
+        elif looked_up:
             log.info("🎯 발로란트 미션 자동 확인: %d명 조회, %d개 완료", looked_up, completed)
 
-    async def _auto_check_one(self, user_id: int, valorant_keys: set[str]) -> int | None:
-        """한 사람 몫이에요. 확인할 게 없으면 None, 확인했으면 이번에 깬 미션 수.
+    async def _auto_check_one(
+        self, user_id: int, valorant_keys: set[str]
+    ) -> tuple[int | None, bool]:
+        """한 사람 몫이에요. (이번에 깬 미션 수, 전적을 실제로 불러왔는지).
+
+        확인할 미션이 없으면 (None, False) — API를 아예 안 불러요.
 
         `ensure_today`를 여기서 부르는 건, 미션 문서가 `/미션`을 쳐야 생기기 때문이에요.
         문서가 없으면 자동 판정 대상에서 빠져버려요. 뽑히는 미션은 `user_id:날짜` 시드로
@@ -294,16 +315,19 @@ class Mission(commands.Cog):
             if key in valorant_keys and key not in done
         ]
         if not pending:
-            return None
+            return None, False
 
-        await self._check_valorant(user_id, pending, None)  # 알림은 아래에서 묶어서 보내요
+        # note가 None이면 정상 조회예요(오늘 경기가 없었을 뿐인 경우도 포함).
+        # 문구가 돌아오면 전적을 못 불러온 거예요.
+        note = await self._check_valorant(user_id, pending, None)  # 알림은 아래에서 묶어 보내요
+        fetched = note is None
 
         after = await mission_store.ensure_today(user_id, linked=True)
         done_after = set(after.get("done") or [])
         newly = [key for key in pending if key in done_after]
         if newly:
             await self._notify_auto_complete(user_id, newly)
-        return len(newly)
+        return len(newly), fetched
 
     async def _notify_auto_complete(self, user_id: int, keys: list[str]):
         """자동으로 깬 미션은 본인에게만 DM으로 알려줘요.
