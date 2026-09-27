@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 ROOM_EXPIRE_SECONDS = 600  # 방을 만들고 이 시간 안에 아무도 안 들어오면 자동 삭제해요.
 REQUEST_TIMEOUT_SECONDS = 600  # 입장 신청 알림(수락/거절 버튼)이 유효한 시간
 OWNER_LEAVE_GRACE_SECONDS = 10  # 방장이 나간 뒤 이 시간 뒤에 방을 자동으로 닫아요.
-RENAME_TIMEOUT_SECONDS = 5  # 방 이름 바꾸기를 이만큼만 기다려요. (아래 주석 참고)
+RENAME_WAIT_SECONDS = 2  # 방 이름이 이 시간 안에 바뀌면 "바꿨어요", 늦어지면 "곧 반영돼요"라고 안내해요.
 
 
 def _engine_from(client: discord.Client) -> "DynamicRoomEngine | None":
@@ -275,6 +275,7 @@ class DynamicRoomEngine:
         self.channel_to_mute: dict[int, bool] = {}  # channel_id -> 입장시뮤트 옵션 켜짐 여부
         self.channel_to_muted: dict[int, set[int]] = {}  # channel_id -> 봇이 서버 음소거를 걸어둔 사람들
         self.owner_leave_tasks: dict[int, asyncio.Task] = {}  # channel_id -> 방장 퇴장 후 자동 삭제 타이머
+        self.rename_tasks: dict[int, asyncio.Task] = {}  # channel_id -> 방 이름 바꾸기 작업 (한도 때문에 오래 걸릴 수 있어요)
 
     # ============================================================
     # 헬퍼
@@ -363,9 +364,10 @@ class DynamicRoomEngine:
         self.channel_to_muted.pop(channel_id, None)
         room_store.remove_room(channel_id)
 
-        task = self.owner_leave_tasks.pop(channel_id, None)
-        if task is not None and not task.done():
-            task.cancel()
+        for tasks in (self.owner_leave_tasks, self.rename_tasks):
+            task = tasks.pop(channel_id, None)
+            if task is not None and not task.done():
+                task.cancel()
 
     def _retrack_owner(self, channel_id: int, old_owner_id: int, new_owner_id: int):
         """방장만 갈아끼워요. (메모리 + 파일 둘 다)
@@ -377,6 +379,51 @@ class DynamicRoomEngine:
         self.owner_to_channel[new_owner_id] = channel_id
         self.channel_to_owner[channel_id] = new_owner_id
         room_store.set_owner(channel_id, new_owner_id)
+
+    def _schedule_rename(self, channel: discord.VoiceChannel) -> asyncio.Task:
+        """방 이름을 **지금의 방장** 이름으로 맞추는 작업을 띄워요.
+
+        ⚠️ 왜 백그라운드로 돌리는가: 디스코드는 채널 이름 변경을 **10분에 2번**으로 묶어놨어요.
+        한도에 걸리면 discord.py가 풀릴 때까지 조용히 기다리는데, 그동안 명령어 응답이 통째로
+        멈춰버려요(최대 몇 분). 그래서 따로 떼어 돌리고, 명령어는 기다리지 않고 바로 응답해요.
+        한도가 풀리면 알아서 바뀌니까 이름을 포기하지 않아도 돼요.
+
+        짧은 시간에 방장을 여러 번 넘기면 앞선 작업은 취소하고 마지막 것만 남겨요.
+        (이름은 작업이 시작될 때 방장 기록에서 다시 읽으니 항상 최신 방장 이름이 돼요)
+        """
+        existing = self.rename_tasks.pop(channel.id, None)
+        if existing is not None and not existing.done():
+            existing.cancel()
+        task = asyncio.create_task(self._rename_to_current_owner(channel))
+        self.rename_tasks[channel.id] = task
+        return task
+
+    async def _rename_to_current_owner(self, channel: discord.VoiceChannel) -> bool:
+        """방 이름을 `{이모지}{방장 이름}의 {방 종류}`로 맞춰요. 실제로 바꿨으면 True."""
+        try:
+            owner_id = self.channel_to_owner.get(channel.id)
+            if owner_id is None:
+                return False
+            owner = channel.guild.get_member(owner_id)
+            if owner is None:
+                return False
+
+            desired = f"{self._emoji_for(channel.id)}{owner.display_name}의 {self.label_for(channel.id)}"
+            if channel.name == desired:
+                return False
+
+            await channel.edit(name=desired, reason="방장이 바뀌어서 방 이름 갱신")
+            log.info(f"✏️ 방 이름을 '{desired}'로 바꿨어요.")
+            return True
+        except asyncio.CancelledError:
+            raise  # 방이 닫혔거나 방장이 또 바뀐 경우 — 새 작업이 대신 처리해요.
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException) as error:
+            log.warning(f"⚠️ 방 이름을 바꾸지 못했어요: {error}")
+            return False
+        finally:
+            # 내 뒤에 새 작업이 등록됐을 수도 있어서, 나 자신일 때만 지워요.
+            if self.rename_tasks.get(channel.id) is asyncio.current_task():
+                self.rename_tasks.pop(channel.id, None)
 
     def _schedule_owner_leave_deletion(self, channel: discord.VoiceChannel, owner_id: int):
         """방장이 나가고 아직 방에 다른 사람이 남아있을 때, OWNER_LEAVE_GRACE_SECONDS 뒤 방을 자동으로 닫아요."""
@@ -769,19 +816,12 @@ class DynamicRoomEngine:
             if await self.apply_server_mute(대상, False, f"{room_label} 방장이 되어 음소거 해제"):
                 self._mark_muted(channel.id, 대상.id, False)
 
-        # 방 이름도 새 방장 이름으로 바꿔줘요.
-        # ⚠️ 채널 이름 변경은 디스코드가 **10분에 2번**으로 묶어놨어요. 한도에 걸리면 discord.py가
-        # 풀릴 때까지 조용히 기다리는데, 그동안 명령어 응답이 멈춰버려요(최대 몇 분). 그래서
-        # 잠깐만 기다리고, 안 되면 이름은 포기해요 — 방장 위임 자체는 이미 끝났으니까요.
-        renamed = True
-        try:
-            await asyncio.wait_for(
-                channel.edit(name=f"{emoji}{대상.display_name}의 {room_label}", reason="방장 위임"),
-                timeout=RENAME_TIMEOUT_SECONDS,
-            )
-        except (asyncio.TimeoutError, discord.Forbidden, discord.HTTPException):
-            renamed = False
-            log.info(f"ℹ️ '{channel.name}' 이름은 바꾸지 못했어요. (디스코드 이름 변경 한도 또는 권한)")
+        # 방 이름도 새 방장 이름으로 바꿔줘요. 이름 변경은 한도에 걸리면 몇 분이 걸릴 수 있어서
+        # 백그라운드로 돌리고(_schedule_rename 주석 참고), 여기서는 잠깐만 기다려봐요.
+        # 그 안에 끝나면 "바꿨어요", 늦어지면 "곧 반영돼요"라고 안내가 갈라져요.
+        rename_task = self._schedule_rename(channel)
+        await asyncio.wait({rename_task}, timeout=RENAME_WAIT_SECONDS)
+        renamed_now = rename_task.done() and not rename_task.cancelled() and rename_task.exception() is None
 
         log.info(
             f"👑 '{channel.name}' {room_label}의 방장이 {previous_owner.display_name}님에서 "
@@ -806,7 +846,10 @@ class DynamicRoomEngine:
         except discord.Forbidden:
             pass
 
-        rename_notice = "" if renamed else "\n(⚠️ 방 이름은 디스코드 변경 한도 때문에 그대로예요. 잠시 뒤 저절로 정리되진 않으니 참고만 해주세요)"
+        rename_notice = (
+            "" if renamed_now
+            else "\n(✏️ 방 이름은 디스코드 변경 한도 때문에 조금 늦게 바뀌어요. 그냥 두면 알아서 반영돼요)"
+        )
         await interaction.followup.send(
             f"👑 {대상.display_name}님에게 {room_label} 방장을 넘겼어요. 이제 회원님이 나가도 방은 유지돼요."
             f"{rename_notice}",
