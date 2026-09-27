@@ -10,6 +10,8 @@
   2. /방신청 방장:@사람 → 아무나 입장 신청을 보낼 수 있고, 방장한테 수락/거절 버튼이 있는
      알림(DM 우선, DM이 막혀있으면 방 채팅)이 가서 방장이 눌러서 처리해요.
 - /방닫기로 방장이 직접 방을 닫을 수 있어요.
+- /방장넘기기 대상:@사람 으로 방 안에 있는 사람에게 방장을 넘길 수 있어요.
+  (먼저 자리를 비워야 할 때 방이 닫히지 않게 하는 용도예요)
 - 한 사람은 종류에 상관없이 동시에 방 1개만 가질 수 있어요.
 - 방에 아무도 없으면(모두 퇴장) 자동으로 삭제돼요.
 - 방을 만들고 나서 아무도 10분 안에 안 들어오면(방장 본인도 포함) 그것도 자동 삭제돼요.
@@ -36,6 +38,16 @@ log = logging.getLogger(__name__)
 ROOM_EXPIRE_SECONDS = 600  # 방을 만들고 이 시간 안에 아무도 안 들어오면 자동 삭제해요.
 REQUEST_TIMEOUT_SECONDS = 600  # 입장 신청 알림(수락/거절 버튼)이 유효한 시간
 OWNER_LEAVE_GRACE_SECONDS = 10  # 방장이 나간 뒤 이 시간 뒤에 방을 자동으로 닫아요.
+RENAME_TIMEOUT_SECONDS = 5  # 방 이름 바꾸기를 이만큼만 기다려요. (아래 주석 참고)
+
+
+def _engine_from(client: discord.Client) -> "DynamicRoomEngine | None":
+    """살아있는 엔진 인스턴스를 가져와요. (cog를 못 찾으면 None)
+
+    버튼 쪽 코드는 엔진을 직접 들고 있지 않을 수 있어서(DynamicItem은 봇 재시작 후
+    custom_id만 가지고 되살아나요), 필요할 때 이렇게 꺼내 써요.
+    """
+    return getattr(client.get_cog("Room"), "engine", None)
 
 
 # ============================================================
@@ -69,7 +81,14 @@ class SpeakGrantButton(
         return cls(int(match["channel_id"]), int(match["member_id"]), int(match["owner_id"]))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.owner_id:
+        # ⚠️ custom_id에 박혀있는 owner_id는 "이 버튼이 올라간 시점의 방장"이에요.
+        # `/방장넘기기`로 방장이 바뀌면 그 값은 옛 방장이라, 새 방장이 눌러도 거절당해요.
+        # 그래서 지금의 방장을 먼저 조회하고, 조회가 안 될 때만(봇이 방 기록을 잃은 경우)
+        # 박아둔 값으로 판단해요.
+        engine = _engine_from(interaction.client)
+        current_owner_id = engine.channel_to_owner.get(self.channel_id) if engine else None
+        allowed_id = current_owner_id if current_owner_id is not None else self.owner_id
+        if interaction.user.id != allowed_id:
             await interaction.response.send_message("이 버튼은 방장만 누를 수 있어요.", ephemeral=True)
             return False
         return True
@@ -103,7 +122,7 @@ class SpeakGrantButton(
         # ⚠️ 여기가 핵심이에요. speak 권한만 풀면 이미 음성에 접속해 있는 사람은 계속
         # "마이크 사용 권한이 없다"고 떠요. 서버 음소거까지 풀어줘야 바로 말할 수 있어요.
         # (자세한 이유는 DynamicRoomEngine.apply_server_mute 주석 참고)
-        engine = getattr(interaction.client.get_cog("Room"), "engine", None)
+        engine = _engine_from(interaction.client)
         if engine is not None:
             if await engine.apply_server_mute(member, False, "방장이 발언을 허용함"):
                 engine._mark_muted(channel.id, member.id, False)
@@ -143,7 +162,12 @@ class JoinRequestView(discord.ui.View):
         self.message: discord.Message | None = None  # send 이후에 채워줘요. (버튼 처리 후 원본 메시지 수정용)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.owner_id:
+        # 신청이 온 뒤에 `/방장넘기기`로 방장이 바뀌었을 수 있어요. 그때는 **지금의 방장**이
+        # 처리해야 맞아요. (이 알림이 방 채팅으로 갔다면 새 방장도 볼 수 있고, 옛 방장 DM으로
+        # 갔다면 그 사람은 이제 방장이 아니니 누르지 못하게 막아야 해요)
+        current_owner_id = self.engine.channel_to_owner.get(self.channel_id)
+        allowed_id = current_owner_id if current_owner_id is not None else self.owner_id
+        if interaction.user.id != allowed_id:
             await interaction.response.send_message("이 요청은 방장만 처리할 수 있어요.", ephemeral=True)
             return False
         return True
@@ -342,6 +366,17 @@ class DynamicRoomEngine:
         task = self.owner_leave_tasks.pop(channel_id, None)
         if task is not None and not task.done():
             task.cancel()
+
+    def _retrack_owner(self, channel_id: int, old_owner_id: int, new_owner_id: int):
+        """방장만 갈아끼워요. (메모리 + 파일 둘 다)
+
+        `_cleanup_tracking` + `_track`을 쓰면 안 돼요 — 중간에 방 기록이 사라지면서
+        음소거 기록(`channel_to_muted`)과 자동 삭제 타이머까지 날아가요.
+        """
+        self.owner_to_channel.pop(old_owner_id, None)
+        self.owner_to_channel[new_owner_id] = channel_id
+        self.channel_to_owner[channel_id] = new_owner_id
+        room_store.set_owner(channel_id, new_owner_id)
 
     def _schedule_owner_leave_deletion(self, channel: discord.VoiceChannel, owner_id: int):
         """방장이 나가고 아직 방에 다른 사람이 남아있을 때, OWNER_LEAVE_GRACE_SECONDS 뒤 방을 자동으로 닫아요."""
@@ -656,6 +691,127 @@ class DynamicRoomEngine:
 
         log.info(f"🗑️ {interaction.user.display_name}님이 {room_label}을 직접 닫았어요.")
         await interaction.followup.send(f"🗑️ {room_label}을 닫았어요.", ephemeral=True)
+
+    async def transfer_owner(self, interaction: discord.Interaction, 대상: discord.Member):
+        """방장을 방 안에 있는 다른 사람에게 넘겨요.
+
+        먼저 자리를 비워야 할 때 쓰는 기능이에요. 방장이 나가면 10초 뒤에 방이 닫히니까,
+        나가기 전에 넘겨두면 남은 사람들이 그대로 방을 계속 쓸 수 있어요.
+        """
+        await interaction.response.defer(ephemeral=True)
+
+        channel_id = self.owner_to_channel.get(interaction.user.id)
+        channel = interaction.guild.get_channel(channel_id) if channel_id else None
+        if channel is None:
+            if channel_id is not None:
+                self._cleanup_tracking(channel_id)
+            await interaction.followup.send("회원님이 방장인 방이 없어요. 방장만 넘길 수 있어요.", ephemeral=True)
+            return
+
+        room_label = self.label_for(channel.id)
+        emoji = self._emoji_for(channel.id)
+
+        if 대상.id == interaction.user.id:
+            await interaction.followup.send("이미 회원님이 방장이에요.", ephemeral=True)
+            return
+        if 대상.bot:
+            await interaction.followup.send("봇에게는 방장을 넘길 수 없어요.", ephemeral=True)
+            return
+
+        # "한 사람은 동시에 방 1개"라는 규칙을 넘기기로도 깨면 안 돼요.
+        # (깨지면 그 사람의 /방초대·/방신청·/방닫기가 어느 방을 말하는지 모호해져요)
+        target_room_id = self.owner_to_channel.get(대상.id)
+        if target_room_id is not None:
+            target_room = interaction.guild.get_channel(target_room_id)
+            if target_room is not None:
+                await interaction.followup.send(
+                    f"{대상.display_name}님은 이미 자기 {self.label_for(target_room_id)}"
+                    f"({target_room.mention})을 가지고 있어요.\n"
+                    f"그 방을 먼저 `/방닫기`로 닫아야 넘길 수 있어요.",
+                    ephemeral=True,
+                )
+                return
+            self._cleanup_tracking(target_room_id)  # 이미 사라진 방의 낡은 기록
+
+        # 방에 없는 사람에게 넘기면, 넘긴 즉시 "방장 없는 방"이 돼서 10초 뒤에 닫혀버려요.
+        if 대상 not in channel.members:
+            await interaction.followup.send(
+                f"{대상.display_name}님이 지금 {channel.mention}에 없어요. **방 안에 있는 사람**에게만 넘길 수 있어요.",
+                ephemeral=True,
+            )
+            return
+
+        previous_owner = interaction.user
+        self._retrack_owner(channel.id, previous_owner.id, 대상.id)
+
+        # 방장이 이미 나가서 자동 삭제 타이머가 돌고 있었다면 취소해요. 새 방장이 안에 있으니까요.
+        task = self.owner_leave_tasks.pop(channel.id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+        # 새 방장에게 방장다운 권한을 확실히 보장해줘요.
+        # (끌어와져서 들어온 사람은 speak가 막혀있을 수도 있어요)
+        try:
+            await channel.set_permissions(
+                대상,
+                view_channel=True,
+                connect=True,
+                speak=True,
+                send_messages=True,
+                reason=f"{room_label} 방장 위임 ({previous_owner.display_name} → {대상.display_name})",
+            )
+        except (discord.Forbidden, discord.NotFound):
+            log.warning(f"⚠️ '{channel.name}' 새 방장 {대상.display_name}님의 권한을 손보지 못했어요.")
+
+        # 입장시뮤트로 마이크가 막혀있던 사람이 방장이 되는 경우, 서버 음소거도 풀어줘야 해요.
+        # (speak 권한만으로는 이미 접속한 사람에게 안 먹혀요 — apply_server_mute 주석 참고)
+        if 대상.id in self.channel_to_muted.get(channel.id, set()):
+            if await self.apply_server_mute(대상, False, f"{room_label} 방장이 되어 음소거 해제"):
+                self._mark_muted(channel.id, 대상.id, False)
+
+        # 방 이름도 새 방장 이름으로 바꿔줘요.
+        # ⚠️ 채널 이름 변경은 디스코드가 **10분에 2번**으로 묶어놨어요. 한도에 걸리면 discord.py가
+        # 풀릴 때까지 조용히 기다리는데, 그동안 명령어 응답이 멈춰버려요(최대 몇 분). 그래서
+        # 잠깐만 기다리고, 안 되면 이름은 포기해요 — 방장 위임 자체는 이미 끝났으니까요.
+        renamed = True
+        try:
+            await asyncio.wait_for(
+                channel.edit(name=f"{emoji}{대상.display_name}의 {room_label}", reason="방장 위임"),
+                timeout=RENAME_TIMEOUT_SECONDS,
+            )
+        except (asyncio.TimeoutError, discord.Forbidden, discord.HTTPException):
+            renamed = False
+            log.info(f"ℹ️ '{channel.name}' 이름은 바꾸지 못했어요. (디스코드 이름 변경 한도 또는 권한)")
+
+        log.info(
+            f"👑 '{channel.name}' {room_label}의 방장이 {previous_owner.display_name}님에서 "
+            f"{대상.display_name}님으로 넘어갔어요."
+        )
+
+        try:
+            await channel.send(
+                f"👑 이제 이 {room_label}의 방장은 {대상.mention}님이에요! "
+                f"({previous_owner.display_name}님이 넘겨줬어요)\n"
+                f"`/방초대`·`/방신청` 승인·`/방닫기`는 이제 {대상.display_name}님이 쓸 수 있어요."
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+        try:
+            await 대상.send(
+                f"{emoji} **{previous_owner.display_name}**님이 {room_label}({channel.mention}) 방장을 넘겨줬어요!\n"
+                f"이제 `/방초대`로 사람을 부르거나 `/방신청`을 승인할 수 있고, 회원님이 나가면 "
+                f"{OWNER_LEAVE_GRACE_SECONDS}초 뒤에 방이 닫혀요. 먼저 나가야 하면 `/방장넘기기`로 또 넘겨주세요."
+            )
+        except discord.Forbidden:
+            pass
+
+        rename_notice = "" if renamed else "\n(⚠️ 방 이름은 디스코드 변경 한도 때문에 그대로예요. 잠시 뒤 저절로 정리되진 않으니 참고만 해주세요)"
+        await interaction.followup.send(
+            f"👑 {대상.display_name}님에게 {room_label} 방장을 넘겼어요. 이제 회원님이 나가도 방은 유지돼요."
+            f"{rename_notice}",
+            ephemeral=True,
+        )
 
     # ============================================================
     # 자동 삭제(방이 완전히 비면) + 퇴장 시 입장 권한 자동 회수 (cog의 on_voice_state_update에서 호출)

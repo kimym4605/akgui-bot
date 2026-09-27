@@ -120,6 +120,12 @@ class Room(commands.Cog):
     async def request_join(self, interaction: discord.Interaction, 방장: discord.Member):
         await self.engine.request_join(interaction, 방장)
 
+    @app_commands.command(name="방장넘기기", description="방 안에 있는 다른 사람에게 방장을 넘겨요. (먼저 나가야 할 때)")
+    @app_commands.describe(대상="방장을 넘겨줄 사람을 선택하세요. (그 방에 들어와 있어야 해요)")
+    @restrict_to_channel("room")
+    async def transfer_owner(self, interaction: discord.Interaction, 대상: discord.Member):
+        await self.engine.transfer_owner(interaction, 대상)
+
     @app_commands.command(name="방닫기", description="내가 연 방을 직접 닫아요.")
     @restrict_to_channel("room")
     async def close_room(self, interaction: discord.Interaction):

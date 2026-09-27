@@ -44,6 +44,20 @@ def add_room(channel_id: int, owner_id: int, kind: str, mute_on_join: bool = Fal
     _save(data)
 
 
+def set_owner(channel_id: int, owner_id: int):
+    """방장만 바꿔요. (`/방장넘기기`용 — 종류·입장시뮤트·음소거 기록은 그대로 둬야 해요)
+
+    ⚠️ `add_room`으로 덮어쓰면 `muted`(봇이 음소거를 걸어둔 사람 목록)가 날아가서,
+    방을 나간 사람의 서버 음소거를 풀어줄 수 없게 돼요. 그래서 따로 뒀어요.
+    """
+    data = _load()
+    room = data.get(str(channel_id))
+    if room is None:
+        return
+    room["owner_id"] = owner_id
+    _save(data)
+
+
 def remove_room(channel_id: int):
     data = _load()
     if str(channel_id) in data:
