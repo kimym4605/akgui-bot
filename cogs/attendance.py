@@ -1,4 +1,5 @@
 import io
+import logging
 from pathlib import Path
 
 import discord
@@ -20,6 +21,8 @@ from utils.pokemon_store import (
 )
 from utils import attend_service
 from utils.settings_store import set_setting
+
+log = logging.getLogger(__name__)
 
 COIN_IMAGE_PATH = Path(__file__).resolve().parent.parent / "assets" / "coin.png"
 
@@ -118,44 +121,75 @@ def _fallback_embed(user: discord.abc.User, data: dict) -> discord.Embed:
     return embed
 
 
-class ProfileView(discord.ui.View):
-    """카드 아래에 붙는 버튼이에요. 결과는 누른 사람에게만 보여요(채널이 지저분해지지 않게).
+# ============================================================
+# 카드 아래 버튼 (🐾 포켓몬 상세 · 🏆 업적 · 🎯 발로란트 전적)
+#
+# ⚠️ 평범한 View가 아니라 DynamicItem인 이유 — 2026-09-29에 실제로 당했어요.
+#
+# 처음엔 `discord.ui.View(timeout=300)` 에 버튼을 달았는데, 보통의 View는 **봇이 재시작되면
+# 메모리에서 사라져요.** 배포할 때마다 그 전에 띄워둔 카드의 버튼이 전부 죽어서, 눌러도
+# 아무 반응이 없고 로그조차 안 남아요(핸들러에 진입을 못 하니까요). 5분 타임아웃도 짧아서
+# 조금만 지나면 같은 증상이 났어요.
+#
+# DynamicItem은 버튼의 custom_id 문자열에 필요한 정보(누구 카드인지)를 다 박아두고, 눌린
+# 순간 그걸 정규식으로 다시 꺼내 살아나요. 그래서 봇이 재시작돼도, 며칠 전 카드라도 그대로
+# 동작해요. utils/dynamic_room.py의 SpeakGrantButton과 같은 방식이에요.
+# ============================================================
+class ProfileButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"profile:(?P<kind>pokemon|achv|rank):(?P<user_id>\d+)",
+):
+    # kind -> (라벨, 이모지)
+    KINDS = {
+        "pokemon": ("포켓몬 상세", "🐾"),
+        "achv": ("업적 보기", "🏆"),
+        "rank": ("발로란트 전적", "🎯"),
+    }
 
-    카드는 본인 것만 나오니까 `_target`은 항상 명령어를 친 사람이에요. 그래도 인자로 받는 건,
-    버튼이 "이 카드의 주인"을 보게 해두면 나중에 동작이 바뀌어도 여기가 어긋나지 않아서예요."""
+    def __init__(self, kind: str, user_id: int):
+        label, emoji = self.KINDS[kind]
+        super().__init__(
+            discord.ui.Button(
+                label=label,
+                emoji=emoji,
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"profile:{kind}:{user_id}",
+            )
+        )
+        self.kind = kind
+        self.user_id = user_id
 
-    def __init__(self, target: discord.abc.User):
-        super().__init__(timeout=300)
-        self._target = target
-        self.message: discord.Message | None = None
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match):
+        return cls(match["kind"], int(match["user_id"]))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """카드 주인만 버튼을 누를 수 있어요.
+        """카드 주인만 누를 수 있어요.
 
-        버튼이 전부 **카드 주인의** 정보(포켓몬·업적·전적)를 여는 거라, 남이 눌렀을 때
-        누른 사람 것을 보여주면 "내 카드인데 남의 전적이 뜨는" 식으로 엇갈려요.
-        어차피 카드는 본인 것만 나오니 누를 사람도 주인 하나예요."""
-        if interaction.user.id == self._target.id:
+        버튼이 전부 **카드 주인의** 정보를 여는 거라, 남이 눌렀을 때 누른 사람 것을
+        보여주면 "내 카드인데 남의 전적이 뜨는" 식으로 엇갈려요."""
+        if interaction.user.id == self.user_id:
             return True
         await interaction.response.send_message(
             "이 카드의 주인만 누를 수 있어요. `/프로필`로 본인 카드를 열어주세요.", ephemeral=True
         )
         return False
 
-    async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-        if self.message is not None:
-            try:
-                await self.message.edit(view=self)
-            except discord.HTTPException:
-                pass
-
-    @discord.ui.button(label="포켓몬 상세", emoji="🐾", style=discord.ButtonStyle.secondary)
-    async def pokemon_detail(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def callback(self, interaction: discord.Interaction):
+        # 버튼이 눌렸다는 흔적을 남겨둬요. 안 되던 시절엔 로그가 없어서 "눌렸는지조차"
+        # 알 수 없었고, 그게 원인 찾기를 제일 어렵게 했어요.
+        log.info("🎴 프로필 카드 버튼: kind=%s user=%s", self.kind, interaction.user.id)
         await interaction.response.defer(ephemeral=True)
-        trainer = await get_trainer(self._target.id)
 
+        if self.kind == "pokemon":
+            await self._send_pokemon(interaction)
+        elif self.kind == "achv":
+            await self._send_achievements(interaction)
+        else:
+            await self._send_rank(interaction)
+
+    async def _send_pokemon(self, interaction: discord.Interaction):
+        trainer = await get_trainer(self.user_id)
         if trainer is None or not has_custom_starter(trainer):
             await interaction.followup.send(
                 "아직 스타팅 포켓몬을 고르지 않았어요.\n"
@@ -163,40 +197,43 @@ class ProfileView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        await interaction.followup.send(
+            embed=_pokemon_embed(interaction.user, trainer), ephemeral=True
+        )
 
-        await interaction.followup.send(embed=_pokemon_embed(self._target, trainer), ephemeral=True)
-
-    @discord.ui.button(label="업적 보기", emoji="🏆", style=discord.ButtonStyle.secondary)
-    async def achievements(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+    async def _send_achievements(self, interaction: discord.Interaction):
         # 업적 화면은 achievement cog가 갖고 있어요(거기가 주인이라 서식도 거기 하나뿐이에요).
         from cogs.achievement import build_achievement_embed
 
-        embed = await build_achievement_embed(self._target)
+        embed = await build_achievement_embed(interaction.user)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="발로란트 전적", emoji="🎯", style=discord.ButtonStyle.secondary)
-    async def valorant_rank(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _send_rank(self, interaction: discord.Interaction):
         """`/전적`과 **똑같은 리포트**를 카드에서 바로 열어요.
 
-        카드에 이미 티어와 악귀력이 있지만 그건 저장해둔 값이라, KDA·ADR·HS%·선호 요원처럼
-        경기를 실제로 뒤져야 나오는 건 없어요. 이 버튼은 rank cog의 조회를 그대로 불러요
+        카드에 티어와 악귀력은 있지만 그건 저장해둔 값이라, KDA·ADR·HS%·선호 요원처럼
+        경기를 실제로 뒤져야 나오는 건 없어요. rank cog의 조회를 그대로 불러요
         (서식이 두 벌이 되지 않게 `/전적` 본문을 함수로 갈라서 같이 써요).
 
         ⚠️ HenrikDev를 실제로 호출해요. 카드를 열 때마다가 아니라 **버튼을 눌렀을 때만**
         나가니까, `/전적`을 한 번 치는 것과 비용이 같아요."""
-        await interaction.response.defer(ephemeral=True)
-
         rank_cog = interaction.client.get_cog("Rank")
         if rank_cog is None:
             await interaction.followup.send(
                 "지금은 전적 기능을 쓸 수 없어요. 잠시 후 `/전적`으로 시도해주세요.", ephemeral=True
             )
             return
-
         # 본인에게만 보이게 해요. `/전적`은 #전적검색에 묶여 있는데 카드는 아무 채널에서나
         # 열리거든요 — ephemeral이면 그 채널이 전적 리포트로 덮이지 않아요.
         await rank_cog.send_rank_report(interaction, ephemeral=True)
+
+
+def build_profile_view(user_id: int) -> discord.ui.View:
+    """카드에 붙일 버튼 3개짜리 화면. `timeout=None`이라 시간이 지나도 안 죽어요."""
+    view = discord.ui.View(timeout=None)
+    for kind in ProfileButton.KINDS:
+        view.add_item(ProfileButton(kind, user_id))
+    return view
 
 
 async def send_profile_card(interaction: discord.Interaction, target: discord.abc.User):
@@ -207,7 +244,7 @@ async def send_profile_card(interaction: discord.Interaction, target: discord.ab
     avatar = await profile_service.avatar_for(target)
     png = await profile_card.render_card(data, avatar)
 
-    view = ProfileView(target)
+    view = build_profile_view(target.id)
     content = None
 
     # 카드를 보는 것만으로 밀린 업적이 열려요. 열렸으면 같이 알려줘야 코인이 왜 늘었는지 알죠.
@@ -219,16 +256,15 @@ async def send_profile_card(interaction: discord.Interaction, target: discord.ab
             names += f" 외 {len(newly) - 5}개"
         content = f"🎉 새 업적 {len(newly)}개 달성! {names} (+{total_reward}코인)"
 
+    # 버튼이 영속(DynamicItem)이라 메시지를 붙잡아둘 필요가 없어요. 시간이 지나도, 봇이
+    # 재시작돼도 custom_id만으로 되살아나니까 `view.message`를 기억하지 않아요.
     if png is None:
-        message = await interaction.followup.send(
-            content=content, embed=_fallback_embed(target, data), view=view, wait=True
+        await interaction.followup.send(
+            content=content, embed=_fallback_embed(target, data), view=view
         )
     else:
         file = discord.File(io.BytesIO(png), filename=f"agwi_profile_{target.id}.png")
-        message = await interaction.followup.send(
-            content=content, file=file, view=view, wait=True
-        )
-    view.message = message
+        await interaction.followup.send(content=content, file=file, view=view)
 
 
 class Attendance(commands.Cog):
@@ -428,3 +464,6 @@ class Attendance(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Attendance(bot))
+    # ⚠️ 이 등록이 없으면 카드 버튼을 눌러도 봇이 custom_id를 알아보지 못해서
+    #    아무 반응이 없어요(room.py의 SpeakGrantButton과 같아요).
+    bot.add_dynamic_items(ProfileButton)
