@@ -125,6 +125,24 @@ async def test_weekly():
     check("주간 랭킹 정렬", top[0]["userId"] == str(U1) and top[1]["userId"] == str(U2),
           f"1위 {top[0]['score']}, 2위 {top[1]['score']}")
 
+    # 프로필 카드의 간략 전적. 점수와 수명이 달라요 - 점수는 "그 주 최고"만 남지만
+    # 전적은 **마지막 조회**가 남아야 해요. 이걸 payload에만 얹었다가, 그 주 최고점이
+    # 이미 있는 흔한 경우에 전적이 통째로 안 써지는 버그를 냈어요(배포 직후 재현됨).
+    await agwi_weekly_store.record(U1, 1100, "상위악귀", "먹9름#KR1",
+                                   stats={"kd": 1.30, "winRate": 60.0, "hs": 25.0, "matches": 20})
+    row = await agwi_weekly_store.get(U1)
+    check("전적 스냅샷 저장", (row.get("stats") or {}).get("kd") == 1.30)
+
+    await agwi_weekly_store.record(U1, 300, "D", "먹9름#KR1",
+                                   stats={"kd": 0.80, "winRate": 40.0, "hs": 15.0, "matches": 12})
+    row = await agwi_weekly_store.get(U1)
+    check("점수가 안 올라도 전적은 최신으로 갱신됨",
+          (row.get("stats") or {}).get("kd") == 0.80 and row["score"] == 1100,
+          f"kd={(row.get('stats') or {}).get('kd')}, score={row['score']}")
+
+    latest = await agwi_weekly_store.latest(U1)
+    check("마지막 전적 스냅샷 조회", (latest.get("stats") or {}).get("kd") == 0.80)
+
     best = await agwi_weekly_store.best_ever(U1)
     check("역대 최고 조회", best["score"] == 1100)
     check("주차 키 형식", agwi_weekly_store.week_key().startswith("20"),

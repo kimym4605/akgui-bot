@@ -65,21 +65,38 @@ def _record_sync(user_id, score: float, grade: str, riot_id: str, week: str,
     }
     # 프로필 카드에 띄울 간략 전적(K/D·승률·HS%·경기수)이에요. 점수와 같은 조회에서 나온
     # 값이라 같이 적어둬요 — 카드가 HenrikDev를 다시 부르지 않게 하려는 거예요.
+    #
+    # ⚠️ **점수와 수명이 달라요.** 점수는 "그 주 최고"만 남기지만 전적은 **마지막 조회**를
+    # 보여주는 게 맞아요. 그래서 stats를 payload에만 얹으면, 그 주 최고점이 이미 있는 흔한
+    # 경우에 update가 통째로 안 걸려서 전적이 영영 안 써져요(실제로 이 순서 때문에 배포
+    # 직후 카드에 줄이 안 떴어요). 아래에서 점수와 별개로 한 번 더 적어요.
     if stats:
         payload["stats"] = stats
+        payload["statsAt"] = payload["at"]
+
+    updated = False
 
     # 1) 이미 있고 이번 점수가 더 높을 때만 갱신해요.
     result = _weekly.update_one({"_id": doc_id, "score": {"$lt": score}}, {"$set": payload})
     if result.matched_count:
-        return True
+        updated = True
+    else:
+        # 2) 문서가 아직 없으면 새로 만들어요. 이 사이에 다른 호출이 먼저 만들었으면
+        #    중복 키 에러가 나는데, 그건 "이미 더 높은 점수가 있다"는 뜻이라 그냥 False면 돼요.
+        try:
+            _weekly.insert_one({"_id": doc_id, **payload})
+            updated = True
+        except DuplicateKeyError:
+            pass
 
-    # 2) 문서가 아직 없으면 새로 만들어요. 이 사이에 다른 호출이 먼저 만들었으면
-    #    중복 키 에러가 나는데, 그건 "이미 더 높은 점수가 있다"는 뜻이라 그냥 False면 돼요.
-    try:
-        _weekly.insert_one({"_id": doc_id, **payload})
-        return True
-    except DuplicateKeyError:
-        return False
+    # 3) 점수가 안 올랐어도 전적·라이엇ID는 최신으로 덮어써요. (위 설명 참고)
+    if stats and not updated:
+        _weekly.update_one(
+            {"_id": doc_id},
+            {"$set": {"stats": stats, "statsAt": payload["at"], "riotId": riot_id}},
+        )
+
+    return updated
 
 
 def _get_sync(user_id, week: str) -> dict | None:
@@ -96,9 +113,11 @@ def _latest_sync(user_id) -> dict | None:
     프로필 카드의 **간략 전적**은 "이번 주"가 아니라 "마지막으로 조회한 전적"을 보여주는 게
     자연스러워요. 이번 주에 `/전적`을 아직 안 돌렸다고 카드에서 전적이 통째로 사라지면
     빈칸만 남거든요. 악귀력 칸은 그대로 이번 주 것만 써요(그건 주간 경쟁 지표라서)."""
+    # `at`이 아니라 `statsAt`으로 정렬해요. 점수가 안 올라도 전적만 갱신되는 경우가 있어서
+    # (위 _record_sync 3번) `at`은 그때 안 움직이거든요.
     docs = list(
         _weekly.find({"userId": str(user_id), "stats": {"$exists": True}})
-        .sort([("at", -1)])
+        .sort([("statsAt", -1)])
         .limit(1)
     )
     return docs[0] if docs else None
