@@ -174,6 +174,8 @@ def _ensure_today_sync(user_id, linked: bool) -> dict:
         fresh = _blank_doc(uid, date_iso, linked)
         # 1회성 미션 기록은 날짜가 바뀌어도 유지돼야 해요.
         fresh["oneTimeDone"] = doc.get("oneTimeDone", [])
+        # 업적용 누적 카운터도 마찬가지예요. 여기서 안 옮기면 매일 0으로 리셋돼요.
+        fresh["totalDone"] = doc.get("totalDone", 0)
         _missions.replace_one({"_id": uid}, fresh)
         return fresh
 
@@ -200,9 +202,17 @@ def _progress_sync(user_id, key: str, amount: int = 1) -> bool:
         return False
 
     # 완료 처리. `done`에 $addToSet이라 동시에 두 번 들어와도 한 번만 들어가요.
+    #
+    # `totalDone`은 업적("미션 50개 완료")용 누적 카운터예요. `done`은 날짜가 바뀌면
+    # 통째로 비워지니까 여기서 따로 세지 않으면 누적을 알 방법이 없어요. 필터에 `$ne`가
+    # 있어서 이 update가 성공한 순간에만 +1 되고, 동시에 두 번 들어와도 한 번만 올라가요.
     res = _missions.update_one(
         {"_id": uid, "done": {"$ne": key}},
-        {"$set": {f"progress.{key}": new_value}, "$addToSet": {"done": key}},
+        {
+            "$set": {f"progress.{key}": new_value},
+            "$addToSet": {"done": key},
+            "$inc": {"totalDone": 1},
+        },
     )
     # modified_count가 0이면 그 찰나에 다른 호출이 먼저 완료시킨 거예요 → 코인은 그쪽이 줘요.
     return res.modified_count == 1
@@ -216,7 +226,7 @@ def _claim_one_time_sync(user_id, key: str) -> bool:
     만들어두니, 여기서는 없으면 그냥 False면 돼요."""
     res = _missions.update_one(
         {"_id": str(user_id), "oneTimeDone": {"$ne": key}},
-        {"$addToSet": {"oneTimeDone": key}},
+        {"$addToSet": {"oneTimeDone": key}, "$inc": {"totalDone": 1}},
     )
     return res.modified_count == 1
 

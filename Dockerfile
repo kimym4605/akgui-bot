@@ -1,6 +1,9 @@
 FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libopus0 \
+# fonts-nanum은 악귀 프로필 카드(utils/profile_card.py)가 쓰는 한글 폰트예요.
+# ⚠️ 이 이미지(python:3.12-slim)에는 폰트가 하나도 없어서, 빼면 카드의 한글이
+#    전부 두부(□)로 나와요. Pillow만 깔고 끝내면 안 돼요.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libopus0 fonts-nanum \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

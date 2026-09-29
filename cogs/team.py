@@ -17,7 +17,14 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils import rank_stats_store, riot_account_store, team_balance, tier_roles
+from utils import (
+    achievement_store,
+    rank_stats_store,
+    riot_account_store,
+    scrim_record_store,
+    team_balance,
+    tier_roles,
+)
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +143,7 @@ class TeamSplitView(discord.ui.View):
         *,
         owner_id: int,
         channel_name: str,
+        initial: tuple[list, list],
     ):
         super().__init__(timeout=VIEW_TIMEOUT)
         self._players = players
@@ -144,12 +152,20 @@ class TeamSplitView(discord.ui.View):
         self._owner_id = owner_id
         self._channel_name = channel_name
         self.message: discord.Message | None = None
+        # 지금 화면에 떠 있는 편성이에요. 승리 보고는 **이 편성 기준**으로 기록돼요.
+        # (다시 섞기를 누를 때마다 같이 갱신돼요 - 안 그러면 처음 편성으로 기록돼버려요.
+        #  '완전 랜덤'으로 시작하면 candidates[0]과 화면이 다르니 initial을 따로 받아요.)
+        self._current: tuple[list, list] = initial
+        # 결과를 한 번 기록했으면 더 못 바꾸게 잠가요.
+        self._reported = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self._owner_id:
             return True
         await interaction.response.send_message(
-            "명령어를 실행한 사람만 다시 섞을 수 있어요. 직접 `/팀짜기`를 써주세요.", ephemeral=True
+            "`/팀짜기`를 실행한 사람만 편성을 바꾸거나 결과를 기록할 수 있어요. "
+            "직접 `/팀짜기`를 써주세요.",
+            ephemeral=True,
         )
         return False
 
@@ -171,6 +187,7 @@ class TeamSplitView(discord.ui.View):
             self._candidates = team_balance.balanced_splits(self._players, limit=CANDIDATE_COUNT)
             self._index = 0
         team_a, team_b, diff = self._candidates[self._index]
+        self._current = (team_a, team_b)
         await interaction.response.edit_message(
             embed=_build_embed(
                 team_a, team_b, diff, balanced=True, channel_name=self._channel_name
@@ -181,12 +198,114 @@ class TeamSplitView(discord.ui.View):
     @discord.ui.button(label="완전 랜덤", emoji="🎲", style=discord.ButtonStyle.secondary)
     async def pure_random(self, interaction: discord.Interaction, button: discord.ui.Button):
         team_a, team_b, diff = team_balance.random_split(self._players)
+        self._current = (team_a, team_b)
         await interaction.response.edit_message(
             embed=_build_embed(
                 team_a, team_b, diff, balanced=False, channel_name=self._channel_name
             ),
             view=self,
         )
+
+    # ── 경기 결과 보고 ─────────────────────────────────────────────
+    #
+    # 이 두 버튼이 **내전 전적이 쌓이는 거의 유일한 경로**예요. 팀을 나눈 직후라 출전
+    # 명단이 그대로 손에 있어서, 버튼 한 번이면 양 팀 전원의 승/패가 한꺼번에 들어가요.
+    # (`/베팅결과`로도 들어가지만 베팅을 안 열면 아무것도 안 남아요.)
+    #
+    # 결과를 보고하면 팀 편성을 더 못 바꾸게 막아요. 이미 끝난 경기의 명단이 바뀌면
+    # 기록과 화면이 어긋나거든요.
+    @discord.ui.button(label="🅰️ A팀 승리", style=discord.ButtonStyle.success, row=1)
+    async def report_a(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._report(interaction, winner_index=0)
+
+    @discord.ui.button(label="🅱️ B팀 승리", style=discord.ButtonStyle.success, row=1)
+    async def report_b(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._report(interaction, winner_index=1)
+
+    async def _report(self, interaction: discord.Interaction, winner_index: int):
+        if self._reported:
+            await interaction.response.send_message(
+                "이 경기는 이미 결과가 기록됐어요. 다음 경기는 `/팀짜기`를 새로 써주세요.",
+                ephemeral=True,
+            )
+            return
+
+        team_a, team_b = self._current
+        teams = [team_a, team_b]
+        winners = [p.key for p in teams[winner_index]]
+        losers = [p.key for p in teams[1 - winner_index]]
+
+        await interaction.response.defer()
+        self._reported = True
+
+        match_id = await scrim_record_store.record_match(
+            interaction.guild_id, winners, losers,
+            reported_by=interaction.user.id,
+            note=f"/팀짜기 · {self._channel_name}",
+        )
+        if match_id is None:
+            self._reported = False
+            await interaction.followup.send(
+                "한쪽 팀이 비어 있어서 기록하지 못했어요.", ephemeral=True
+            )
+            return
+
+        # 결과가 나온 뒤에는 편성을 못 바꾸게 잠가요.
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+        won_name = "🅰️ A팀" if winner_index == 0 else "🅱️ B팀"
+        lines = [
+            f"🏆 **{won_name} 승리**로 기록했어요! (기록: {interaction.user.display_name})",
+            "",
+            f"**승리** {', '.join(p.label for p in teams[winner_index])}",
+            f"**패배** {', '.join(p.label for p in teams[1 - winner_index])}",
+        ]
+
+        # 이번 경기로 업적이 열린 사람이 있으면 같이 알려줘요(내전 업적은 여기서만 열려요).
+        unlocked_lines = await _announce_achievements(interaction, winners + losers)
+        if unlocked_lines:
+            lines.append("")
+            lines.extend(unlocked_lines)
+
+        lines.append("")
+        lines.append("-# `/내전전적`으로 내 승패와 연승을 볼 수 있어요.")
+
+        await interaction.followup.send("\n".join(lines))
+
+
+async def _announce_achievements(interaction: discord.Interaction, user_ids: list[int]) -> list[str]:
+    """경기 참가자들의 업적을 판정하고, 새로 열린 게 있으면 알림 줄을 만들어요.
+
+    사람 수만큼 DB를 왕복하지만 내전 한 판이 끝날 때 한 번뿐이라 부담이 크지 않아요.
+    여기서 실패해도 경기 기록 자체는 이미 들어간 뒤라, 조용히 넘어가요."""
+    lines = []
+    for user_id in user_ids:
+        try:
+            member = interaction.guild.get_member(user_id) if interaction.guild else None
+            stats = await achievement_store.collect_stats(
+                user_id,
+                tier_index=tier_roles.member_tier_index(member) if member else None,
+                riot_linked=riot_account_store.get_account(user_id) is not None,
+            )
+            newly = await achievement_store.evaluate(user_id, stats)
+            for achievement in newly:
+                lines.append(
+                    f"{achievement['emoji']} <@{user_id}> **{achievement['name']}** 업적 달성! "
+                    f"(+{achievement['reward']}코인)"
+                )
+        except Exception:
+            log.warning("업적 판정 실패 (user=%s)", user_id, exc_info=True)
+    # 한 판에 10명이 동시에 여러 개를 열 수 있어서, 메시지가 2000자를 넘지 않게 잘라요.
+    if len(lines) > 8:
+        extra = len(lines) - 8
+        lines = lines[:8] + [f"-# 그 외 업적 {extra}개가 더 열렸어요. `/업적`에서 확인하세요."]
+    return lines
 
 
 class Team(commands.Cog):
@@ -239,7 +358,10 @@ class Team(commands.Cog):
             balanced = True
 
         view = TeamSplitView(
-            players, candidates, owner_id=interaction.user.id, channel_name=channel_name
+            players, candidates,
+            owner_id=interaction.user.id,
+            channel_name=channel_name,
+            initial=(team_a, team_b),
         )
         message = await interaction.followup.send(
             embed=_build_embed(

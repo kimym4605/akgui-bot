@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 import aiohttp
 
-from utils import henrik_api
+from utils import agwi_weekly_store, henrik_api
 from utils.channel_check import restrict_to_channel
 from utils.rank_stats_store import get_kd_percentile, get_sample_size, record_stats
 from utils.riot_account_store import get_account, is_matching_account
@@ -647,6 +647,19 @@ class Rank(commands.Cog):
 
         # "상위 %" 계산용으로 이번 조회 결과를 저장해둬요.
         record_stats(f"{닉네임}#{태그}", stats["kd"], stats["agwi_score"])
+
+        # 주간 악귀력(프로필 카드 · 주간 랭킹용) 스냅샷이에요.
+        #
+        # **본인 계정을 조회했을 때만** 적어요. 남의 계정을 대신 조회한 걸 그 사람 기록으로
+        # 넣으면 안 되고, 조회한 사람 기록으로 넣으면 더더욱 안 되니까요.
+        # 같은 주에 여러 번 돌리면 가장 높은 점수만 남아요(agwi_weekly_store 설명 참고).
+        if is_self_query:
+            await agwi_weekly_store.record(
+                interaction.user.id,
+                stats["agwi_score"],
+                stats["agwi_grade"],
+                f"{닉네임}#{태그}",
+            )
 
         # ---- 포지션 역할 자동 동기화 ----
         # 티어 역할과 동일하게, 등록된 본인 계정을 조회한 경우에만 적용돼요.
