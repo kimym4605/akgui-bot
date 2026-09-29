@@ -315,8 +315,37 @@ async def reauth_with_cookies(cookie_header: str) -> tuple[LoginResult, AsyncSes
                 session,
             )
 
-        # ssid는 JWT라 보통 800자 안팎이에요. 눈에 띄게 짧으면 값이 잘려서 복사된 거예요.
-        if ssid_len and (ssid_len < 200 or not _looks_like_jwt(cookies["ssid"])):
+        # ⭐ 2026-09-30 — 라이엇이 세션 쿠키 구조를 바꿨어요.
+        #
+        # 예전 `ssid`는 세션 본체를 담은 RS256 JWT(800자 안팎)라 그것 하나만 보내면 재인증이
+        # 됐어요. 지금 `ssid`는 **HS256 짧은 JWT(220자 안팎)**이고, 페이로드가 `sub`/`ssid`/`iat`
+        # 뿐이에요. 게다가 그 안의 `ssid` 값은 **`csid` 쿠키 값과 같아요** - 즉 지금 ssid는
+        # 세션 본체가 아니라 **서버 세션을 가리키는 참조표**예요. 혼자 보내면 라이엇이 그 세션을
+        # 못 찾아서 로그인 페이지로 303을 보내요(실측으로 확인).
+        #
+        # 그래서 `auth.riotgames.com`의 세션 쿠키(`asid`·`csid`·`clid`·`ccid`·`tdid`)가 같이
+        # 와야 해요. 이게 빠진 걸 "세션 만료"라고 안내하면, 멀쩡히 로그인된 사람이 로그아웃하고
+        # 다시 로그인해봐야 똑같이 실패해요(실제로 이 오안내로 한참 헤맸어요).
+        session_cookies = [name for name in ("asid", "csid", "clid", "ccid", "tdid") if name in cookies]
+        if not session_cookies:
+            return (
+                LoginResult(
+                    ok=False,
+                    # 쿠키가 죽은 게 아니라 **덜 온** 거예요. 저장된 걸 지우면 안 돼요.
+                    expired=False,
+                    error=(
+                        "`ssid` 하나만으로는 이제 로그인이 안 돼요. 라이엇이 세션 방식을 바꿔서 "
+                        "**`auth.riotgames.com`의 쿠키를 전부** 보내야 해요.\n"
+                        "-# `❔ 쿠키 등록 방법` 버튼의 2️⃣ 단계를 다시 봐주세요 "
+                        "(`asid`·`csid`·`clid`·`ccid`·`tdid` 가 함께 있어야 해요)."
+                    ),
+                ),
+                session,
+            )
+
+        # ssid가 눈에 띄게 짧으면 값이 잘려서 복사된 거예요. 지금 형식이 220자 안팎이라
+        # 기준을 그 아래로 내려잡아요(예전 800자 기준으로 두면 멀쩡한 값이 걸려요).
+        if ssid_len and (ssid_len < 120 or not _looks_like_jwt(cookies["ssid"])):
             return (
                 LoginResult(
                     ok=False,

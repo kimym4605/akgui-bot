@@ -1282,9 +1282,9 @@ class PasteUrlModal(discord.ui.Modal, title="🔫 오상 · URL 붙여넣기"):
 
 class RegisterCookieModal(discord.ui.Modal, title="🔫 오상 · 쿠키 등록(선택)"):
     cookie_input = discord.ui.TextInput(
-        label="ssid 쿠키 값 (또는 cookie 헤더 전체)",
+        label="auth.riotgames.com 쿠키 (표 통째로)",
         style=discord.TextStyle.paragraph,
-        placeholder="ssid=eyJhbGciOi...  (값만 붙여넣어도 돼요. 방법은 '❔ 쿠키 등록 방법' 버튼)",
+        placeholder="쿠키 표를 전체선택해서 복사한 걸 그대로 붙여넣으세요 (방법은 '❔ 쿠키 등록 방법' 버튼)",
         max_length=4000,
     )
 
@@ -1387,22 +1387,27 @@ COOKIE_GUIDE_STEP1 = (
     "-# 엣지·웨일·브레이브도 방법이 똑같아요. 파이어폭스는 우클릭 → `요소 검사`."
 )
 
+# ⚠️ 2026-09-30 — 예전엔 `ssid` 한 줄만 복사하면 됐는데, 라이엇이 세션 방식을 바꿔서
+# 이제 auth.riotgames.com 쿠키가 **전부** 있어야 해요(utils/riot_auth.py 설명 참고).
+# 다행히 표를 통째로 복사한 형태(탭으로 갈린 행 묶음)도 봇이 그대로 읽어요.
 COOKIE_GUIDE_STEP2 = (
     "① 개발자도구 위쪽 탭에서 **`Application`**(애플리케이션) 클릭\n"
     "-# 탭이 안 보이면 탭 줄 오른쪽 끝의 **`≫`** 를 눌러 펼치면 있어요.\n"
     "② 왼쪽 목록에서 **`Storage`(저장용량) → `Cookies` → `https://auth.riotgames.com`** 클릭\n"
-    "③ 표에서 **`Name`(이름)이 정확히 `ssid`** 인 줄을 찾아요\n"
-    "④ 그 줄의 **`Value`(값) 칸을 더블클릭** → `Ctrl`+`A` → `Ctrl`+`C`\n\n"
-    "⚠️ **드래그해서 긁으면 안 돼요.** 값이 800자쯤 되는데 화면에 보이는 데까지만 복사돼서 "
-    "잘린 값이 들어가요. 꼭 더블클릭한 뒤 전체선택(`Ctrl`+`A`)으로 복사해주세요."
+    "③ 오른쪽 표에서 **아무 줄이나 한 번 클릭** → `Ctrl`+`A` (전체 선택) → `Ctrl`+`C`\n\n"
+    "⚠️ **`ssid` 한 줄만 복사하면 안 돼요.** 라이엇이 세션 방식을 바꿔서, 이제 "
+    "`asid`·`csid`·`clid`·`ccid`·`tdid` 가 **같이** 있어야 로그인이 돼요. "
+    "표를 통째로 복사하면 그게 다 들어가요 — 봇이 알아서 골라 써요.\n"
+    "-# 주소가 `auth.riotgames.com` 인지 꼭 확인해주세요. `playvalorant.com`이나 "
+    "`riotgames.com` 쪽에는 필요한 쿠키가 없어요."
 )
 
 # ⚠️ 라이엇은 재인증할 때마다 ssid를 새로 발급하고 이전 값을 무효화해요. 그래서 복사해두고
 # 시간이 지나거나, 그 사이 라이엇 페이지가 갱신되거나 발로란트를 켜면 복사해둔 값이 죽어요.
 # "되는 사람 / 안 되는 사람"이 갈리는 가장 큰 이유라서 따로 떼어 강조해요.
 COOKIE_GUIDE_STEP3 = (
-    "**`③ 쿠키 등록`** 버튼을 눌러 복사한 값을 붙여넣으면 끝이에요.\n"
-    "`ssid=eyJ...` 형태가 정석이지만, **값만 붙여넣어도** 봇이 알아서 처리해요.\n\n"
+    "**`③ 쿠키 등록`** 버튼을 눌러 복사한 걸 **그대로** 붙여넣으면 끝이에요.\n"
+    "표를 통째로 복사한 형태든 `asid=…; csid=…; ssid=…` 같은 한 줄이든 다 읽어요.\n\n"
     "⏱️ **복사한 즉시 붙여넣어 주세요.**\n"
     "라이엇은 로그인 세션이 갱신될 때마다 이 값을 새로 발급하고 **예전 값을 즉시 못 쓰게** 해요. "
     "복사해두고 딴짓을 하거나, 그 사이에 **라이엇 페이지를 새로고침**하거나 **발로란트를 켜면** "
@@ -1411,12 +1416,13 @@ COOKIE_GUIDE_STEP3 = (
 )
 
 COOKIE_GUIDE_TROUBLE = (
+    "**`ssid` 하나만으로는 안 된다고 나와요**\n"
+    "-# 라이엇이 세션 방식을 바꿨어요. `ssid` 한 줄이 아니라 **표 전체**를 복사해주세요 "
+    "(2️⃣ 단계). `asid`·`csid`·`clid` 가 같이 와야 해요.\n\n"
     "**`ssid`가 없다고 나와요**\n"
     "-# 왼쪽 목록에서 고른 주소가 `auth.riotgames.com` 이 맞는지 확인해주세요. "
     "`playvalorant.com`이나 `riotgames.com`에는 `ssid`가 없어요.\n"
     "-# 로그인을 안 한 상태여도 안 보여요. 먼저 로그인부터 해주세요.\n\n"
-    "**값이 잘렸다고 나와요**\n"
-    "-# 드래그 대신 값 칸을 **더블클릭 → `Ctrl`+`A` → `Ctrl`+`C`** 로 복사해주세요.\n\n"
     "**만료됐다고 나와요**\n"
     "-# 발로란트·라이엇 클라이언트를 끄고 → 라이엇 페이지에서 **다시 로그인** → "
     "값을 **새로 복사해서 바로** 등록해보세요. 한 번 실패한 값은 다시 시도해도 안 살아나요.\n\n"
@@ -1440,7 +1446,7 @@ def _build_cookie_guide_embed() -> discord.Embed:
         color=0xFF4655,
     )
     embed.add_field(name="1️⃣ 개발자도구 열기 (F12 없어도 돼요)", value=COOKIE_GUIDE_STEP1, inline=False)
-    embed.add_field(name="2️⃣ ssid 값 복사하기", value=COOKIE_GUIDE_STEP2, inline=False)
+    embed.add_field(name="2️⃣ 쿠키 표 통째로 복사하기", value=COOKIE_GUIDE_STEP2, inline=False)
     embed.add_field(name="3️⃣ 봇에 붙여넣기 — 복사하고 바로!", value=COOKIE_GUIDE_STEP3, inline=False)
     embed.add_field(name="😵 안 될 때 확인할 것", value=COOKIE_GUIDE_TROUBLE, inline=False)
     embed.add_field(name="🔒 안전 안내", value=COOKIE_GUIDE_SAFETY, inline=False)
