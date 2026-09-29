@@ -26,7 +26,14 @@ class Coin(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="코인", description="내 악귀코인 잔액을 확인해요.")
-    @restrict_to_channel("attendance")
+    # ⚠️ 그룹이 "attendance"(=#포켓몬)에서 "coin"으로 바뀌었어요.
+    #
+    # 악귀코인을 칭호 같은 **소비처로 밀기로 해서**, 잔액을 확인하는 길이 막혀 있으면 안 돼요.
+    # #포켓몬은 2026-09-29 기준 마지막 글이 9일 전인 죽은 채널이라, 거기 묶여 있으면
+    # "코인을 쓰라"면서 정작 얼마 있는지 보려면 아무도 안 가는 곳에 가야 하는 꼴이었어요.
+    # /칭호구매를 같은 이유로 떼어냈으니 /코인도 같이 나와야 앞뒤가 맞아요.
+    # 설정값이 없으면 제한이 없으니 기본은 아무 채널에서나 돼요.
+    @restrict_to_channel("coin")
     async def balance(self, interaction: discord.Interaction):
         # DB 왕복이 3초를 넘기면 디스코드가 끊어버려서 먼저 defer해요.
         await interaction.response.defer(ephemeral=True)
@@ -50,7 +57,7 @@ class Coin(commands.Cog):
 
     @app_commands.command(name="코인보내기", description="다른 사람에게 악귀코인을 보내요.")
     @app_commands.describe(상대="코인을 받을 사람", 개수="보낼 악귀코인 개수")
-    @restrict_to_channel("attendance")
+    @restrict_to_channel("coin")
     async def send(self, interaction: discord.Interaction, 상대: discord.Member, 개수: int):
         await interaction.response.defer()
 
