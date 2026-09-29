@@ -48,7 +48,8 @@ def previous_week_key() -> str:
     return week_key(datetime.now(KST) - timedelta(days=7))
 
 
-def _record_sync(user_id, score: float, grade: str, riot_id: str, week: str) -> bool:
+def _record_sync(user_id, score: float, grade: str, riot_id: str, week: str,
+                 stats: dict | None = None) -> bool:
     """그 주 최고 점수만 남겨요. 갱신됐으면 True.
 
     ⚠️ "조건부 update + upsert=True"로 쓰면 안 돼요. 기존 점수가 더 높으면 필터에 안 걸리는데,
@@ -62,6 +63,10 @@ def _record_sync(user_id, score: float, grade: str, riot_id: str, week: str) -> 
         "score": round(float(score), 1), "grade": grade, "riotId": riot_id,
         "at": datetime.now(timezone.utc).isoformat(),
     }
+    # 프로필 카드에 띄울 간략 전적(K/D·승률·HS%·경기수)이에요. 점수와 같은 조회에서 나온
+    # 값이라 같이 적어둬요 — 카드가 HenrikDev를 다시 부르지 않게 하려는 거예요.
+    if stats:
+        payload["stats"] = stats
 
     # 1) 이미 있고 이번 점수가 더 높을 때만 갱신해요.
     result = _weekly.update_one({"_id": doc_id, "score": {"$lt": score}}, {"$set": payload})
@@ -85,6 +90,20 @@ def _top_sync(week: str, limit: int) -> list[dict]:
     return list(_weekly.find({"week": week}).sort([("score", -1)]).limit(limit))
 
 
+def _latest_sync(user_id) -> dict | None:
+    """가장 최근에 남긴 주간 스냅샷이에요(주차 무관).
+
+    프로필 카드의 **간략 전적**은 "이번 주"가 아니라 "마지막으로 조회한 전적"을 보여주는 게
+    자연스러워요. 이번 주에 `/전적`을 아직 안 돌렸다고 카드에서 전적이 통째로 사라지면
+    빈칸만 남거든요. 악귀력 칸은 그대로 이번 주 것만 써요(그건 주간 경쟁 지표라서)."""
+    docs = list(
+        _weekly.find({"userId": str(user_id), "stats": {"$exists": True}})
+        .sort([("at", -1)])
+        .limit(1)
+    )
+    return docs[0] if docs else None
+
+
 def _best_ever_sync(user_id) -> dict | None:
     """그 사람이 지금까지 찍은 역대 최고 주간 점수예요. 업적 판정에 써요."""
     docs = list(
@@ -96,11 +115,14 @@ def _best_ever_sync(user_id) -> dict | None:
 # ------------------------------------------------------------------
 # async 래퍼 (동기 pymongo가 이벤트 루프를 멈추지 않게)
 # ------------------------------------------------------------------
-async def record(user_id, score: float, grade: str, riot_id: str) -> bool:
+async def record(user_id, score: float, grade: str, riot_id: str,
+                 stats: dict | None = None) -> bool:
     """`/전적`이 계산한 악귀 스코어를 이번 주 칸에 적어둬요."""
     week = week_key()
     try:
-        updated = await asyncio.to_thread(_record_sync, user_id, score, grade, riot_id, week)
+        updated = await asyncio.to_thread(
+            _record_sync, user_id, score, grade, riot_id, week, stats
+        )
     except Exception:
         # 주간 기록은 부가 기능이에요. 여기서 터져도 /전적 자체는 정상으로 끝나야 해요.
         log.exception("주간 악귀력 저장 실패 (user=%s)", user_id)
@@ -116,6 +138,11 @@ async def get(user_id, week: str | None = None) -> dict | None:
 
 async def top(week: str | None = None, limit: int = 10) -> list[dict]:
     return await asyncio.to_thread(_top_sync, week or week_key(), limit)
+
+
+async def latest(user_id) -> dict | None:
+    """주차와 무관하게 마지막으로 남은 전적 스냅샷이에요(프로필 카드의 간략 전적용)."""
+    return await asyncio.to_thread(_latest_sync, user_id)
 
 
 async def best_ever(user_id) -> dict | None:

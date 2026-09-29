@@ -91,6 +91,12 @@ async def collect(member: discord.Member | discord.User, *, evaluate_achievement
     record = await scrim_record_store.get_record(member.id)
     weekly = await agwi_weekly_store.get(member.id)
 
+    # --- 발로란트 간략 전적 ---
+    # 악귀력 칸은 "이번 주"만 쓰지만, 전적은 마지막으로 조회한 값을 보여줘요(이번 주에 아직
+    # `/전적`을 안 돌렸다고 카드에서 전적이 사라지면 허전해서요). 여기서도 API 호출은 0회예요.
+    valorant_doc = weekly if (weekly or {}).get("stats") else await agwi_weekly_store.latest(member.id)
+    valorant = (valorant_doc or {}).get("stats")
+
     # --- 포켓몬 ---
     trainer = await get_trainer(member.id)
     pokemon_text = None
@@ -140,10 +146,12 @@ async def collect(member: discord.Member | discord.User, *, evaluate_achievement
         "attendance": stats["attendance"],
         "attendance_streak": stats["attendance_streak"],
         "season": scrim_record_store.current_season(),
+        # 발로란트 간략 전적 (없으면 None → 카드에서 그 줄을 통째로 빼요)
+        "valorant": valorant,
         # 화면 쪽에서 쓰는 부가 정보
         "newly_unlocked": newly,
         "stats": stats,
-        "riot_id": (weekly or {}).get("riotId"),
+        "riot_id": (valorant_doc or weekly or {}).get("riotId"),
     }
 
 

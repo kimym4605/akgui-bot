@@ -686,6 +686,15 @@ class Rank(commands.Cog):
                 stats["agwi_score"],
                 stats["agwi_grade"],
                 f"{닉네임}#{태그}",
+                # 프로필 카드에 그대로 찍을 간략 전적이에요. 카드는 HenrikDev를 한 번도
+                # 부르지 않으니(분당 30회를 서버 전체가 나눠 씀), 여기서 손에 들어온 값을
+                # 같이 적어두는 게 유일한 통로예요.
+                stats={
+                    "kd": round(stats["kd"], 2),
+                    "winRate": round(stats["win_rate"], 1),
+                    "hs": round(stats["hs_percent"], 1),
+                    "matches": stats["matches_counted"],
+                },
             )
 
         # ---- 포지션 역할 자동 동기화 ----

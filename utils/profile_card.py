@@ -231,6 +231,46 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
         fill=accent if data.get("tier") else TEXT_DIM,
     )
 
+    # ── 발로란트 간략 전적 (티어 줄 바로 아래 한 줄) ─────────
+    # `/전적`이 남겨둔 스냅샷이라 여기서 API를 부르지 않아요(profile_service 설명 참고).
+    # 값이 없으면(= /전적을 한 번도 안 돌림) 이 줄을 통째로 빼요 - 빈칸을 그리면 지저분해요.
+    valorant = data.get("valorant") or {}
+    pairs = [
+        (label, fmt(valorant[key]))
+        for label, key, fmt in (
+            ("K/D", "kd", lambda v: f"{v:.2f}"),
+            ("승률", "winRate", lambda v: f"{v:.0f}%"),
+            ("HS", "hs", lambda v: f"{v:.0f}%"),
+        )
+        if valorant.get(key) is not None
+    ]
+    if pairs:
+        stat_y = tier_y + 36
+        label_font, value_font = _font("regular", 18), _font("bold", 20)
+        x = text_x
+        for index, (label, value) in enumerate(pairs):
+            if index:
+                draw.text((x, stat_y + 2), "·", font=label_font, fill=TEXT_DIM)
+                x += draw.textlength("·", font=label_font) + 12
+            draw.text((x, stat_y + 2), label, font=label_font, fill=TEXT_SUB)
+            x += draw.textlength(label, font=label_font) + 7
+            draw.text((x, stat_y), value, font=value_font, fill=TEXT)
+            x += draw.textlength(value, font=value_font) + 12
+
+        tail_font = _font("regular", 16)
+        tail_parts = []
+        if valorant.get("matches"):
+            tail_parts.append(f"최근 {valorant['matches']}경기")
+        if data.get("riot_id"):
+            tail_parts.append(data["riot_id"])
+        if tail_parts:
+            tail = " · ".join(tail_parts)
+            draw.text(
+                (x + 4, stat_y + 4),
+                _fit_text(draw, tail, tail_font, max(CARD_WIDTH - 44 - x - 4, 0)),
+                font=tail_font, fill=TEXT_DIM,
+            )
+
     # ── 통계 4칸 ─────────────────────────────────────────────
     box_y, box_h, gap = 218, 116, 16
     box_w = (CARD_WIDTH - 88 - gap * 3) // 4
