@@ -43,13 +43,13 @@ async def main():
             failed.append(f"/{name}")
         print(f"  {mark} /{name}")
 
-    # /프로필의 파라미터가 제대로 붙었는지 (유저 지정 옵션)
+    # /프로필은 **본인 것만** 봐요. 남을 지정하는 옵션이 다시 생기면 잡아내요.
     profile_cmd = next((c for c in bot.tree.get_commands() if c.name == "프로필"), None)
     if profile_cmd:
         params = {p.name for p in profile_cmd.parameters}
-        print(f"\n  /프로필 파라미터: {params or '없음'}")
-        if "유저" not in params:
-            failed.append("/프로필 유저 파라미터")
+        print(f"\n  /프로필 파라미터: {params or '없음 (본인 전용)'}")
+        if params:
+            failed.append(f"/프로필에 파라미터가 생겼어요: {params}")
 
     ach_cmd = next((c for c in bot.tree.get_commands() if c.name == "업적"), None)
     if ach_cmd:

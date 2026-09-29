@@ -119,8 +119,10 @@ def _fallback_embed(user: discord.abc.User, data: dict) -> discord.Embed:
 
 
 class ProfileView(discord.ui.View):
-    """카드 아래에 붙는 버튼이에요. 누가 눌러도 되고, 결과는 누른 사람에게만 보여요
-    (남의 프로필을 열어봐도 채널이 지저분해지지 않게)."""
+    """카드 아래에 붙는 버튼이에요. 결과는 누른 사람에게만 보여요(채널이 지저분해지지 않게).
+
+    카드는 본인 것만 나오니까 `_target`은 항상 명령어를 친 사람이에요. 그래도 인자로 받는 건,
+    버튼이 "이 카드의 주인"을 보게 해두면 나중에 동작이 바뀌어도 여기가 어긋나지 않아서예요."""
 
     def __init__(self, target: discord.abc.User):
         super().__init__(timeout=300)
@@ -142,9 +144,8 @@ class ProfileView(discord.ui.View):
         trainer = await get_trainer(self._target.id)
 
         if trainer is None or not has_custom_starter(trainer):
-            who = "이 사람은" if self._target.id != interaction.user.id else "아직"
             await interaction.followup.send(
-                f"{who} 스타팅 포켓몬을 고르지 않았어요.\n"
+                "아직 스타팅 포켓몬을 고르지 않았어요.\n"
                 "악귀포켓몬 웹사이트에서 **까멍이 · 오로리 · 타누비** 중 하나를 고르면 시작할 수 있어요.",
                 ephemeral=True,
             )
@@ -175,7 +176,7 @@ async def send_profile_card(interaction: discord.Interaction, target: discord.ab
 
     # 카드를 보는 것만으로 밀린 업적이 열려요. 열렸으면 같이 알려줘야 코인이 왜 늘었는지 알죠.
     newly = data.get("newly_unlocked") or []
-    if newly and target.id == interaction.user.id:
+    if newly:
         total_reward = sum(a["reward"] for a in newly)
         names = ", ".join(f"{a['emoji']} **{a['name']}**" for a in newly[:5])
         if len(newly) > 5:
@@ -237,8 +238,7 @@ class Attendance(commands.Cog):
         coin_file = discord.File(COIN_IMAGE_PATH, filename="coin.png")
         await interaction.followup.send(embed=embed, file=coin_file)
 
-    @app_commands.command(name="프로필", description="악귀 프로필 카드를 봐요. (내전 전적 · 악귀력 · 업적 · 포켓몬)")
-    @app_commands.describe(유저="다른 사람의 프로필을 보려면 지정하세요. 비우면 내 프로필이에요.")
+    @app_commands.command(name="프로필", description="내 악귀 프로필 카드를 봐요. (내전 전적 · 악귀력 · 업적 · 포켓몬)")
     # ⚠️ 채널 그룹이 "attendance"(=#포켓몬)가 아니라 "profile"이에요.
     #
     # 예전 /프로필은 포켓몬 전용이라 #포켓몬에 묶는 게 맞았어요. 지금은 카드 내용의 대부분이
@@ -251,12 +251,12 @@ class Attendance(commands.Cog):
     # 설정값이 없으면 제한이 없으니 **기본은 아무 채널에서나** 되고, 도배가 문제되면
     # `/채널설정 프로필 #채널`로 언제든 묶을 수 있어요(재배포 필요 없어요).
     @restrict_to_channel("profile")
-    async def profile(self, interaction: discord.Interaction, 유저: discord.Member | None = None):
+    async def profile(self, interaction: discord.Interaction):
         # 카드 렌더링 + DB 조회가 여럿이라 3초를 넘길 수 있어요.
         await interaction.response.defer()
 
-        target = 유저 or interaction.user
-        await send_profile_card(interaction, target)
+        # 본인 카드만 봐요. 남의 프로필을 지정해서 꺼내보는 건 일부러 막아뒀어요.
+        await send_profile_card(interaction, interaction.user)
 
     @app_commands.command(name="출석리셋", description="[서버 소유자 전용/테스트용] 내 트레이너 데이터를 전부 초기화해요.")
     @restrict_to_channel("attendance")
