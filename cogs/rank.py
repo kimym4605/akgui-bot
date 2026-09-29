@@ -499,16 +499,43 @@ class Rank(commands.Cog):
         경기수: Optional[app_commands.Range[int, 1, 20]] = None,
     ):
         await interaction.response.defer()
+        await self.send_rank_report(interaction, 닉네임, 태그, 지역, 경기수)
+
+    async def send_rank_report(
+        self,
+        interaction: discord.Interaction,
+        닉네임: Optional[str] = None,
+        태그: Optional[str] = None,
+        지역: Optional[app_commands.Choice[str]] = None,
+        경기수: Optional[app_commands.Range[int, 1, 20]] = None,
+        *,
+        ephemeral: bool = False,
+    ):
+        """전적 리포트를 만들어 보내요. `/전적` 명령과 **`/프로필` 카드의 🎯 버튼**이 같이 써요.
+
+        원래 이 내용은 `/전적` 명령 본문에 통째로 들어 있었는데, 프로필에서도 같은 리포트를
+        보여주게 되면서 갈라냈어요. 조회·집계·역할 동기화가 전부 여기 있고 명령은 호출만 해요.
+
+        ⚠️ 부르기 전에 `interaction.response.defer()`가 끝나 있어야 해요(HenrikDev 왕복이
+        3초를 자주 넘겨서, 이 함수는 전부 followup으로만 응답해요).
+
+        ephemeral=True면 누른 사람에게만 보여요. 프로필 버튼이 이걸 써요 — `/전적`은 원래
+        #전적검색에만 묶여 있는데, 카드는 아무 채널에서나 열리거든요. 본인에게만 보이면
+        그 채널이 전적 리포트로 도배되지 않아요."""
+        # 이 함수 안의 followup.send는 전부 이 헬퍼를 거쳐요(ephemeral을 빠뜨리지 않으려고요).
+        async def reply(*args, **kwargs):
+            kwargs.setdefault("ephemeral", ephemeral)
+            return await interaction.followup.send(*args, **kwargs)
 
         api_key = os.getenv("HENRIKDEV_API_KEY")
         if not api_key:
-            await interaction.followup.send("HENRIKDEV_API_KEY가 설정되지 않았어요. .env 파일을 확인해주세요.")
+            await reply("HENRIKDEV_API_KEY가 설정되지 않았어요. .env 파일을 확인해주세요.")
             return
 
         # 계정을 등록 안 했으면 닉네임/태그를 입력했어도 일단 등록부터 유도해요.
         account = get_account(interaction.user.id)
         if account is None:
-            await interaction.followup.send(
+            await reply(
                 "아직 라이엇 계정이 등록되어 있지 않아요.\n"
                 "먼저 `/티어 계정등록`으로 본인 계정을 등록해주세요! (등록 후엔 `/전적`만 입력해도 바로 조회돼요)",
                 ephemeral=True,
@@ -544,11 +571,11 @@ class Rank(commands.Cog):
             )
             log.info(f"⏱️ [{닉네임}#{태그}] 티어+경쟁전+일반전 동시조회: {time.monotonic() - _t0:.2f}초")
         except asyncio.TimeoutError:
-            await interaction.followup.send("HenrikDev API 응답이 너무 느려서 시간 초과됐어요. 잠시 후 다시 시도해주세요.")
+            await reply("HenrikDev API 응답이 너무 느려서 시간 초과됐어요. 잠시 후 다시 시도해주세요.")
             return
         except Exception as error:  # noqa: BLE001
             log.exception("전적 조회 중 예외: %s", error)
-            await interaction.followup.send("조회 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.")
+            await reply("조회 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.")
             return
 
         if mmr_status == 429:
@@ -556,7 +583,7 @@ class Rank(commands.Cog):
             # ("Rate limit exceeded, please try again later...")을 그대로 보여주면
             # 뭘 어쩌라는 건지 알 수 없어서, 몇 초 뒤에 다시 하면 되는지로 안내해요.
             wait = henrik_api.retry_after_of(mmr_payload)
-            await interaction.followup.send(
+            await reply(
                 f"⏳ 지금 전적 조회 요청이 몰려서 잠시 막혔어요. **{wait}초쯤 뒤에** 다시 시도해주세요!\n"
                 f"(발로란트 전적 API가 분당 조회 횟수를 제한하고 있어요)"
             )
@@ -565,7 +592,7 @@ class Rank(commands.Cog):
         if mmr_status != 200 or "data" not in mmr_payload:
             errors = mmr_payload.get("errors") or [{}]
             message = errors[0].get("message", "조회에 실패했어요. 닉네임/태그/지역을 확인해주세요.")
-            await interaction.followup.send(f"오류: {message}")
+            await reply(f"오류: {message}")
             return
 
         mmr_data = mmr_payload["data"] or {}
@@ -642,7 +669,7 @@ class Rank(commands.Cog):
             if role_sync_note:
                 embed.add_field(name="티어 역할", value=role_sync_note, inline=False)
             embed.set_footer(text="출처: HenrikDev API (비공식)")
-            await interaction.followup.send(embed=embed)
+            await reply(embed=embed)
             return
 
         # "상위 %" 계산용으로 이번 조회 결과를 저장해둬요.
@@ -686,7 +713,7 @@ class Rank(commands.Cog):
         if position_sync_note:
             embed.add_field(name="포지션 역할", value=position_sync_note, inline=False)
         view = RankDetailView(닉네임, 태그, stats, comp_count, used_fallback)
-        await interaction.followup.send(embed=embed, view=view)
+        await reply(embed=embed, view=view)
 
 
 async def setup(bot: commands.Bot):

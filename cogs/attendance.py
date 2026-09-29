@@ -129,6 +129,19 @@ class ProfileView(discord.ui.View):
         self._target = target
         self.message: discord.Message | None = None
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """카드 주인만 버튼을 누를 수 있어요.
+
+        버튼이 전부 **카드 주인의** 정보(포켓몬·업적·전적)를 여는 거라, 남이 눌렀을 때
+        누른 사람 것을 보여주면 "내 카드인데 남의 전적이 뜨는" 식으로 엇갈려요.
+        어차피 카드는 본인 것만 나오니 누를 사람도 주인 하나예요."""
+        if interaction.user.id == self._target.id:
+            return True
+        await interaction.response.send_message(
+            "이 카드의 주인만 누를 수 있어요. `/프로필`로 본인 카드를 열어주세요.", ephemeral=True
+        )
+        return False
+
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
@@ -161,6 +174,29 @@ class ProfileView(discord.ui.View):
 
         embed = await build_achievement_embed(self._target)
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="발로란트 전적", emoji="🎯", style=discord.ButtonStyle.secondary)
+    async def valorant_rank(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """`/전적`과 **똑같은 리포트**를 카드에서 바로 열어요.
+
+        카드에 이미 티어와 악귀력이 있지만 그건 저장해둔 값이라, KDA·ADR·HS%·선호 요원처럼
+        경기를 실제로 뒤져야 나오는 건 없어요. 이 버튼은 rank cog의 조회를 그대로 불러요
+        (서식이 두 벌이 되지 않게 `/전적` 본문을 함수로 갈라서 같이 써요).
+
+        ⚠️ HenrikDev를 실제로 호출해요. 카드를 열 때마다가 아니라 **버튼을 눌렀을 때만**
+        나가니까, `/전적`을 한 번 치는 것과 비용이 같아요."""
+        await interaction.response.defer(ephemeral=True)
+
+        rank_cog = interaction.client.get_cog("Rank")
+        if rank_cog is None:
+            await interaction.followup.send(
+                "지금은 전적 기능을 쓸 수 없어요. 잠시 후 `/전적`으로 시도해주세요.", ephemeral=True
+            )
+            return
+
+        # 본인에게만 보이게 해요. `/전적`은 #전적검색에 묶여 있는데 카드는 아무 채널에서나
+        # 열리거든요 — ephemeral이면 그 채널이 전적 리포트로 덮이지 않아요.
+        await rank_cog.send_rank_report(interaction, ephemeral=True)
 
 
 async def send_profile_card(interaction: discord.Interaction, target: discord.abc.User):
