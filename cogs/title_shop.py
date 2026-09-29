@@ -194,12 +194,18 @@ class TitleShop(commands.Cog):
     # 명령어
     # ------------------------------------------------------------------
     @app_commands.command(name="칭호구매", description=f"악귀코인 {TITLE_PRICE}개로 나만의 칭호를 {TITLE_DAYS}일간 달아요.")
-    @restrict_to_channel("attendance")
+    # ⚠️ 그룹이 "attendance"(=#포켓몬)에서 "title"로 바뀌었어요.
+    #
+    # 칭호는 코인을 쓰는 거의 유일한 곳인데 실사용이 0건이었어요. 2026-09-29에 재보니
+    # #포켓몬은 마지막 글이 9일 전인 사실상 죽은 채널이었고(#일반❓은 하루 50개),
+    # "20코인을 쓰려면 아무도 안 가는 채널로 가야 하는" 상태였어요. 그게 원인일 수 있어서
+    # 떼어냈어요. 설정값이 없으면 제한이 없으니 기본은 아무 채널에서나 돼요.
+    @restrict_to_channel("title")
     async def buy(self, interaction: discord.Interaction):
         await interaction.response.send_modal(TitleModal(self))
 
     @app_commands.command(name="칭호", description="지금 달고 있는 칭호와 남은 기간을 확인해요.")
-    @restrict_to_channel("attendance")
+    @restrict_to_channel("title")
     async def status(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
@@ -221,7 +227,7 @@ class TitleShop(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="칭호해제", description="달고 있는 칭호를 뗄게요. (코인은 돌려주지 않아요)")
-    @restrict_to_channel("attendance")
+    @restrict_to_channel("title")
     async def remove(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 

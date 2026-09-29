@@ -27,6 +27,7 @@ from utils import (
     scrim_record_store,
     tier_roles,
 )
+from utils.channel_check import restrict_to_channel
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +130,7 @@ class Achievement(commands.Cog):
         분야="특정 분야만 자세히 보고 싶을 때 골라주세요.",
     )
     @app_commands.choices(분야=CATEGORY_CHOICES)
+    @restrict_to_channel("profile")
     async def achievements(
         self,
         interaction: discord.Interaction,
@@ -156,6 +158,7 @@ class Achievement(commands.Cog):
     # ------------------------------------------------------------------
     @app_commands.command(name="내전전적", description="내전 승패와 연승 기록을 봐요.")
     @app_commands.describe(유저="다른 사람의 전적을 보려면 지정하세요.")
+    @restrict_to_channel("profile")
     async def scrim_record(self, interaction: discord.Interaction, 유저: discord.Member | None = None):
         await interaction.response.defer()
         target = 유저 or interaction.user
@@ -209,6 +212,7 @@ class Achievement(commands.Cog):
     # ------------------------------------------------------------------
     @app_commands.command(name="주간랭킹", description="이번 주 악귀력 순위와 내전 승수 순위를 봐요.")
     @app_commands.describe(지난주="지난주 순위를 보려면 켜세요.")
+    @restrict_to_channel("profile")
     async def weekly_ranking(self, interaction: discord.Interaction, 지난주: bool = False):
         await interaction.response.defer()
 

@@ -414,7 +414,12 @@ class Mission(commands.Cog):
     # /미션
     # ------------------------------------------------------------------
     @app_commands.command(name="미션", description="오늘의 미션과 진행 상황을 확인해요.")
-    @restrict_to_channel("attendance")
+    # ⚠️ 그룹이 "attendance"(=#포켓몬)에서 "mission"으로 바뀌었어요.
+    #
+    # 미션은 발로란트 미션이 핵심인데 정작 #포켓몬에 묶여 있었어요. `#🎯-미션-내용` 전용
+    # 채널이 따로 있는데도요. 2026-09-29 기준 #포켓몬은 마지막 글이 9일 전인 죽은 채널이라,
+    # 미션 완료율이 낮았던 이유 중 하나일 수 있어요. 설정값이 없으면 제한이 없어요.
+    @restrict_to_channel("mission")
     async def show(self, interaction: discord.Interaction):
         await interaction.response.defer()
 

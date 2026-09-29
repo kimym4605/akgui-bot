@@ -239,7 +239,18 @@ class Attendance(commands.Cog):
 
     @app_commands.command(name="프로필", description="악귀 프로필 카드를 봐요. (내전 전적 · 악귀력 · 업적 · 포켓몬)")
     @app_commands.describe(유저="다른 사람의 프로필을 보려면 지정하세요. 비우면 내 프로필이에요.")
-    @restrict_to_channel("attendance")
+    # ⚠️ 채널 그룹이 "attendance"(=#포켓몬)가 아니라 "profile"이에요.
+    #
+    # 예전 /프로필은 포켓몬 전용이라 #포켓몬에 묶는 게 맞았어요. 지금은 카드 내용의 대부분이
+    # 티어·내전 전적·연승·악귀력·칭호(발로란트/서버 활동)고 포켓몬은 맨 아래 한 줄이에요.
+    # 게다가 전적이 **쌓이는** 곳(/팀짜기 승리 버튼)은 아무 채널에서나 되는데 **보는** 곳만
+    # 묶여 있으면 앞뒤가 안 맞아요.
+    #
+    # 2026-09-29에 실제로 재보니 #포켓몬은 50개 글이 쌓이는 데 23일이 걸리고 마지막 글이
+    # 9일 전이었어요(#일반❓은 하루에 50개). 그래서 별도 그룹으로 떼어냈어요.
+    # 설정값이 없으면 제한이 없으니 **기본은 아무 채널에서나** 되고, 도배가 문제되면
+    # `/채널설정 프로필 #채널`로 언제든 묶을 수 있어요(재배포 필요 없어요).
+    @restrict_to_channel("profile")
     async def profile(self, interaction: discord.Interaction, 유저: discord.Member | None = None):
         # 카드 렌더링 + DB 조회가 여럿이라 3초를 넘길 수 있어요.
         await interaction.response.defer()
@@ -335,7 +346,10 @@ class Attendance(commands.Cog):
     @app_commands.describe(기능="채널을 지정할 명령어 그룹", 채널="이 그룹의 명령어를 허용할 채널 (노래방만 음성채널)")
     @app_commands.choices(기능=[
         app_commands.Choice(name="출석 명령어 (/출석)", value="attend"),
-        app_commands.Choice(name="육성 명령어 (/시작, /프로필 등)", value="attendance"),
+        app_commands.Choice(name="육성·코인 명령어 (/코인, /코인보내기 등)", value="attendance"),
+        app_commands.Choice(name="프로필·업적 (/프로필, /업적, /내전전적, /주간랭킹)", value="profile"),
+        app_commands.Choice(name="칭호 상점 (/칭호구매, /칭호, /칭호해제)", value="title"),
+        app_commands.Choice(name="미션 (/미션)", value="mission"),
         app_commands.Choice(name="즉석생성형 통화방 명령어 (/방만들기 등)", value="room"),
         app_commands.Choice(name="전적 조회 명령어 (/전적)", value="tier_lookup"),
         app_commands.Choice(name="발로란트 개인 상점 (/오상)", value="valorant_shop"),
