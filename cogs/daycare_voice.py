@@ -20,7 +20,7 @@ from discord.ext import commands, tasks
 from datetime import datetime, timezone
 
 from utils import daycare_store
-from utils.pokemon_store import get_trainer, has_trainer, save_trainer
+from utils.pokemon_store import get_trainer, has_trainer, save_daycare
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +64,8 @@ class DaycareVoice(commands.Cog):
             return
         daycare = trainer.setdefault("daycare", {"slots": [None, None], "egg": None, "pairTicks": 0})
         daycare["voiceSessionStart"] = datetime.now(timezone.utc).isoformat()
-        await save_trainer(user_id, trainer)
+        # ⚠️ save_trainer(문서 통째 저장)를 쓰면 안 돼요 - 그 사이에 들어온 /출석이 날아가요.
+        await save_daycare(user_id, daycare)
 
     async def _process(self, user_id: int, elapsed_minutes: float, still_in_voice: bool) -> dict | None:
         """진행 반영 후, 지금 맡겨둔 알이 있으면 알림용 정보를 돌려주고 없으면 None이에요.
@@ -86,7 +87,10 @@ class DaycareVoice(commands.Cog):
                 daycare_store.tick_steps(trainer)
 
         daycare["voiceSessionStart"] = datetime.now(timezone.utc).isoformat() if still_in_voice else None
-        await save_trainer(user_id, trainer)
+        # ⚠️ 여기가 통화 중 5분마다 도는 자리예요. 문서를 통째로 저장하면 하필 그 순간 들어온
+        #    /출석이 되돌려져서 다음 날 연속 출석이 1로 리셋돼요. daycare 칸만 갱신해요.
+        #    (tick_steps도 trainer["daycare"] 안에서만 고치니 이걸로 충분해요)
+        await save_daycare(user_id, daycare)
 
         if ticks <= 0:
             return None

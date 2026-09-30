@@ -100,12 +100,29 @@ def _get_doc(user_id: int) -> dict | None:
 
 
 def _save_doc(user_id: int, trainer: dict):
+    """⚠️ 문서를 **통째로** 갈아끼워요. 읽어둔 뒤 다른 데서 바뀐 필드는 되돌아가요.
+
+    읽고-고치고-쓰는 사이에 `/출석`이 들어오면 그 출석이 통째로 사라져요
+    (lastAttendanceDate·attendanceStreak·coin이 전부 읽은 시점 값으로 돌아감).
+    다음 날 출석하면 "어제 안 왔네"로 판정돼 **연속 출석이 1로 리셋**돼요.
+
+    그래서 자주 쓰는 쪽(통화 중 5분마다 도는 키우미집)은 이걸 쓰지 않고
+    아래 `_save_daycare_sync`처럼 **건드리는 필드만** 갱신해요.
+    새로 저장 코드를 붙일 때도 되도록 필드 단위 update_one을 쓰세요."""
     doc = {**trainer, "_id": str(user_id)}
     _trainers.replace_one({"_id": str(user_id)}, doc, upsert=True)
 
 
 def _save_trainer_sync(user_id: int, trainer: dict):
     _save_doc(user_id, trainer)
+
+
+def _save_daycare_sync(user_id: int, daycare: dict):
+    """키우미집(daycare) 칸만 갱신해요. 같은 문서의 출석·코인은 건드리지 않아요.
+
+    upsert를 안 하는 건 일부러예요. 트레이너가 없으면 아무것도 안 하고 넘어가야지,
+    daycare만 든 껍데기 문서를 새로 만들면 안 되니까요(호출부가 has_trainer로 이미 확인해요)."""
+    _trainers.update_one({"_id": str(user_id)}, {"$set": {"daycare": daycare}})
 
 
 def _has_trainer_sync(user_id: int) -> bool:
@@ -226,6 +243,11 @@ def _reset_user_sync(user_id: int) -> bool:
 # ------------------------------------------------------------------
 async def save_trainer(user_id: int, trainer: dict):
     return await asyncio.to_thread(_save_trainer_sync, user_id, trainer)
+
+
+async def save_daycare(user_id: int, daycare: dict):
+    """키우미집 칸만 저장해요. 출석·코인을 덮어쓰지 않아요(`_save_daycare_sync` 주석 참고)."""
+    return await asyncio.to_thread(_save_daycare_sync, user_id, daycare)
 
 
 async def has_trainer(user_id: int) -> bool:
