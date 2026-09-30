@@ -37,7 +37,6 @@ GRADES = {
 CATEGORIES = {
     "attend": "📅 출석",
     "coin": "🪙 악귀코인",
-    "pokemon": "🐾 포켓몬",
     "scrim": "⚔️ 내전",
     "valorant": "🎯 발로란트",
     "mission": "📋 미션",
@@ -75,19 +74,6 @@ ACHIEVEMENTS = [
     _a("coin_100",    "세 자리 부자",   "악귀코인 100개 보유", "💵", "coin", "coin", 100, "silver"),
     _a("coin_300",    "악귀 자산가",    "악귀코인 300개 보유", "💎", "coin", "coin", 300, "gold"),
     _a("coin_500",    "코인 금고",      "악귀코인 500개 보유", "🏦", "coin", "coin", 500, "platinum"),
-
-    # -- 🐾 포켓몬 도감 (5) ----------------------------------------
-    _a("dex_1",       "도감 개시",      "도감 1종 등록",   "📖", "pokemon", "pokedex", 1,   "bronze"),
-    _a("dex_10",      "수집의 재미",    "도감 10종 등록",  "📖", "pokemon", "pokedex", 10,  "bronze"),
-    _a("dex_30",      "제법 모았네",    "도감 30종 등록",  "📚", "pokemon", "pokedex", 30,  "silver"),
-    _a("dex_60",      "도감 절반",      "도감 60종 등록",  "📚", "pokemon", "pokedex", 60,  "gold"),
-    _a("dex_151",     "도감 마스터",    "도감 151종 등록", "🏆", "pokemon", "pokedex", 151, "platinum"),
-
-    # -- 🐾 포켓몬 레벨 (4) ----------------------------------------
-    _a("lv_10",       "첫 성장",        "포켓몬 Lv.10 달성",  "🌱", "pokemon", "level", 10,  "bronze"),
-    _a("lv_30",       "듬직해졌어",     "포켓몬 Lv.30 달성",  "🌿", "pokemon", "level", 30,  "bronze"),
-    _a("lv_60",       "믿음직한 파트너", "포켓몬 Lv.60 달성",  "🌳", "pokemon", "level", 60,  "silver"),
-    _a("lv_100",      "만렙 트레이너",  "포켓몬 Lv.100 달성", "👑", "pokemon", "level", 100, "platinum"),
 
     # -- ⚔️ 내전 승수 (7) ------------------------------------------
     _a("win_1",       "첫 승",          "내전 1승",    "🥉", "scrim", "scrim_wins", 1,   "bronze"),
@@ -136,7 +122,6 @@ ACHIEVEMENTS = [
     _a("has_title",   "이름을 얻다",    "칭호를 달아본 적 있음", "🏷️", "etc", "title_owned",     1, "silver"),
     _a("riot_link",   "연결된 자",      "라이엇 계정 연동",      "🔗", "etc", "riot_linked",     1, "bronze"),
     _a("birthday",    "생일 등록",      "생일을 등록해둠",       "🎂", "etc", "birthday_set",    1, "bronze"),
-    _a("starter",     "여정의 시작",    "스타팅 포켓몬 선택",    "🎒", "etc", "pokemon_started", 1, "bronze"),
 ]
 
 TOTAL = len(ACHIEVEMENTS)

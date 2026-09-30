@@ -88,16 +88,14 @@ COG_GROUPS: dict[str, list[str]] = {
     "🎤 노래방": [
         "music",            # 노래방 음성채널 유튜브 음악 재생
     ],
-    "🐾 포켓몬/출석": [
-        "attendance",    # 출석 + 포켓몬 육성 시스템 (상점/아이템 사용은 웹사이트에서)
-        "daycare_voice",  # 키우미집 알 생성/부화 진행도를 음성채널 잔류 시간으로 채움
+    "📅 출석": [
+        "attendance",    # /출석, /프로필, /채널설정
     ],
     "🪙 악귀코인": [
         "coin",          # /코인, /코인보내기 - 포켓몬 미시작자도 코인을 모을 수 있어요
         "mission",       # /미션 - 매일 3개 배정, 깰 때마다 악귀코인 1개
         "title_shop",    # /칭호구매 - 코인으로 한 달짜리 커스텀 역할
         "betting",       # /베팅개설 - 내전 승부에 코인 걸기 (파리뮤추얼 정산)
-        "pet",           # /코드냥이 - 바탕화면 고양이 앱을 내 코인 계정에 연결하는 코드 발급
     ],
     "🛠️ 커뮤니티/운영": [
         "onboarding",    # 규칙 동의/온보딩
@@ -198,26 +196,8 @@ class MainBot(commands.Bot):
         # 심장박동은 부팅 초반에 띄워둬요. (내부에서 wait_until_ready로 대기)
         asyncio.create_task(_beat_loop(self))
 
-        # 기술표/특성/타입/종족값/진화정보/도감번호 캐시가 하나라도 없으면
-        # PokeAPI에서 전부(또는 이어서) 수집해요.
-        data_dir = Path("data")
-        required_files = [
-            "learnsets.json", "moves.json", "abilities.json",
-            "species.json", "evolution.json", "name_to_id.json",
-        ]
-        missing = [f for f in required_files if not (data_dir / f).exists()]
-
-        if missing:
-            log.info("📡 캐시 파일이 부족해요 (%s). PokeAPI에서 수집을 시작해요. (최대 10분 대기)", ", ".join(missing))
-            from scripts.build_learnsets import main as build_learnsets
-            try:
-                await asyncio.wait_for(build_learnsets(), timeout=600)
-                log.info("✅ 수집 완료!")
-            except asyncio.TimeoutError:
-                log.warning("⚠️ 수집이 10분 넘게 걸려서 중단해요. 지금까지 저장된 데이터 + 기본값으로 계속 진행해요.")
-            except Exception as e:
-                log.warning("⚠️ 수집 실패, 기본값으로 계속 진행해요: %s", e)
-
+        # (2026-09-30) 예전엔 여기서 포켓몬 기술표/도감 캐시가 없으면 PokeAPI에서
+        # 최대 10분간 수집했어요. 포켓몬 기능을 접으면서 캐시도 수집 스크립트도 지웠어요.
         await self._load_cogs()
 
         # DB 설정이 틀렸으면 첫 /출석 때가 아니라 지금 알아채는 게 나아요.

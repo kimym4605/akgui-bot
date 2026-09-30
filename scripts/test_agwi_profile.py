@@ -153,15 +153,12 @@ async def test_achievements():
     print("\n[3] 업적 판정 · 보상")
     _db["trainers"].insert_one({
         "_id": str(U1), "attendance": 137, "attendanceStreak": 12, "coin": 50,
-        "pokedex": ["a"] * 42, "level": 55, "basePokemon": "파이리",
-    })
+            })
     _db["missions"].insert_one({"_id": str(U1), "totalDone": 12})
 
     stats = await achievement_store.collect_stats(U1, tier_index=20, riot_linked=True, birthday_set=True)
     check("출석 수집", stats["attendance"] == 137, str(stats["attendance"]))
     check("연속 출석 수집", stats["attendance_streak"] == 12)
-    check("도감 수집", stats["pokedex"] == 42)
-    check("레벨 수집", stats["level"] == 55)
     check("내전 승수 수집", stats["scrim_wins"] == 5, str(stats["scrim_wins"]))
     check("최고 연승 수집", stats["scrim_best_streak"] == 3)
     check("악귀력 수집", stats["agwi_best"] == 1100, str(stats["agwi_best"]))
@@ -183,7 +180,8 @@ async def test_achievements():
     check("재판정 시 코인 안 늘어남", after2 == after, f"{after} → {after2}")
 
     summary = await achievement_store.summary(U1, stats)
-    check("요약 집계", summary["unlocked"] == len(newly) and summary["total"] == 60,
+    # 2026-09-30 포켓몬 기능을 접으면서 도감 5 + 레벨 4 + 스타팅 1 = 10개를 뺐어요 (60 → 50).
+    check("요약 집계", summary["unlocked"] == len(newly) and summary["total"] == 50,
           f"{summary['unlocked']}/{summary['total']}")
 
     # 조건 근처 경계값
@@ -216,8 +214,7 @@ async def test_card():
         "streak_now": scrim_record_store.streak_text(rec),
         "agwi": weekly["score"], "agwi_grade": weekly["grade"],
         "achievements": summary["unlocked"], "achievements_total": summary["total"],
-        "pokemon": "리자몽 Lv.55", "pokedex": stats["pokedex"],
-        "attendance": stats["attendance"], "attendance_streak": stats["attendance_streak"],
+                "attendance": stats["attendance"], "attendance_streak": stats["attendance_streak"],
         "season": scrim_record_store.current_season(),
     }
     png = await profile_card.render_card(data, None)
@@ -235,8 +232,7 @@ async def test_concurrency():
     print("\n[5] 동시 호출 (중복 지급 · 예외 없음)")
     _db["trainers"].insert_one({
         "_id": str(U2), "attendance": 400, "attendanceStreak": 100, "coin": 0,
-        "pokedex": ["a"] * 151, "level": 100, "basePokemon": "파이리",
-    })
+            })
     stats = await achievement_store.collect_stats(U2, tier_index=25, riot_linked=True, birthday_set=True)
 
     # 같은 사람에 대해 판정 5개를 동시에 굴려요.

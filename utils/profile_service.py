@@ -12,7 +12,6 @@
   - `scrim_record_store`: 내전 승/패/연승
   - `agwi_weekly_store`: 이번 주 악귀력
   - `achievement_store`: 업적 해금 수 (겸 새 업적 판정)
-  - `pokemon_store`: 파트너 포켓몬·도감·출석
 
 ## HenrikDev를 부르지 않아요
 
@@ -34,7 +33,6 @@ from utils import (
     tier_roles,
     title_store,
 )
-from utils.pokemon_store import get_trainer, has_custom_starter
 
 log = logging.getLogger(__name__)
 
@@ -97,15 +95,6 @@ async def collect(member: discord.Member | discord.User, *, evaluate_achievement
     valorant_doc = weekly if (weekly or {}).get("stats") else await agwi_weekly_store.latest(member.id)
     valorant = (valorant_doc or {}).get("stats")
 
-    # --- 포켓몬 ---
-    trainer = await get_trainer(member.id)
-    pokemon_text = None
-    if trainer and has_custom_starter(trainer):
-        nickname = trainer.get("nickname")
-        species = trainer.get("currentPokemon")
-        label = f"{nickname}({species})" if nickname else species
-        pokemon_text = f"{label} Lv.{trainer.get('level', 1)}"
-
     # --- 업적 (판정 겸 집계) ---
     riot_linked = riot_account_store.get_account(member.id) is not None
     birthday_set = bool(await birthday_store.get_birthday(member.id))
@@ -141,8 +130,6 @@ async def collect(member: discord.Member | discord.User, *, evaluate_achievement
         "agwi_grade": (weekly.get("grade") or "") if weekly else "",
         "achievements": summary["unlocked"],
         "achievements_total": summary["total"],
-        "pokemon": pokemon_text,
-        "pokedex": stats["pokedex"],
         "attendance": stats["attendance"],
         "attendance_streak": stats["attendance_streak"],
         "season": scrim_record_store.current_season(),

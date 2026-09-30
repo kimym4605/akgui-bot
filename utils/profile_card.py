@@ -316,13 +316,9 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
     )
     _progress_bar(draw, left + 160, ach_y + 56, CARD_WIDTH - 44 - left - 160 - 18, 16, percent / 100)
 
-    # ── 하단 한 줄 (포켓몬 · 출석) ───────────────────────────
+    # ── 하단 한 줄 (출석) ───────────────────────────
     footer_y = ach_y + 108
     footer_parts = []
-    if data.get("pokemon"):
-        footer_parts.append(f"파트너 {data['pokemon']}")
-    if data.get("pokedex"):
-        footer_parts.append(f"도감 {data['pokedex']}종")
     if data.get("attendance"):
         footer_parts.append(f"누적 출석 {data['attendance']}회")
     if data.get("attendance_streak"):

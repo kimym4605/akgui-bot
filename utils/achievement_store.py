@@ -54,7 +54,6 @@ def _collect_sync(user_id, tier_index: int | None, riot_linked: bool, birthday_s
 
     stats = {
         "attendance": 0, "attendance_streak": 0, "coin": 0,
-        "pokedex": 0, "level": 0, "pokemon_started": 0,
         "scrim_wins": 0, "scrim_losses": 0, "scrim_matches": 0, "scrim_best_streak": 0,
         "agwi_best": 0, "tier_index": tier_index or 0,
         "mission_total": 0, "title_owned": 0,
@@ -62,19 +61,15 @@ def _collect_sync(user_id, tier_index: int | None, riot_linked: bool, birthday_s
         "birthday_set": 1 if birthday_set else 0,
     }
 
-    # --- 포켓몬 트레이너 (없으면 게스트 출석 기록에서 출석만 가져와요) ---
+    # --- 출석/코인 (trainers 문서가 있으면 거기, 없으면 게스트 기록 + 지갑) ---
     trainer = _trainers.find_one(
         {"_id": uid},
-        {"attendance": 1, "attendanceStreak": 1, "coin": 1, "pokedex": 1,
-         "level": 1, "starterChosen": 1, "basePokemon": 1},
+        {"attendance": 1, "attendanceStreak": 1, "coin": 1},
     )
     if trainer:
         stats["attendance"] = int(trainer.get("attendance", 0) or 0)
         stats["attendance_streak"] = int(trainer.get("attendanceStreak", 0) or 0)
         stats["coin"] = int(trainer.get("coin", 0) or 0)
-        stats["pokedex"] = len(trainer.get("pokedex", []) or [])
-        stats["level"] = int(trainer.get("level", 0) or 0)
-        stats["pokemon_started"] = 1
     else:
         guest = _guest.find_one({"_id": uid}, {"attendance": 1, "attendanceStreak": 1})
         if guest:

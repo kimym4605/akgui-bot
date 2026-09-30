@@ -39,15 +39,7 @@ class Coin(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         amount = await coin_wallet.get_balance(interaction.user.id)
-        started = await coin_wallet.is_trainer(interaction.user.id)
-
         description = f"보유 악귀코인: **{amount}개**"
-        if not started:
-            # 포켓몬 미시작자도 코인을 모을 수 있으니, 나중에 어떻게 되는지 알려줘요.
-            description += (
-                "\n\n-# 아직 포켓몬을 시작하지 않았어요. 모아둔 코인은 그대로 보관되고, "
-                "나중에 악귀포켓몬 웹사이트에서 스타팅을 고르면 **그대로 따라가요.**"
-            )
 
         embed = discord.Embed(title="🪙 악귀코인", description=description, color=0xF1C40F)
         embed.set_thumbnail(url="attachment://coin.png")
