@@ -14,6 +14,15 @@
 맞교환하고, 한쪽만 고르면 그 사람만 반대편으로 옮겨요(ManualAdjustView). 바꾼 명단은
 `_current`에 반영돼서 승리 보고도 **바꾼 뒤 명단**으로 기록돼요.
 
+**👑 팀장** 버튼으로 양 팀의 팀장을 정할 수 있어요. 드롭다운으로 직접 고르거나 🎲 무작위로
+뽑을 수 있고, 정하면 명단에서 그 사람 앞에 👑이 붙어요(CaptainPickView). 편성이 통째로
+바뀌는 🔄/🎲는 팀장을 지우고, 🔀 직접 조정은 **팀장이 그 팀에 남아 있으면** 그대로 둬요.
+
+**`/팀보기`** 는 그 서버에서 마지막으로 짠 편성을 다시 보여줘요. `/팀짜기` 메시지는 10분 뒤에
+버튼이 꺼지고 채팅에 묻혀버려서, 한참 뒤에 "우리 팀 뭐였지?"를 볼 방법이 없었어요. 편성이
+바뀔 때마다 utils/team_store.py에 마지막 하나만 덮어써 두고, 거기서 읽어 그려요.
+명령어를 쓴 사람만이 아니라 **누구나** 볼 수 있어요.
+
 점수의 출처(둘 다 이미 봇에 쌓여 있는 데이터예요. 새로 API를 부르지 않아요):
   - **티어 역할**: `/전적`을 본인 계정으로 돌리면 자동으로 붙어요(utils/tier_roles.py).
   - **악귀 스코어**: `/전적`이 계산해서 `data/rank_stats.json`에 남겨둔 값(utils/rank_stats_store.py).
@@ -21,7 +30,9 @@
 자세한 계산은 utils/team_balance.py에 있어요.
 """
 import logging
+import random
 import re
+from datetime import datetime
 
 import discord
 from discord import app_commands
@@ -33,6 +44,7 @@ from utils import (
     riot_account_store,
     scrim_record_store,
     team_balance,
+    team_store,
     tier_roles,
 )
 
@@ -42,7 +54,7 @@ log = logging.getLogger(__name__)
 VIEW_TIMEOUT = 600
 # 미리 뽑아둘 후보 편성 수. '다시 섞기'를 누르면 이 안에서 다음 것을 보여줘요.
 CANDIDATE_COUNT = 10
-# '🔀 직접 조정' 창이 열려 있는 시간이에요. 고르고 누르는 데만 쓰니 짧아도 돼요.
+# '🔀 직접 조정'과 '👑 팀장' 창이 열려 있는 시간이에요. 고르고 누르는 데만 쓰니 짧아도 돼요.
 MANUAL_TIMEOUT = 180
 # 드롭다운 하나에 담을 수 있는 최대 항목 수(디스코드 제한).
 SELECT_LIMIT = 25
@@ -144,8 +156,31 @@ def _collect_players(members: list[discord.Member]) -> list[team_balance.Rated]:
     return team_balance.fill_missing(players)
 
 
-def _player_line(player: team_balance.Rated) -> str:
-    """'🥇 골드 3 · 악귀 (1120점)' 같은 한 줄이에요."""
+def _when_text(saved_at: str | None) -> str:
+    """저장해둔 시각을 '오늘 21:40' / '어제 23:05' / '10월 1일 21:00'으로 바꿔요.
+
+    `/팀보기`에서 제일 중요한 정보예요 - 어제 짠 편성을 오늘 것으로 착각하면 안 되니까요.
+    파일을 손으로 고쳐서 시각이 깨져 있어도 명령어가 죽지는 않게 해요."""
+    if not saved_at:
+        return "언제인지 모르는 시점"
+    try:
+        moment = datetime.fromisoformat(saved_at)
+    except (TypeError, ValueError):
+        return "언제인지 모르는 시점"
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=team_store.KST)
+    moment = moment.astimezone(team_store.KST)
+    days = (datetime.now(team_store.KST).date() - moment.date()).days
+    clock = moment.strftime("%H:%M")
+    if days == 0:
+        return f"오늘 {clock}"
+    if days == 1:
+        return f"어제 {clock}"
+    return f"{moment.month}월 {moment.day}일 {clock}"
+
+
+def _player_line(player: team_balance.Rated, *, captain: bool = False) -> str:
+    """'🥇 골드 3 · 악귀 (1120점)' 같은 한 줄이에요. 팀장이면 앞에 👑을 붙여요."""
     if player.tier_index is None:
         tier_text = "❔ 티어 미확인"
     else:
@@ -153,11 +188,20 @@ def _player_line(player: team_balance.Rated) -> str:
             tier_roles.tier_name_from_index(player.tier_index)
         )
     score_text = f" ({player.agwi_score:.0f}점)" if player.agwi_score is not None else ""
-    return f"{tier_text} · **{player.label}**{score_text}"
+    mark = "👑 " if captain else ""
+    return f"{mark}{tier_text} · **{player.label}**{score_text}"
+
+
+def _team_lines(team: list[team_balance.Rated], captain_id: int | None) -> str:
+    """팀장을 맨 위로 올려서 명단 한 덩어리를 만들어요(누가 팀장인지 바로 보이게)."""
+    captain = next((p for p in team if p.key == captain_id), None)
+    ordered = ([captain] if captain else []) + [p for p in team if p is not captain]
+    lines = [_player_line(p, captain=p is captain) for p in ordered]
+    return "\n".join(lines) or "-"
 
 
 def _team_field_name(title: str, team: list[team_balance.Rated], balanced: bool) -> str:
-    if not balanced:
+    if not balanced or not team:
         return f"{title} ({len(team)}명)"
     average = sum(p.rating for p in team) / len(team)
     average_tier = tier_roles.display_name_for(tier_roles.tier_name_from_index(average))
@@ -167,34 +211,36 @@ def _team_field_name(title: str, team: list[team_balance.Rated], balanced: bool)
 def _build_embed(
     team_a: list[team_balance.Rated],
     team_b: list[team_balance.Rated],
-    diff: float,
+    diff: float | None,
     *,
-    balanced: bool,
+    mode: str,
     source_label: str,
-    manual: bool = False,
+    captains: tuple[int | None, int | None] = (None, None),
 ) -> discord.Embed:
-    # manual은 '🔀 직접 조정'으로 손을 본 편성이에요. 이때도 점수와 실력 차이는 보여줘요 -
+    # mode는 이 편성을 어떻게 만들었는지예요(team_store의 MODE_* 값).
+    # MANUAL은 '🔀 직접 조정'으로 손을 본 편성이에요. 이때도 점수와 실력 차이는 보여줘요 -
     # 바꾼 뒤에 균형이 얼마나 틀어졌는지 봐야 하니까요.
+    manual = mode == team_store.MODE_MANUAL
     if manual:
         title, color = "✏️ 팀 나누기 (직접 조정)", 0xF2A900
-    elif balanced:
-        title, color = "🎯 팀 나누기 (실력 균형)", 0x00B0F4
-    else:
+    elif mode == team_store.MODE_RANDOM:
         title, color = "🎲 팀 나누기 (완전 랜덤)", 0x9B7BF0
+    else:
+        title, color = "🎯 팀 나누기 (실력 균형)", 0x00B0F4
     embed = discord.Embed(title=title, color=color)
-    balanced = balanced or manual
+    balanced = mode != team_store.MODE_RANDOM
     embed.add_field(
         name=_team_field_name("🅰️ 팀 A", team_a, balanced),
-        value="\n".join(_player_line(p) for p in team_a) or "-",
+        value=_team_lines(team_a, captains[0]),
         inline=True,
     )
     embed.add_field(
         name=_team_field_name("🅱️ 팀 B", team_b, balanced),
-        value="\n".join(_player_line(p) for p in team_b) or "-",
+        value=_team_lines(team_b, captains[1]),
         inline=True,
     )
 
-    if balanced:
+    if balanced and diff is not None:
         if diff < GOOD_BALANCE:
             verdict = "균형이 잘 맞아요"
         elif manual:
@@ -224,10 +270,11 @@ def _build_embed(
 
     # 임베드 꼬리말은 줄바꿈이 제대로 안 살아서 한 줄로만 적어요.
     # source_label에는 '🎧 랭크방' / '✍️ 직접 지정 (6명)'처럼 아이콘까지 들어있어요.
-    footer = source_label
+    # (`/팀보기`가 읽는 옛 기록엔 source_label이 비어 있을 수 있어서 빈 칸은 걸러요)
+    parts = [source_label] if source_label else []
     if balanced:
-        footer += " · 점수 근거: 티어 역할 + 악귀 스코어(250점 = 1단계, 최대 ±3단계)"
-    embed.set_footer(text=footer)
+        parts.append("점수 근거: 티어 역할 + 악귀 스코어(250점 = 1단계, 최대 ±3단계)")
+    embed.set_footer(text=" · ".join(parts))
     return embed
 
 
@@ -345,6 +392,110 @@ def swap_players(
     return new_a, new_b
 
 
+def keep_valid_captains(
+    team_a: list[team_balance.Rated],
+    team_b: list[team_balance.Rated],
+    captains: tuple[int | None, int | None],
+) -> tuple[int | None, int | None]:
+    """편성이 바뀐 뒤에도 그 팀에 남아 있는 팀장만 지켜요.
+
+    🔀 직접 조정으로 팀장이 반대편으로 넘어가면 그 자리는 비워요. '옮겨간 팀의 팀장'으로
+    자동 승격시키면 반대편 팀장과 겹치거나, 아무도 원하지 않은 팀장이 생겨버려요."""
+    a_ids = {p.key for p in team_a}
+    b_ids = {p.key for p in team_b}
+    return (
+        captains[0] if captains[0] in a_ids else None,
+        captains[1] if captains[1] in b_ids else None,
+    )
+
+
+def random_captains(
+    team_a: list[team_balance.Rated], team_b: list[team_balance.Rated]
+) -> tuple[int | None, int | None]:
+    """양 팀에서 한 명씩 무작위로 뽑아요. 빈 팀은 None."""
+    return (
+        random.choice(team_a).key if team_a else None,
+        random.choice(team_b).key if team_b else None,
+    )
+
+
+class CaptainPickView(discord.ui.View):
+    """양 팀의 팀장을 정하는 화면이에요. 명령어를 쓴 사람에게만 보여요.
+
+    드롭다운으로 직접 고르거나 🎲 무작위로 뽑을 수 있어요. 한쪽만 골라도 되고(안 고른 쪽은
+    지금 팀장을 그대로 둬요), 아무도 안 고르고 **👑 팀장 해제**로 둘 다 비울 수도 있어요."""
+
+    def __init__(self, parent: "TeamSplitView"):
+        super().__init__(timeout=MANUAL_TIMEOUT)
+        self._parent = parent
+        team_a, team_b = parent.current
+        self._a_select = _TeamMemberSelect("🅰️ A팀 팀장 (안 골라도 돼요)", team_a)
+        self._b_select = _TeamMemberSelect("🅱️ B팀 팀장 (안 골라도 돼요)", team_b)
+        self.add_item(self._a_select)
+        self.add_item(self._b_select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self._parent.owner_id:
+            return True
+        await interaction.response.send_message(
+            "`/팀짜기`를 실행한 사람만 팀장을 정할 수 있어요.", ephemeral=True
+        )
+        return False
+
+    @discord.ui.button(label="적용", emoji="✅", style=discord.ButtonStyle.success, row=2)
+    async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
+        team_a, team_b = self._parent.current
+        a_pick = _pick(team_a, self._a_select.values)
+        b_pick = _pick(team_b, self._b_select.values)
+        if a_pick is None and b_pick is None:
+            await interaction.response.send_message(
+                "팀장으로 세울 사람을 한 명 이상 골라주세요. "
+                "(다 비우려면 **👑 팀장 해제**를 눌러주세요)",
+                ephemeral=True,
+            )
+            return
+
+        # 안 고른 쪽은 지금 팀장을 그대로 둬요(한 팀만 바꾸고 싶을 때가 있어요).
+        current = self._parent.captains
+        captains = (
+            a_pick.key if a_pick else current[0],
+            b_pick.key if b_pick else current[1],
+        )
+        await self._parent.apply_captains(captains)
+
+        named = []
+        if a_pick:
+            named.append(f"🅰️ A팀 **{a_pick.label}**")
+        if b_pick:
+            named.append(f"🅱️ B팀 **{b_pick.label}**")
+        await interaction.response.edit_message(
+            content="👑 팀장을 정했어요 — " + " · ".join(named), view=None
+        )
+
+    @discord.ui.button(label="무작위로 뽑기", emoji="🎲", style=discord.ButtonStyle.primary, row=2)
+    async def roll(self, interaction: discord.Interaction, button: discord.ui.Button):
+        team_a, team_b = self._parent.current
+        captains = random_captains(team_a, team_b)
+        await self._parent.apply_captains(captains)
+
+        def name_of(team, captain_id):
+            found = next((p for p in team if p.key == captain_id), None)
+            return f"**{found.label}**" if found else "(없음)"
+
+        await interaction.response.edit_message(
+            content=(
+                f"🎲 팀장을 뽑았어요 — 🅰️ A팀 {name_of(team_a, captains[0])} · "
+                f"🅱️ B팀 {name_of(team_b, captains[1])}"
+            ),
+            view=None,
+        )
+
+    @discord.ui.button(label="팀장 해제", emoji="👑", style=discord.ButtonStyle.secondary, row=3)
+    async def clear(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._parent.apply_captains((None, None))
+        await interaction.response.edit_message(content="👑 팀장을 없앴어요.", view=None)
+
+
 class TeamSplitView(discord.ui.View):
     """'다시 섞기'와 '완전 랜덤'을 누를 수 있는 화면이에요. 명령어를 쓴 사람만 조작할 수 있어요."""
 
@@ -354,24 +505,34 @@ class TeamSplitView(discord.ui.View):
         candidates: list[tuple[list, list, float]],
         *,
         owner_id: int,
+        guild_id: int | None,
         source_label: str,
         initial: tuple[list, list],
+        mode: str,
+        diff: float | None,
     ):
         super().__init__(timeout=VIEW_TIMEOUT)
         self._players = players
         self._candidates = candidates
         self._index = 0
         self._owner_id = owner_id
+        self._guild_id = guild_id
         self._source_label = source_label
         self.message: discord.Message | None = None
         # 지금 화면에 떠 있는 편성이에요. 승리 보고는 **이 편성 기준**으로 기록돼요.
         # (다시 섞기를 누를 때마다 같이 갱신돼요 - 안 그러면 처음 편성으로 기록돼버려요.
         #  '완전 랜덤'으로 시작하면 candidates[0]과 화면이 다르니 initial을 따로 받아요.)
         self._current: tuple[list, list] = initial
+        # 지금 편성을 어떻게 만들었는지와 그때 잰 실력 차이예요. 팀장을 정할 때 화면을 다시
+        # 그려야 해서, 제목/색을 고를 근거를 들고 있어야 해요.
+        self._mode = mode
+        self._diff = diff
+        # 양 팀 팀장의 유저 id. 안 정했으면 None이에요.
+        self._captains: tuple[int | None, int | None] = (None, None)
         # 결과를 한 번 기록했으면 더 못 바꾸게 잠가요.
         self._reported = False
 
-    # ManualAdjustView가 들여다봐야 하는 값들이에요(상태는 이 View가 쥐고 있어요).
+    # ManualAdjustView / CaptainPickView가 들여다봐야 하는 값들이에요(상태는 이 View가 쥐고 있어요).
     @property
     def current(self) -> tuple[list[team_balance.Rated], list[team_balance.Rated]]:
         return self._current
@@ -384,6 +545,38 @@ class TeamSplitView(discord.ui.View):
     def reported(self) -> bool:
         return self._reported
 
+    @property
+    def captains(self) -> tuple[int | None, int | None]:
+        return self._captains
+
+    def build_embed(self) -> discord.Embed:
+        team_a, team_b = self._current
+        return _build_embed(
+            team_a, team_b, self._diff,
+            mode=self._mode, source_label=self._source_label, captains=self._captains,
+        )
+
+    def save_state(self, *, winner: int | None = None) -> None:
+        """지금 편성을 그 서버의 '마지막 편성'으로 저장해요(`/팀보기`가 이걸 읽어요).
+
+        DM에서 쓰면 guild_id가 없어서 저장할 곳이 없어요 - 그때는 그냥 넘어가요.
+        저장이 실패해도 팀 나누기 자체는 굴러가야 하니 조용히 로그만 남겨요."""
+        if self._guild_id is None:
+            return
+        team_a, team_b = self._current
+        try:
+            team_store.save_split(
+                self._guild_id,
+                team_a=team_a, team_b=team_b,
+                mode=self._mode, diff=self._diff,
+                source_label=self._source_label,
+                captains=self._captains,
+                message_url=self.message.jump_url if self.message else None,
+                winner=winner,
+            )
+        except Exception:
+            log.warning("마지막 팀 편성 저장 실패 (guild=%s)", self._guild_id, exc_info=True)
+
     async def apply_manual(
         self, new_a: list[team_balance.Rated], new_b: list[team_balance.Rated]
     ) -> float:
@@ -392,15 +585,22 @@ class TeamSplitView(discord.ui.View):
         `_current`도 같이 갱신해서, 승리 보고가 **바꾼 뒤 명단**으로 기록되게 해요."""
         diff = team_balance.imbalance(new_a, new_b)
         self._current = (new_a, new_b)
+        self._mode = team_store.MODE_MANUAL
+        self._diff = diff
+        # 팀장이 반대편으로 넘어갔으면 그 자리는 비워요.
+        self._captains = keep_valid_captains(new_a, new_b, self._captains)
         if self.message is not None:
-            await self.message.edit(
-                embed=_build_embed(
-                    new_a, new_b, diff,
-                    balanced=True, source_label=self._source_label, manual=True,
-                ),
-                view=self,
-            )
+            await self.message.edit(embed=self.build_embed(), view=self)
+        self.save_state()
         return diff
+
+    async def apply_captains(self, captains: tuple[int | None, int | None]) -> None:
+        """팀장을 화면에 반영해요. 편성은 그대로 두고 명단 표시만 바뀌어요."""
+        team_a, team_b = self._current
+        self._captains = keep_valid_captains(team_a, team_b, captains)
+        if self.message is not None:
+            await self.message.edit(embed=self.build_embed(), view=self)
+        self.save_state()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self._owner_id:
@@ -431,23 +631,22 @@ class TeamSplitView(discord.ui.View):
             self._index = 0
         team_a, team_b, diff = self._candidates[self._index]
         self._current = (team_a, team_b)
-        await interaction.response.edit_message(
-            embed=_build_embed(
-                team_a, team_b, diff, balanced=True, source_label=self._source_label
-            ),
-            view=self,
-        )
+        self._mode = team_store.MODE_BALANCED
+        self._diff = diff
+        # 편성이 통째로 바뀌니 팀장은 지워요(엉뚱한 팀의 팀장으로 남으면 안 돼요).
+        self._captains = (None, None)
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        self.save_state()
 
     @discord.ui.button(label="완전 랜덤", emoji="🎲", style=discord.ButtonStyle.secondary)
     async def pure_random(self, interaction: discord.Interaction, button: discord.ui.Button):
         team_a, team_b, diff = team_balance.random_split(self._players)
         self._current = (team_a, team_b)
-        await interaction.response.edit_message(
-            embed=_build_embed(
-                team_a, team_b, diff, balanced=False, source_label=self._source_label
-            ),
-            view=self,
-        )
+        self._mode = team_store.MODE_RANDOM
+        self._diff = diff
+        self._captains = (None, None)
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        self.save_state()
 
     @discord.ui.button(label="직접 조정", emoji="🔀", style=discord.ButtonStyle.secondary)
     async def manual_adjust(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -470,6 +669,25 @@ class TeamSplitView(discord.ui.View):
             "바꿀 사람을 고르고 **✅ 적용**을 눌러주세요.\n"
             "-# 양쪽에서 한 명씩 고르면 맞교환하고, 한쪽만 고르면 그 사람만 반대편으로 옮겨요.",
             view=ManualAdjustView(self),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="팀장", emoji="👑", style=discord.ButtonStyle.secondary)
+    async def pick_captains(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 결과를 보고하면 이 화면의 버튼이 전부 꺼져서 팀장도 더 못 바꿔요(_report 참고).
+        team_a, team_b = self._current
+        if max(len(team_a), len(team_b)) > SELECT_LIMIT:
+            await interaction.response.send_message(
+                f"한 팀이 {SELECT_LIMIT}명을 넘어서 드롭다운에 담을 수 없어요. "
+                "🎲 무작위로 뽑는 건 인원과 상관없이 돼요.",
+                ephemeral=True,
+                view=CaptainPickView(self),
+            )
+            return
+        await interaction.response.send_message(
+            "팀장을 고르고 **✅ 적용**을 눌러주세요. 🎲를 누르면 무작위로 뽑아요.\n"
+            "-# 한쪽만 골라도 돼요(안 고른 팀은 지금 팀장을 그대로 둬요).",
+            view=CaptainPickView(self),
             ephemeral=True,
         )
 
@@ -525,6 +743,9 @@ class TeamSplitView(discord.ui.View):
                 await self.message.edit(view=self)
             except discord.HTTPException:
                 pass
+
+        # `/팀보기`가 "이 경기는 A팀이 이겼다"까지 보여줄 수 있게 승자도 같이 남겨요.
+        self.save_state(winner=winner_index)
 
         won_name = "🅰️ A팀" if winner_index == 0 else "🅱️ B팀"
         lines = [
@@ -641,27 +862,76 @@ class Team(commands.Cog):
 
         if 방식 == "random":
             team_a, team_b, diff = team_balance.random_split(players)
-            balanced = False
+            mode = team_store.MODE_RANDOM
             candidates = team_balance.balanced_splits(players, limit=CANDIDATE_COUNT)
         else:
             candidates = team_balance.balanced_splits(players, limit=CANDIDATE_COUNT)
             team_a, team_b, diff = candidates[0]
-            balanced = True
+            mode = team_store.MODE_BALANCED
 
         view = TeamSplitView(
             players, candidates,
             owner_id=interaction.user.id,
+            guild_id=interaction.guild_id,
             source_label=source_label,
             initial=(team_a, team_b),
+            mode=mode,
+            diff=diff,
         )
         message = await interaction.followup.send(
-            embed=_build_embed(
-                team_a, team_b, diff, balanced=balanced, source_label=source_label
-            ),
-            view=view,
-            wait=True,
+            embed=view.build_embed(), view=view, wait=True
         )
         view.message = message
+        # 메시지를 받은 뒤에 저장해요 - `/팀보기`에 "원래 메시지로 가기" 링크를 넣으려면
+        # jump_url이 필요하고, 그건 메시지가 올라간 뒤에만 알 수 있어요.
+        view.save_state()
+
+    @app_commands.command(
+        name="팀보기",
+        description="이 서버에서 마지막으로 짠 팀 편성을 다시 봐요.",
+    )
+    async def team_last(self, interaction: discord.Interaction):
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "`/팀보기`는 서버 안에서만 쓸 수 있어요.", ephemeral=True
+            )
+            return
+
+        record = team_store.get_split(interaction.guild_id)
+        if record is None:
+            await interaction.response.send_message(
+                "아직 짠 팀이 없어요. `/팀짜기`로 먼저 팀을 나눠주세요.", ephemeral=True
+            )
+            return
+
+        team_a, team_b = team_store.load_teams(record)
+        if not team_a and not team_b:
+            await interaction.response.send_message(
+                "저장된 편성이 비어 있어요. `/팀짜기`로 다시 나눠주세요.", ephemeral=True
+            )
+            return
+
+        embed = _build_embed(
+            team_a, team_b, record.get("diff"),
+            mode=record.get("mode") or team_store.MODE_BALANCED,
+            source_label=record.get("source_label") or "",
+            captains=team_store.load_captains(record),
+        )
+
+        # 언제 짠 편성인지가 제일 중요해요 - 어제 것을 오늘 것으로 착각하면 안 되니까요.
+        notes = [f"🕒 {_when_text(record.get('saved_at'))}에 짠 편성이에요."]
+        winner = record.get("winner")
+        if winner in (0, 1):
+            notes.append(
+                f"🏆 결과는 **{'🅰️ A팀' if winner == 0 else '🅱️ B팀'} 승리**로 기록됐어요."
+            )
+        if record.get("message_url"):
+            notes.append(f"-# [원래 메시지로 가기]({record['message_url']})")
+        embed.description = "\n".join(notes)
+
+        # 팀 확인은 여러 사람이 같이 봐야 하니 공개로 보내요. 버튼은 안 붙여요 -
+        # 편성을 바꾸는 건 `/팀짜기` 쪽 화면의 몫이에요.
+        await interaction.response.send_message(embed=embed)
 
 
 async def setup(bot: commands.Bot):

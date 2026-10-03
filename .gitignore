@@ -3,5 +3,7 @@ __pycache__/
 .venv/
 venv/
 .env
+# `.env`를 고치기 전에 떠둔 백업이에요. 토큰이 들어있으니 절대 커밋되면 안 돼요.
+.env.bak*
 data/
 cookie_test.txt
