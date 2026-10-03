@@ -27,22 +27,38 @@ def _env_channel_id(env_var: str | None) -> int | None:
     return int(raw.strip())
 
 
-def get_allowed_channel_id(group: str, env_var: str | None = None) -> int | None:
+def get_allowed_channel_id(
+    group: str, env_var: str | None = None, fallback_group: str | None = None
+) -> int | None:
     """이 그룹이 허용된 채널 ID예요. /채널설정 값이 우선이고, 없으면 .env 값을 써요.
-    둘 다 없으면 None(=제한 없음)이에요."""
+    셋 다 없으면 None(=제한 없음)이에요.
+
+    `fallback_group`은 **그룹을 새로 쪼갰을 때** 쓰는 안전장치예요. 예를 들어 `/내전전적`을
+    `profile`에서 `scrim_record`로 떼어냈는데 아직 `/채널설정`을 안 했다면, 그 사이에
+    "아무 채널에서나 됨"으로 풀려버려요. 그때는 떼어낸 원래 그룹의 채널을 그대로 써요."""
     configured = get_setting(channel_key(group))
     if configured:
         return int(configured)
-    return _env_channel_id(env_var)
+    from_env = _env_channel_id(env_var)
+    if from_env:
+        return from_env
+    if fallback_group:
+        inherited = get_setting(channel_key(fallback_group))
+        if inherited:
+            return int(inherited)
+    return None
 
 
-def restrict_to_channel(group: str, env_var: str | None = None):
+def restrict_to_channel(
+    group: str, env_var: str | None = None, fallback_group: str | None = None
+):
     """이 데코레이터를 붙인 명령어는 채널설정에서 지정한 채널(또는 그 채널 안의 스레드)에서만 동작해요.
     group 예시: "attendance"(출석/육성), "attend"(출석), "valorant_shop"(/오상)
-    env_var를 주면 /채널설정 값이 없을 때 그 환경변수를 기본값으로 써요."""
+    env_var를 주면 /채널설정 값이 없을 때 그 환경변수를 기본값으로 써요.
+    fallback_group을 주면 이 그룹을 아직 설정 안 했을 때 그 그룹의 채널을 물려받아요."""
 
     async def predicate(interaction: discord.Interaction) -> bool:
-        allowed_channel_id = get_allowed_channel_id(group, env_var)
+        allowed_channel_id = get_allowed_channel_id(group, env_var, fallback_group)
         if not allowed_channel_id:
             return True  # 아직 설정 안 함 -> 제한 없음
 

@@ -244,7 +244,8 @@ class Attendance(commands.Cog):
     @app_commands.describe(기능="채널을 지정할 명령어 그룹", 채널="이 그룹의 명령어를 허용할 채널 (노래방만 음성채널)")
     @app_commands.choices(기능=[
         app_commands.Choice(name="출석 명령어 (/출석)", value="attend"),
-        app_commands.Choice(name="프로필·업적 (/프로필, /업적, /내전전적, /주간랭킹)", value="profile"),
+        app_commands.Choice(name="프로필·업적 (/프로필, /업적, /주간랭킹)", value="profile"),
+        app_commands.Choice(name="내전 전적 (/내전전적)", value="scrim_record"),
         app_commands.Choice(name="악귀코인 (/코인, /코인보내기)", value="coin"),
         app_commands.Choice(name="칭호 상점 (/칭호구매, /칭호, /칭호해제)", value="title"),
         app_commands.Choice(name="미션 (/미션)", value="mission"),

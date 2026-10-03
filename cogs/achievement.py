@@ -247,7 +247,11 @@ class Achievement(commands.Cog):
     # ------------------------------------------------------------------
     @app_commands.command(name="내전전적", description="내전 승패와 연승 기록을 봐요.")
     @app_commands.describe(유저="다른 사람의 전적을 보려면 지정하세요.")
-    @restrict_to_channel("profile")
+    # `/프로필`·`/업적`·`/주간랭킹`과 달리 **내전 전용 채널**을 따로 지정할 수 있어요
+    # (2026-10-04 요청). 채널은 `/채널설정 기능:내전 전적`으로 바꿔요.
+    # 아직 안 지정했으면 예전처럼 프로필 채널에서 써요 - 안 그러면 설정 전까지 아무
+    # 채널에서나 되는 상태로 풀려버려요.
+    @restrict_to_channel("scrim_record", fallback_group="profile")
     async def scrim_record(self, interaction: discord.Interaction, 유저: discord.Member | None = None):
         await interaction.response.defer()
         target = 유저 or interaction.user

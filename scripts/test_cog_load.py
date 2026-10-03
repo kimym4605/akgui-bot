@@ -92,6 +92,23 @@ async def main():
                 f"≠ CATEGORIES {len(achievement_data.CATEGORIES)}개)"
             )
 
+    # /채널설정의 기능 그룹 — `/내전전적`은 프로필과 **다른 채널**을 쓰게 갈라놨어요.
+    channel_cmd = next((c for c in bot.tree.get_commands() if c.name == "채널설정"), None)
+    if channel_cmd is None:
+        failed.append("/채널설정 명령어")
+    else:
+        groups = {c.value: c.name for p in channel_cmd.parameters if p.name == "기능"
+                  for c in p.choices}
+        print(f"\n  /채널설정 기능 {len(groups)}개: {sorted(groups)}")
+        if "scrim_record" not in groups:
+            failed.append("/채널설정에 내전전적 그룹(scrim_record)이 없어요")
+        if "내전전적" in groups.get("profile", ""):
+            failed.append("profile 그룹 설명에 아직 /내전전적이 적혀 있어요")
+        if "내전전적" not in groups.get("scrim_record", ""):
+            failed.append("scrim_record 그룹 설명에 /내전전적이 안 적혀 있어요")
+        if len(groups) > 25:
+            failed.append(f"/채널설정 선택지가 {len(groups)}개 (디스코드 한도 25개 초과)")
+
     # /팀짜기 뷰에 승리 보고 버튼이 붙었는지
     from cogs.team import (
         CaptainPickView, MapPickView, MatchMapView, Session, TeamSplitView,
