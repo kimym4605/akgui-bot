@@ -46,6 +46,7 @@ from utils import (
     team_balance,
     team_store,
     tier_roles,
+    valorant_maps,
 )
 
 log = logging.getLogger(__name__)
@@ -216,6 +217,7 @@ def _build_embed(
     mode: str,
     source_label: str,
     captains: tuple[int | None, int | None] = (None, None),
+    map_name: str | None = None,
 ) -> discord.Embed:
     # mode는 이 편성을 어떻게 만들었는지예요(team_store의 MODE_* 값).
     # MANUAL은 '🔀 직접 조정'으로 손을 본 편성이에요. 이때도 점수와 실력 차이는 보여줘요 -
@@ -227,6 +229,9 @@ def _build_embed(
         title, color = "🎲 팀 나누기 (완전 랜덤)", 0x9B7BF0
     else:
         title, color = "🎯 팀 나누기 (실력 균형)", 0x00B0F4
+    if map_name:
+        # 맵을 정해뒀으면 제목에 붙여요. 승리 보고 때 이 맵으로 기록돼요.
+        title += f" · 🗺️ {map_name}"
     embed = discord.Embed(title=title, color=color)
     balanced = mode != team_store.MODE_RANDOM
     embed.add_field(
@@ -496,6 +501,99 @@ class CaptainPickView(discord.ui.View):
         await interaction.response.edit_message(content="👑 팀장을 없앴어요.", view=None)
 
 
+class _MapSelect(discord.ui.Select):
+    """맵 하나를 고르는 드롭다운이에요. 지금 맵이 있으면 그걸 기본 선택으로 보여줘요."""
+
+    def __init__(self, current: str | None = None):
+        options = [
+            discord.SelectOption(label=name, value=name, default=(name == current))
+            for name in valorant_maps.MAPS[: valorant_maps.MAX_SELECT_OPTIONS]
+        ]
+        super().__init__(placeholder="어느 맵이었나요?", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        # 실제 처리는 이 드롭다운을 담은 View가 해요(맵을 어디에 쓸지가 서로 달라서요).
+        await self.view.on_map_chosen(interaction, self.values[0])  # type: ignore[attr-defined]
+
+
+class MapPickView(discord.ui.View):
+    """경기 **전에** 맵을 정해두는 화면이에요. 명령어를 쓴 사람에게만 보여요.
+
+    여기서 정해두면 🅰️/🅱️ 승리 버튼을 누를 때 그 맵으로 같이 기록돼요."""
+
+    def __init__(self, parent: "TeamSplitView"):
+        super().__init__(timeout=MANUAL_TIMEOUT)
+        self._parent = parent
+        self.add_item(_MapSelect(parent.map_name))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self._parent.owner_id:
+            return True
+        await interaction.response.send_message(
+            "`/팀짜기`를 실행한 사람만 맵을 정할 수 있어요.", ephemeral=True
+        )
+        return False
+
+    async def on_map_chosen(self, interaction: discord.Interaction, name: str):
+        await self._parent.apply_map(name)
+        await interaction.response.edit_message(
+            content=f"🗺️ 맵을 **{name}**으로 정했어요. 승리 버튼을 누르면 이 맵으로 기록돼요.",
+            view=None,
+        )
+
+    @discord.ui.button(label="맵 지우기", emoji="🗺️", style=discord.ButtonStyle.secondary, row=1)
+    async def clear(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._parent.apply_map(None)
+        await interaction.response.edit_message(content="🗺️ 맵을 비웠어요.", view=None)
+
+
+class MatchMapView(discord.ui.View):
+    """승리 보고를 **한 뒤에** 맵을 채워 넣는 화면이에요.
+
+    왜 보고 전에 막지 않았나: 맵을 꼭 골라야 기록되게 만들면, 승자만 누르고 맵을 안 고른
+    경기는 **아무것도 기록되지 않아요**. 전적이 비는 게 맵이 비는 것보다 나빠서, 경기는
+    먼저 기록하고 맵은 이 화면에서 나중에 채우게 했어요.
+
+    결과 메시지에 공개로 붙여요(ephemeral이 아니라서 바로 안 눌러도 10분간 남아 있어요).
+    누를 수 있는 사람은 결과를 보고한 사람뿐이에요."""
+
+    def __init__(self, match_id: str, reporter_id: int, summary: str):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self._match_id = match_id
+        self._reporter_id = reporter_id
+        self._summary = summary
+        self.message: discord.Message | None = None
+        self.add_item(_MapSelect())
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self._reporter_id:
+            return True
+        await interaction.response.send_message(
+            "결과를 보고한 사람만 맵을 기록할 수 있어요.", ephemeral=True
+        )
+        return False
+
+    async def on_map_chosen(self, interaction: discord.Interaction, name: str):
+        saved = await scrim_record_store.set_match_map(self._match_id, name)
+        if not saved:
+            await interaction.response.send_message(
+                "그 경기를 못 찾아서 맵을 기록하지 못했어요.", ephemeral=True
+            )
+            return
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"{self._summary}\n\n🗺️ 맵: **{name}** 으로 기록했어요.", view=None
+        )
+
+    async def on_timeout(self):
+        # 시간이 지나면 드롭다운을 떼서, 눌러도 반응 없는 채로 남지 않게 해요.
+        if self.message is not None:
+            try:
+                await self.message.edit(view=None)
+            except discord.HTTPException:
+                pass
+
+
 class TeamSplitView(discord.ui.View):
     """'다시 섞기'와 '완전 랜덤'을 누를 수 있는 화면이에요. 명령어를 쓴 사람만 조작할 수 있어요."""
 
@@ -529,6 +627,8 @@ class TeamSplitView(discord.ui.View):
         self._diff = diff
         # 양 팀 팀장의 유저 id. 안 정했으면 None이에요.
         self._captains: tuple[int | None, int | None] = (None, None)
+        # 이번 경기 맵. 승리 보고 때 같이 기록돼요(안 정해도 기록은 돼요).
+        self._map: str | None = None
         # 결과를 한 번 기록했으면 더 못 바꾸게 잠가요.
         self._reported = False
 
@@ -549,11 +649,16 @@ class TeamSplitView(discord.ui.View):
     def captains(self) -> tuple[int | None, int | None]:
         return self._captains
 
+    @property
+    def map_name(self) -> str | None:
+        return self._map
+
     def build_embed(self) -> discord.Embed:
         team_a, team_b = self._current
         return _build_embed(
             team_a, team_b, self._diff,
             mode=self._mode, source_label=self._source_label, captains=self._captains,
+            map_name=self._map,
         )
 
     def save_state(self, *, winner: int | None = None) -> None:
@@ -571,6 +676,7 @@ class TeamSplitView(discord.ui.View):
                 mode=self._mode, diff=self._diff,
                 source_label=self._source_label,
                 captains=self._captains,
+                map_name=self._map,
                 message_url=self.message.jump_url if self.message else None,
                 winner=winner,
             )
@@ -598,6 +704,13 @@ class TeamSplitView(discord.ui.View):
         """팀장을 화면에 반영해요. 편성은 그대로 두고 명단 표시만 바뀌어요."""
         team_a, team_b = self._current
         self._captains = keep_valid_captains(team_a, team_b, captains)
+        if self.message is not None:
+            await self.message.edit(embed=self.build_embed(), view=self)
+        self.save_state()
+
+    async def apply_map(self, map_name: str | None) -> None:
+        """이번 경기 맵을 정해요. 제목에 뜨고, 승리 보고 때 같이 기록돼요."""
+        self._map = map_name
         if self.message is not None:
             await self.message.edit(embed=self.build_embed(), view=self)
         self.save_state()
@@ -691,6 +804,16 @@ class TeamSplitView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="맵", emoji="🗺️", style=discord.ButtonStyle.secondary)
+    async def pick_map(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 맵은 편성과 무관해서 🔄/🎲로 팀을 다시 짜도 그대로 남아요.
+        await interaction.response.send_message(
+            "이번 경기 맵을 골라주세요. 승리 버튼을 누르면 이 맵으로 기록돼요.\n"
+            "-# 지금 안 골라도 돼요 — 결과를 보고한 뒤에도 맵을 고를 수 있어요.",
+            view=MapPickView(self),
+            ephemeral=True,
+        )
+
     # ── 경기 결과 보고 ─────────────────────────────────────────────
     #
     # 이 두 버튼이 **내전 전적이 쌓이는 거의 유일한 경로**예요. 팀을 나눈 직후라 출전
@@ -727,6 +850,7 @@ class TeamSplitView(discord.ui.View):
             interaction.guild_id, winners, losers,
             reported_by=interaction.user.id,
             note=f"/팀짜기 · {self._source_label}",
+            map_name=self._map,
         )
         if match_id is None:
             self._reported = False
@@ -748,8 +872,10 @@ class TeamSplitView(discord.ui.View):
         self.save_state(winner=winner_index)
 
         won_name = "🅰️ A팀" if winner_index == 0 else "🅱️ B팀"
+        map_text = f" · 🗺️ **{self._map}**" if self._map else ""
         lines = [
-            f"🏆 **{won_name} 승리**로 기록했어요! (기록: {interaction.user.display_name})",
+            f"🏆 **{won_name} 승리**로 기록했어요!{map_text} "
+            f"(기록: {interaction.user.display_name})",
             "",
             f"**승리** {', '.join(p.label for p in teams[winner_index])}",
             f"**패배** {', '.join(p.label for p in teams[1 - winner_index])}",
@@ -762,9 +888,21 @@ class TeamSplitView(discord.ui.View):
             lines.extend(unlocked_lines)
 
         lines.append("")
-        lines.append("-# `/내전전적`으로 내 승패와 연승을 볼 수 있어요.")
+        lines.append("-# `/내전전적`으로 내 승패·연승·맵별 성적을 볼 수 있어요.")
+        summary = "\n".join(lines)
 
-        await interaction.followup.send("\n".join(lines))
+        # 맵을 안 정해뒀으면 여기서 고를 수 있게 드롭다운을 붙여요. 기록은 이미 들어갔으니
+        # 안 고르고 넘어가도 전적은 남아요(맵별 집계에서만 빠져요).
+        if self._map or not match_id:
+            await interaction.followup.send(summary)
+            return
+
+        map_view = MatchMapView(match_id, interaction.user.id, summary)
+        map_view.message = await interaction.followup.send(
+            summary + "\n\n🗺️ **어느 맵이었나요?** 골라두면 맵별 승률이 쌓여요 (안 골라도 전적은 기록됐어요)",
+            view=map_view,
+            wait=True,
+        )
 
 
 async def _announce_achievements(interaction: discord.Interaction, user_ids: list[int]) -> list[str]:
@@ -916,6 +1054,7 @@ class Team(commands.Cog):
             mode=record.get("mode") or team_store.MODE_BALANCED,
             source_label=record.get("source_label") or "",
             captains=team_store.load_captains(record),
+            map_name=record.get("map"),
         )
 
         # 언제 짠 편성인지가 제일 중요해요 - 어제 것을 오늘 것으로 착각하면 안 되니까요.

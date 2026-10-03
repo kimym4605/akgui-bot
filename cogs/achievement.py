@@ -26,10 +26,17 @@ from utils import (
     riot_account_store,
     scrim_record_store,
     tier_roles,
+    valorant_maps,
 )
 from utils.channel_check import restrict_to_channel
 
 log = logging.getLogger(__name__)
+
+# 맵별 승률에 '강점(💪)/약점(😵)' 딱지를 붙이려면 이만큼은 해봤어야 해요.
+# 1~2판이면 100%/0%가 흔해서 딱지가 아무 의미가 없어요.
+MAP_MARK_MIN_MATCHES = 3
+# 임베드 필드 하나는 1024자까지예요.
+FIELD_LIMIT = 1024
 
 # 한 페이지에 다 넣으면 임베드 길이 제한(필드 25개·전체 6000자)에 걸려요.
 CATEGORY_CHOICES = [
@@ -38,6 +45,60 @@ CATEGORY_CHOICES = [
 ]
 
 MEDALS = ["🥇", "🥈", "🥉"]
+
+
+def _map_stats_text(rows: list[dict]) -> str:
+    """맵별 승패를 승률 높은 순으로 줄여 써요. 가장 강한/약한 맵엔 딱지를 붙여요.
+
+    딱지는 `MAP_MARK_MIN_MATCHES`판 이상 해본 맵에만 붙여요 — 한 판 이기고 '강점 맵'이라고
+    하면 안 되니까요. 그리고 승률이 50%를 넘지 않는 맵엔 💪를, 50% 미만이 아닌 맵엔 😵를
+    붙이지 않아요(전부 이기는 사람에게 '약점 맵'을 만들어주지 않으려고요)."""
+    ranked = []
+    for row in rows:
+        total = row["wins"] + row["losses"]
+        if total == 0:
+            continue
+        ranked.append({**row, "total": total, "rate": row["wins"] / total * 100})
+    if not ranked:
+        return "-"
+
+    # ⚠️ 승률만으로 줄 세우면 **1판 이기고 100%인 맵이 7승 2패 맵 위에 올라가요.**
+    #    "어디가 강점인지"를 보려고 만든 화면인데 그러면 거꾸로 읽히니, 표본이 충분한 맵을
+    #    먼저 승률 순으로 세우고 1~2판짜리는 아래로 내려요.
+    ranked.sort(key=lambda r: (
+        0 if r["total"] >= MAP_MARK_MIN_MATCHES else 1,
+        -r["rate"],
+        -r["total"],
+        valorant_maps.sort_key(r["map"]),
+    ))
+
+    enough = [r for r in ranked if r["total"] >= MAP_MARK_MIN_MATCHES]
+    best = enough[0] if enough and enough[0]["rate"] > 50 else None
+    worst = None
+    if len(enough) >= 2 and enough[-1]["rate"] < 50 and enough[-1] is not best:
+        worst = enough[-1]
+
+    lines = []
+    for row in ranked:
+        mark = " 💪" if row is best else (" 😵" if row is worst else "")
+        # 판수는 `3승 1패`에 이미 드러나 있어서 따로 안 적어요. (`-#`은 줄 맨 앞에서만
+        # 작은 글씨로 렌더돼서, 줄 중간에 쓰면 글자 그대로 보여요)
+        lines.append(
+            f"`{row['map']}` **{row['wins']}승 {row['losses']}패** · "
+            f"{row['rate']:.0f}%{mark}"
+        )
+    if len(ranked) != len(enough):
+        lines.append(
+            f"-# {MAP_MARK_MIN_MATCHES}판 미만인 맵은 표본이 적어서 아래로 내렸어요 "
+            f"(💪/😵도 안 붙여요)."
+        )
+
+    # 맵이 늘어나도 필드 한도를 넘지 않게 뒤에서부터 잘라요(승률 높은 쪽을 남겨요).
+    text = "\n".join(lines)
+    while len(text) > FIELD_LIMIT and len(lines) > 1:
+        lines.pop(-2 if lines[-1].startswith("-#") else -1)
+        text = "\n".join(lines)
+    return text
 
 
 async def _stats_for(member: discord.abc.User) -> dict:
@@ -204,8 +265,30 @@ class Achievement(commands.Cog):
         recent = await scrim_record_store.recent_matches(target.id, limit=5)
         if recent:
             uid = str(target.id)
-            marks = " ".join("🟩" if uid in match.get("winners", []) else "🟥" for match in recent)
+            marks = " · ".join(
+                ("🟩" if uid in match.get("winners", []) else "🟥")
+                + (f" {match['map']}" if match.get("map") else "")
+                for match in recent
+            )
             embed.add_field(name="최근 5경기 (왼쪽이 최신)", value=marks, inline=False)
+
+        map_rows = await scrim_record_store.map_stats(target.id)
+        if map_rows:
+            embed.add_field(
+                name="🗺️ 맵별 성적",
+                value=_map_stats_text(map_rows),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="🗺️ 맵별 성적",
+                value=(
+                    "아직 맵이 기록된 경기가 없어요.\n"
+                    "-# `/팀짜기`의 **🗺️ 맵** 버튼으로 맵을 정해두거나, "
+                    "승리 보고 뒤에 뜨는 맵 드롭다운에서 골라주세요."
+                ),
+                inline=False,
+            )
 
         await interaction.followup.send(embed=embed)
 

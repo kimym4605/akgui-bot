@@ -110,15 +110,24 @@ embed = _build_embed(A, B, 0.5, mode=team_store.MODE_BALANCED, source_label="x",
                      captains=(1, 4))
 check("팀장이 임베드에 반영됨", embed.fields[0].value.splitlines()[0].startswith("👑 "), True)
 
+print("\n맵 표시")
+embed = _build_embed(A, B, 0.5, mode=team_store.MODE_BALANCED, source_label="x",
+                     map_name="어센트")
+check("맵이 제목에 붙음", embed.title.endswith("· 🗺️ 어센트"), True)
+check("모드 제목도 남아있음", embed.title.startswith("🎯 팀 나누기"), True)
+embed = _build_embed(A, B, 0.5, mode=team_store.MODE_BALANCED, source_label="x")
+check("맵이 없으면 제목에 안 붙음", "🗺️" in embed.title, False)
+
 print("\n저장·조회 (team_store)")
 check("처음엔 아무것도 없음", team_store.get_split(777), None)
 team_store.save_split(
     777, team_a=A, team_b=B, mode=team_store.MODE_BALANCED, diff=0.33,
-    source_label="🎧 테스트방", captains=(2, 5),
+    source_label="🎧 테스트방", captains=(2, 5), map_name="어센트",
     message_url="https://discord.com/x", winner=None,
 )
 record = team_store.get_split(777)
 check("저장된 모드", record["mode"], team_store.MODE_BALANCED)
+check("저장된 맵", record["map"], "어센트")
 check("저장된 실력 차이", record["diff"], 0.33)
 check("저장된 팀장", team_store.load_captains(record), (2, 5))
 check("저장된 링크", record["message_url"], "https://discord.com/x")
@@ -138,6 +147,7 @@ record = team_store.get_split(777)
 check("새 편성으로 바뀜", [p.label for p in team_store.load_teams(record)[0]],
       ["P4", "P5", "P6"])
 check("팀장도 비워짐", team_store.load_captains(record), (None, None))
+check("맵도 비워짐 (넘기지 않으면 None)", record["map"], None)
 check("승자 기록", record["winner"], 1)
 check("이력이 쌓이지 않음(서버당 1건)", len(team_store._load()), 1)
 

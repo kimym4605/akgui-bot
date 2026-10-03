@@ -93,7 +93,7 @@ async def main():
             )
 
     # /팀짜기 뷰에 승리 보고 버튼이 붙었는지
-    from cogs.team import CaptainPickView, TeamSplitView
+    from cogs.team import CaptainPickView, MapPickView, MatchMapView, TeamSplitView
     from utils import team_balance, team_store
     players = [
         team_balance.Rated(key=i, label=f"P{i}", rating=10.0, tier_index=10, agwi_score=None)
@@ -107,7 +107,7 @@ async def main():
     )
     labels = [item.label for item in view.children]
     print(f"\n  /팀짜기 버튼: {labels}")
-    for needed in ("직접 조정", "팀장", "A팀 승리", "B팀 승리"):
+    for needed in ("직접 조정", "팀장", "맵", "A팀 승리", "B팀 승리"):
         if not any(needed in (l or "") for l in labels):
             failed.append(f"{needed} 버튼")
     # 디스코드 한도: 5줄까지, 한 줄에 버튼 5개까지, 드롭다운은 한 줄을 통째로 먹어요.
@@ -123,6 +123,18 @@ async def main():
 
     # 👑 팀장 화면도 디스코드 한도 안에 들어가는지 (드롭다운 2개 + 버튼 3개)
     check_layout("👑 팀장 화면", CaptainPickView(view), failed)
+    # 🗺️ 맵 화면 2종 (경기 전 지정 / 승리 보고 뒤 채워넣기)
+    check_layout("🗺️ 맵 지정 화면", MapPickView(view), failed)
+    check_layout("🗺️ 보고 후 맵 화면", MatchMapView("x" * 24, 1, "요약"), failed)
+    # 맵 드롭다운이 25개 한도를 넘지 않는지 (맵이 늘어나면 여기서 걸려요)
+    from utils import valorant_maps
+    if len(valorant_maps.MAPS) > valorant_maps.MAX_SELECT_OPTIONS:
+        failed.append(
+            f"맵이 {len(valorant_maps.MAPS)}개 (드롭다운 한도 "
+            f"{valorant_maps.MAX_SELECT_OPTIONS}개 초과 — 목록이 잘려요)"
+        )
+    else:
+        print(f"  ✅ 맵 {len(valorant_maps.MAPS)}개 (드롭다운 한도 안)")
 
     await bot.close()
 

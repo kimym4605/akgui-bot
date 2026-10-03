@@ -87,6 +87,7 @@ def save_split(
     diff: float | None,
     source_label: str,
     captains: tuple[int | None, int | None] = (None, None),
+    map_name: str | None = None,
     message_url: str | None = None,
     winner: int | None = None,
 ) -> None:
@@ -100,6 +101,7 @@ def save_split(
         "diff": _json_number(diff),
         "source_label": source_label,
         "captains": [captains[0], captains[1]],
+        "map": map_name or None,
         "message_url": message_url,
         "winner": winner,
         "teams": [

@@ -26,6 +26,15 @@
      "wins": 31, "losses": 24, "streak": 3, "bestStreak": 7, "worstStreak": -4, ...}
     {"_id": "S1:123",  "userId": "123", "scope": "S1",  ...}
 
+경기 원본은 `scrim_matches`에 따로 쌓여요. 여기엔 **어느 맵이었는지**(`map`)도 들어가요.
+
+    {"winners": ["123"], "losers": ["456"], "map": "어센트", "season": "S1", "at": ...}
+
+맵별 승률은 이 원본을 집계해서 내요(`map_stats`). 맵별 카운터를 `scrim_records`에 또
+두지 않은 이유: 둘이 어긋나면 되돌릴 방법이 없고, 승리 보고 뒤에 맵을 채워 넣는 것도
+원본만 고치면 끝이라서요. 맵은 **선택**이라 안 적힌 경기는 맵별 집계에서만 빠지고
+통산 승패에는 그대로 들어가요.
+
 시즌을 문서 안의 중첩 dict로 넣지 않고 `_id`를 나눈 이유는 **랭킹 때문**이에요.
 중첩이면 `seasons.S1.wins`로 정렬해야 해서 시즌이 늘 때마다 인덱스가 따라 늘어나는데,
 문서를 나누면 `{"scope": "S1"}` 하나로 걸러서 정렬하면 끝이에요.
@@ -115,7 +124,9 @@ def _apply_sync(user_id, won: bool, season: str):
         )
 
 
-def _record_match_sync(guild_id, winners: list, losers: list, reported_by, note: str) -> str:
+def _record_match_sync(
+    guild_id, winners: list, losers: list, reported_by, note: str, map_name: str | None
+) -> str:
     season = current_season()
 
     for user_id in winners:
@@ -130,9 +141,53 @@ def _record_match_sync(guild_id, winners: list, losers: list, reported_by, note:
         "losers": [str(u) for u in losers],
         "reportedBy": str(reported_by) if reported_by else None,
         "note": note,
+        # 맵은 **선택**이에요. 안 고르고 넘어간 경기는 None으로 남고, 맵별 집계에서만 빠져요.
+        # (맵을 필수로 만들면 경기 기록 자체가 안 남는 쪽이 더 큰 손실이에요)
+        "map": map_name or None,
         "at": _now_iso(),
     })
     return str(result.inserted_id)
+
+
+def _set_match_map_sync(match_id: str, map_name: str | None) -> bool:
+    """이미 기록된 경기에 맵을 나중에 채워 넣어요(승리 보고 뒤에 고를 수 있게)."""
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    try:
+        key = ObjectId(match_id)
+    except (InvalidId, TypeError):
+        return False
+    result = _matches.update_one({"_id": key}, {"$set": {"map": map_name or None}})
+    return result.matched_count > 0
+
+
+def _map_stats_sync(user_id, scope: str | None) -> list[dict]:
+    """맵별 승/패를 세요. 맵이 안 적힌 경기는 빠져요.
+
+    집계는 `scrim_records`(통산 카운터)가 아니라 **경기 원본(`scrim_matches`)**에서 해요.
+    그래야 맵 기능을 켠 뒤에 쌓인 경기만 자연스럽게 잡히고, 맵을 나중에 채워 넣어도
+    바로 반영돼요. 카운터를 맵별로 또 두면 둘이 어긋날 때 고칠 방법이 없어요."""
+    uid = str(user_id)
+    match: dict = {
+        "$or": [{"winners": uid}, {"losers": uid}],
+        "map": {"$exists": True, "$ne": None},
+    }
+    if scope and scope != SCOPE_ALL:
+        match["season"] = scope
+    pipeline = [
+        {"$match": match},
+        {"$group": {
+            "_id": "$map",
+            "wins": {"$sum": {"$cond": [{"$in": [uid, "$winners"]}, 1, 0]}},
+            "losses": {"$sum": {"$cond": [{"$in": [uid, "$losers"]}, 1, 0]}},
+        }},
+    ]
+    return [
+        {"map": row["_id"], "wins": row["wins"], "losses": row["losses"]}
+        for row in _matches.aggregate(pipeline)
+        if row["_id"]
+    ]
 
 
 def _blank(user_id, scope: str) -> dict:
@@ -191,15 +246,34 @@ def streak_text(doc: dict) -> str:
 # pymongo는 동기라서 그대로 부르면 이벤트 루프가 멈춰요(2026-09-04 먹통 사고의 원인).
 # coin_wallet과 똑같이 asyncio.to_thread로 넘겨요.
 # ------------------------------------------------------------------
-async def record_match(guild_id, winners: list, losers: list, *, reported_by=None, note: str = "") -> str | None:
+async def record_match(
+    guild_id, winners: list, losers: list, *,
+    reported_by=None, note: str = "", map_name: str | None = None,
+) -> str | None:
     """한 경기 결과를 양 팀 전원에게 반영해요. 인원이 너무 적으면 아무것도 안 하고 None."""
     if len(winners) + len(losers) < MIN_PLAYERS or not winners or not losers:
         return None
     match_id = await asyncio.to_thread(
-        _record_match_sync, guild_id, winners, losers, reported_by, note
+        _record_match_sync, guild_id, winners, losers, reported_by, note, map_name
     )
-    log.info("🏅 내전 결과 기록: 승 %s명 / 패 %s명 (%s)", len(winners), len(losers), note or "-")
+    log.info(
+        "🏅 내전 결과 기록: 승 %s명 / 패 %s명 · 맵 %s (%s)",
+        len(winners), len(losers), map_name or "미기록", note or "-",
+    )
     return match_id
+
+
+async def set_match_map(match_id: str, map_name: str | None) -> bool:
+    """승리 보고를 한 뒤에 맵을 채워 넣거나 지워요. 그 경기를 못 찾으면 False."""
+    changed = await asyncio.to_thread(_set_match_map_sync, match_id, map_name)
+    if changed:
+        log.info("🗺️ 내전 경기 %s 의 맵을 '%s'로 기록했어요.", match_id, map_name or "미기록")
+    return changed
+
+
+async def map_stats(user_id, scope: str | None = SCOPE_ALL) -> list[dict]:
+    """맵별 `{"map", "wins", "losses"}` 목록. 맵이 안 적힌 경기는 빠져요."""
+    return await asyncio.to_thread(_map_stats_sync, user_id, scope)
 
 
 async def get_record(user_id, scope: str = SCOPE_ALL) -> dict:

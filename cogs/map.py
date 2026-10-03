@@ -5,13 +5,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-# ⚠️ 발로란트 맵 로테이션은 시즌마다 바뀌어요. 새 맵이 추가되거나 빠지면 여기만 고치면 돼요.
-MAPS = [
-    "어센트", "바인드", "브리즈", "프랙처", "헤이븐",
-    "아이스박스", "로터스", "펄", "스플릿", "선셋", "어비스", "코로드",
-]
-
-MAX_SELECT_OPTIONS = 25  # 디스코드 Select 컴포넌트 옵션 최대 개수예요.
+# 맵 목록은 내전 맵 기록(`cogs/team.py`)과 같이 쓰려고 utils로 옮겼어요.
+from utils.valorant_maps import MAPS, MAX_SELECT_OPTIONS
 
 
 class MapExcludeSelect(discord.ui.Select):
