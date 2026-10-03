@@ -29,11 +29,13 @@
     같은 티어 안에서 세부 보정으로만 써요(250점 = 1단계, 최대 ±3단계).
 자세한 계산은 utils/team_balance.py에 있어요.
 """
+import asyncio
 import logging
 import random
 import re
 from datetime import datetime
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -43,6 +45,7 @@ from utils import (
     rank_stats_store,
     riot_account_store,
     scrim_record_store,
+    scrim_stats_fetch,
     team_balance,
     team_store,
     tier_roles,
@@ -61,6 +64,9 @@ MANUAL_TIMEOUT = 180
 SELECT_LIMIT = 25
 # 이 차이 미만이면 "균형이 잘 맞는다"고 표시해요. (티어 단계 기준)
 GOOD_BALANCE = 0.5
+# 경기 기록(KDA)을 못 찾았을 때 다시 시도하기까지 기다리는 시간이에요.
+# 경기가 라이엇 전적에 올라오는 데 시간이 걸려요. 상호작용 토큰이 15분이라 그보다 짧게 둬요.
+STATS_RETRY_SECONDS = 150
 # `인원`에 적은 멘션을 떼어낼 때 써요. `<@123>`과 `<@!123>` 둘 다 들어와요.
 _MENTION_RE = re.compile(r"<@!?(\d+)>")
 
@@ -280,6 +286,68 @@ def _build_embed(
     if balanced:
         parts.append("점수 근거: 티어 역할 + 악귀 스코어(250점 = 1단계, 최대 ±3단계)")
     embed.set_footer(text=" · ".join(parts))
+    return embed
+
+
+def _stat_line(player: dict, rounds_played: int) -> str:
+    """'🔫 **OwO** 24/17/7 · ADR 162 · HS 18%' 같은 한 줄이에요."""
+    kda = f"{player['kills']}/{player['deaths']}/{player['assists']}"
+    bits = [f"**{player.get('name') or '?'}** `{kda}`"]
+    adr = scrim_stats_fetch.per_round(player.get("damage") or 0, rounds_played)
+    if adr:
+        bits.append(f"ADR {adr:.0f}")
+    hs = scrim_stats_fetch.headshot_rate(player.get("headshots") or 0, player.get("shots") or 0)
+    if hs is not None:
+        bits.append(f"HS {hs:.0f}%")
+    if player.get("agent"):
+        bits.append(player["agent"])
+    return " · ".join(bits)
+
+
+def build_stats_embed(stats: dict, winner_index: int) -> discord.Embed:
+    """경기에서 가져온 실제 기록(KDA)을 보여주는 화면이에요.
+
+    팀 이름은 게임 쪽 Red/Blue 그대로 써요. 우리 🅰️/🅱️와 짝지으려면 명단을 맞춰봐야 하는데,
+    인원이 바뀌거나(관전자 합류) 다른 경기를 물어왔을 때 **엉뚱하게 짝지으면 더 헷갈려요.**
+    그래서 게임이 준 대로 보여주고, 라운드 스코어로 누가 이겼는지 알 수 있게 해둬요."""
+    rounds = stats.get("rounds") or {}
+    rounds_played = stats.get("roundsPlayed") or 0
+    embed = discord.Embed(
+        title="🗡️ 경기 기록을 가져왔어요",
+        description=(
+            f"🗺️ **{stats.get('map') or '맵 미확인'}** · "
+            f"{rounds.get('red') if rounds.get('red') is not None else '?'}"
+            f" : {rounds.get('blue') if rounds.get('blue') is not None else '?'}"
+            f" ({rounds_played}라운드)"
+        ),
+        color=0x4E5D94,
+    )
+
+    players = stats.get("players") or []
+    for team, label in (("red", "🔴 Red"), ("blue", "🔵 Blue")):
+        members = [p for p in players if p.get("team") == team]
+        if not members:
+            continue
+        # 킬 많은 순으로 보여줘요(점수 순이 더 정확하지만 킬이 눈에 먼저 들어와요).
+        members.sort(key=lambda p: (p.get("kills") or 0, p.get("score") or 0), reverse=True)
+        won = " · 승" if stats.get("wonTeam") == team else ""
+        embed.add_field(
+            name=f"{label}{won}",
+            value="\n".join(_stat_line(p, rounds_played) for p in members)[:1024],
+            inline=False,
+        )
+
+    unlinked = [p.get("name") for p in players if not p.get("userId")]
+    notes = []
+    if unlinked:
+        shown = ", ".join(n for n in unlinked[:4] if n)
+        if len(unlinked) > 4:
+            shown += f" 외 {len(unlinked) - 4}명"
+        notes.append(
+            f"계정 미등록: {shown} — `/티어 계정등록`을 하면 이 기록이 전적에 쌓여요."
+        )
+    notes.append("경기 기록은 라이엇 전적 서버에서 가져왔어요(사용자 설정 경기).")
+    embed.set_footer(text=" · ".join(notes)[:2048])
     return embed
 
 
@@ -608,6 +676,7 @@ class TeamSplitView(discord.ui.View):
         initial: tuple[list, list],
         mode: str,
         diff: float | None,
+        bot: commands.Bot | None = None,
     ):
         super().__init__(timeout=VIEW_TIMEOUT)
         self._players = players
@@ -615,6 +684,11 @@ class TeamSplitView(discord.ui.View):
         self._index = 0
         self._owner_id = owner_id
         self._guild_id = guild_id
+        # 승리 보고 뒤에 HenrikDev를 부를 때 `/전적`의 aiohttp 세션을 빌리려고 들고 있어요.
+        self._bot = bot
+        self._fallback_session: aiohttp.ClientSession | None = None
+        # 경기 기록 재시도 작업. 참조를 들고 있지 않으면 중간에 치워질 수 있어요.
+        self._stats_retry: asyncio.Task | None = None
         self._source_label = source_label
         self.message: discord.Message | None = None
         # 지금 화면에 떠 있는 편성이에요. 승리 보고는 **이 편성 기준**으로 기록돼요.
@@ -888,21 +962,100 @@ class TeamSplitView(discord.ui.View):
             lines.extend(unlocked_lines)
 
         lines.append("")
-        lines.append("-# `/내전전적`으로 내 승패·연승·맵별 성적을 볼 수 있어요.")
+        lines.append("-# `/내전전적`으로 내 승패·연승·맵별 성적·KDA를 볼 수 있어요.")
         summary = "\n".join(lines)
 
         # 맵을 안 정해뒀으면 여기서 고를 수 있게 드롭다운을 붙여요. 기록은 이미 들어갔으니
         # 안 고르고 넘어가도 전적은 남아요(맵별 집계에서만 빠져요).
         if self._map or not match_id:
             await interaction.followup.send(summary)
-            return
+        else:
+            map_view = MatchMapView(match_id, interaction.user.id, summary)
+            map_view.message = await interaction.followup.send(
+                summary + "\n\n🗺️ **어느 맵이었나요?** 골라두면 맵별 승률이 쌓여요 "
+                "(안 골라도 전적은 기록됐어요)",
+                view=map_view,
+                wait=True,
+            )
 
-        map_view = MatchMapView(match_id, interaction.user.id, summary)
-        map_view.message = await interaction.followup.send(
-            summary + "\n\n🗺️ **어느 맵이었나요?** 골라두면 맵별 승률이 쌓여요 (안 골라도 전적은 기록됐어요)",
-            view=map_view,
-            wait=True,
+        # 실제 경기 기록(KDA)을 찾아 붙여요. **여기서 실패해도 위 보고는 이미 끝났어요.**
+        if match_id:
+            await self._attach_real_stats(interaction, match_id, winners + losers, winner_index)
+
+    async def _attach_real_stats(
+        self,
+        interaction: discord.Interaction,
+        match_id: str,
+        roster: list[int],
+        winner_index: int,
+    ) -> None:
+        """HenrikDev에서 그 내전의 실제 경기 기록을 찾아 저장하고 화면에 띄워요.
+
+        조회가 실패하거나 경기를 못 찾는 건 **흔한 일**이에요(계정 미등록, 아직 전적 서버에
+        안 올라옴, API 한도). 그래서 조용히 넘어가고, 승패 기록은 그대로 둬요.
+
+        ⚠️ 경기가 끝난 **직후**엔 라이엇 전적에 아직 안 올라와 있을 수 있어요. 그래서 못 찾으면
+        한 번만 더(STATS_RETRY_SECONDS 뒤에) 시도해요. 이건 기다리지 않고 뒤로 떼어내요 -
+        안 그러면 승리 보고 응답이 몇 분 멈춰요."""
+        if await self._try_attach_stats(interaction, match_id, roster, winner_index):
+            return
+        # 참조를 들고 있어야 가비지 컬렉터가 중간에 치우지 않아요.
+        self._stats_retry = asyncio.create_task(
+            self._retry_attach_stats(interaction, match_id, roster, winner_index)
         )
+
+    async def _try_attach_stats(
+        self, interaction: discord.Interaction, match_id: str,
+        roster: list[int], winner_index: int,
+    ) -> bool:
+        try:
+            stats = await scrim_stats_fetch.fetch_for_match(
+                self._bot_session(),
+                set(roster),
+                reported_at=discord.utils.utcnow().timestamp(),
+                prefer=interaction.user.id,
+            )
+        except Exception:
+            log.warning("내전 KDA 조회에서 예외 (match=%s)", match_id, exc_info=True)
+            return False
+        if stats is None:
+            return False
+
+        await scrim_record_store.attach_stats(match_id, stats)
+        try:
+            await interaction.followup.send(embed=build_stats_embed(stats, winner_index))
+        except discord.HTTPException:
+            log.warning("내전 KDA 화면을 못 보냈어요 (match=%s)", match_id, exc_info=True)
+        return True
+
+    async def _retry_attach_stats(
+        self, interaction: discord.Interaction, match_id: str,
+        roster: list[int], winner_index: int,
+    ) -> None:
+        """잠시 뒤 한 번만 더 찾아봐요. 그래도 없으면 조용히 포기해요.
+
+        ⚠️ followup은 상호작용 토큰이 살아있는 15분 안에만 보낼 수 있어요. 재시도 간격을
+        그보다 훨씬 짧게 둔 이유예요."""
+        await asyncio.sleep(STATS_RETRY_SECONDS)
+        try:
+            if not await self._try_attach_stats(interaction, match_id, roster, winner_index):
+                log.info("내전 KDA를 재시도에서도 못 찾았어요 (match=%s)", match_id)
+        except Exception:
+            # 떼어낸 작업이라 여기서 터지면 'Task exception was never retrieved'만 남아요.
+            log.warning("내전 KDA 재시도에서 예외 (match=%s)", match_id, exc_info=True)
+
+    def _bot_session(self) -> "aiohttp.ClientSession":
+        """HenrikDev를 부를 aiohttp 세션이에요.
+
+        `/전적`(cogs/rank.py)이 쓰는 세션을 재사용해요 - 매번 세션을 새로 만들면 커넥션이
+        쌓이고 'Unclosed client session' 경고가 나요. 없으면 그때 하나 만들어 들고 있어요."""
+        rank_cog = self._bot.get_cog("Rank") if self._bot else None
+        session = getattr(rank_cog, "session", None)
+        if session is not None and not session.closed:
+            return session
+        if self._fallback_session is None or self._fallback_session.closed:
+            self._fallback_session = aiohttp.ClientSession()
+        return self._fallback_session
 
 
 async def _announce_achievements(interaction: discord.Interaction, user_ids: list[int]) -> list[str]:
@@ -1015,6 +1168,7 @@ class Team(commands.Cog):
             initial=(team_a, team_b),
             mode=mode,
             diff=diff,
+            bot=self.bot,
         )
         message = await interaction.followup.send(
             embed=view.build_embed(), view=view, wait=True

@@ -162,6 +162,60 @@ def _set_match_map_sync(match_id: str, map_name: str | None) -> bool:
     return result.matched_count > 0
 
 
+def _attach_stats_sync(match_id: str, stats: dict) -> bool:
+    """경기 문서에 실제 경기 기록(KDA 등)을 붙여요. 맵이 비어 있으면 같이 채워요."""
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    try:
+        key = ObjectId(match_id)
+    except (InvalidId, TypeError):
+        return False
+
+    update: dict = {"$set": {"stats": stats}}
+    doc = _matches.find_one({"_id": key}, {"map": 1})
+    if doc is None:
+        return False
+    # 사람이 고른 맵이 있으면 **건드리지 않아요.** API가 준 맵과 다를 수 있는데(엉뚱한 경기를
+    # 물어온 경우), 그때 사람이 고른 쪽을 덮어쓰면 조용히 틀린 기록이 돼요.
+    if not doc.get("map") and stats.get("map"):
+        update["$set"]["map"] = stats["map"]
+    return _matches.update_one({"_id": key}, update).matched_count > 0
+
+
+def _kda_summary_sync(user_id, scope: str | None) -> dict:
+    """그 사람의 내전 누적 KDA예요. 경기 기록이 붙은 경기만 셉니다.
+
+    `stats.players`가 배열이라 `$unwind`로 펼친 뒤 본인 줄만 골라서 더해요."""
+    uid = str(user_id)
+    match: dict = {"stats.players.userId": uid}
+    if scope and scope != SCOPE_ALL:
+        match["season"] = scope
+    pipeline = [
+        {"$match": match},
+        {"$unwind": "$stats.players"},
+        {"$match": {"stats.players.userId": uid}},
+        {"$group": {
+            "_id": None,
+            "matches": {"$sum": 1},
+            "kills": {"$sum": "$stats.players.kills"},
+            "deaths": {"$sum": "$stats.players.deaths"},
+            "assists": {"$sum": "$stats.players.assists"},
+            "damage": {"$sum": "$stats.players.damage"},
+            "headshots": {"$sum": "$stats.players.headshots"},
+            "shots": {"$sum": "$stats.players.shots"},
+            "rounds": {"$sum": "$stats.roundsPlayed"},
+            "bestKills": {"$max": "$stats.players.kills"},
+        }},
+    ]
+    rows = list(_matches.aggregate(pipeline))
+    if not rows:
+        return {"matches": 0}
+    row = rows[0]
+    row.pop("_id", None)
+    return row
+
+
 def _map_stats_sync(user_id, scope: str | None) -> list[dict]:
     """맵별 승/패를 세요. 맵이 안 적힌 경기는 빠져요.
 
@@ -274,6 +328,22 @@ async def set_match_map(match_id: str, map_name: str | None) -> bool:
 async def map_stats(user_id, scope: str | None = SCOPE_ALL) -> list[dict]:
     """맵별 `{"map", "wins", "losses"}` 목록. 맵이 안 적힌 경기는 빠져요."""
     return await asyncio.to_thread(_map_stats_sync, user_id, scope)
+
+
+async def attach_stats(match_id: str, stats: dict) -> bool:
+    """경기 문서에 실제 경기 기록(KDA 등)을 붙여요. 그 경기를 못 찾으면 False."""
+    changed = await asyncio.to_thread(_attach_stats_sync, match_id, stats)
+    if changed:
+        log.info(
+            "🗡️ 경기 %s 에 KDA를 붙였어요 (참가자 %d명)",
+            match_id, len(stats.get("players") or []),
+        )
+    return changed
+
+
+async def kda_summary(user_id, scope: str | None = SCOPE_ALL) -> dict:
+    """그 사람의 내전 누적 KDA. 기록이 붙은 경기가 없으면 `{"matches": 0}`."""
+    return await asyncio.to_thread(_kda_summary_sync, user_id, scope)
 
 
 async def get_record(user_id, scope: str = SCOPE_ALL) -> dict:

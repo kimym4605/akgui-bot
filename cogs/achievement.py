@@ -47,6 +47,34 @@ CATEGORY_CHOICES = [
 MEDALS = ["🥇", "🥈", "🥉"]
 
 
+def _kda_text(kda: dict) -> str:
+    """내전 누적 KDA를 한 덩어리로. 경기 기록이 붙은 경기만 센 값이에요.
+
+    통산 승패(`/팀짜기` 보고로 쌓임)보다 판수가 적은 게 정상이에요 — 라이엇 전적에서
+    경기를 못 찾은 판은 KDA가 없어요. 그래서 '몇 판 기준'인지를 꼭 같이 적어요."""
+    matches = kda["matches"]
+    kills, deaths, assists = kda["kills"], kda["deaths"], kda["assists"]
+    lines = [
+        f"평균 **{kills / matches:.1f} / {deaths / matches:.1f} / {assists / matches:.1f}**"
+        f" (K/D {kills / max(deaths, 1):.2f})"
+    ]
+
+    extras = []
+    rounds = kda.get("rounds") or 0
+    if rounds:
+        extras.append(f"ADR **{kda.get('damage', 0) / rounds:.0f}**")
+    shots = kda.get("shots") or 0
+    if shots:
+        extras.append(f"HS **{kda.get('headshots', 0) / shots * 100:.0f}%**")
+    if kda.get("bestKills"):
+        extras.append(f"한 경기 최다 킬 **{kda['bestKills']}**")
+    if extras:
+        lines.append(" · ".join(extras))
+
+    lines.append(f"-# 경기 기록을 가져온 {matches}판 기준이에요.")
+    return "\n".join(lines)
+
+
 def _map_stats_text(rows: list[dict]) -> str:
     """맵별 승패를 승률 높은 순으로 줄여 써요. 가장 강한/약한 맵엔 딱지를 붙여요.
 
@@ -271,6 +299,10 @@ class Achievement(commands.Cog):
                 for match in recent
             )
             embed.add_field(name="최근 5경기 (왼쪽이 최신)", value=marks, inline=False)
+
+        kda = await scrim_record_store.kda_summary(target.id)
+        if kda.get("matches"):
+            embed.add_field(name="🗡️ 내전 KDA", value=_kda_text(kda), inline=False)
 
         map_rows = await scrim_record_store.map_stats(target.id)
         if map_rows:
