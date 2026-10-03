@@ -93,18 +93,11 @@ async def main():
             )
 
     # /팀짜기 뷰에 승리 보고 버튼이 붙었는지
-    from cogs.team import CaptainPickView, MapPickView, MatchMapView, TeamSplitView
-    from utils import team_balance, team_store
-    players = [
-        team_balance.Rated(key=i, label=f"P{i}", rating=10.0, tier_index=10, agwi_score=None)
-        for i in range(1, 5)
-    ]
-    candidates = team_balance.balanced_splits(players, limit=3)
-    view = TeamSplitView(
-        players, candidates, owner_id=1, guild_id=None, source_label="🎧 테스트",
-        initial=(candidates[0][0], candidates[0][1]),
-        mode=team_store.MODE_BALANCED, diff=candidates[0][2],
+    from cogs.team import (
+        CaptainPickView, MapPickView, MatchMapView, Session, TeamSplitView,
     )
+    from utils import team_balance
+    view = TeamSplitView(bot)
     labels = [item.label for item in view.children]
     print(f"\n  /팀짜기 버튼: {labels}")
     for needed in ("직접 조정", "팀장", "맵", "A팀 승리", "B팀 승리"):
@@ -115,16 +108,54 @@ async def main():
     # 실제 레이아웃 엔진(to_components)을 돌려서 나온 줄을 검사해요.
     check_layout("/팀짜기", view, failed)
 
-    # 화면에 떠 있는 편성이 승리 보고 기준과 일치하는지 (다시 섞기 후 갱신되는 부분)
-    if view._current != (candidates[0][0], candidates[0][1]):
-        failed.append("초기 편성 동기화")
-    else:
-        print("  ✅ 초기 편성이 승리 보고 기준과 일치")
+    # 🚨 영속 버튼 조건: timeout=None + 모든 버튼에 고정 custom_id.
+    # 하나라도 빠지면 `bot.add_view`가 거부하거나, 재시작 뒤 버튼이 죽어요.
+    if view.timeout is not None:
+        failed.append(f"/팀짜기 뷰에 타임아웃이 있어요({view.timeout}초) — 영속이 아니에요")
+    missing = [item.label for item in view.children if not getattr(item, "custom_id", None)]
+    if missing:
+        failed.append(f"custom_id가 없는 버튼: {missing}")
+    ids = [item.custom_id for item in view.children]
+    if len(set(ids)) != len(ids):
+        failed.append(f"custom_id가 겹쳐요: {ids}")
+    try:
+        bot.add_view(view)
+        print(f"  ✅ 영속 버튼 등록됨 (custom_id {len(ids)}개, 전부 고유)")
+    except Exception as exc:
+        failed.append(f"bot.add_view 실패: {type(exc).__name__}: {exc}")
 
-    # 👑 팀장 화면도 디스코드 한도 안에 들어가는지 (드롭다운 2개 + 버튼 3개)
-    check_layout("👑 팀장 화면", CaptainPickView(view), failed)
-    # 🗺️ 맵 화면 2종 (경기 전 지정 / 승리 보고 뒤 채워넣기)
-    check_layout("🗺️ 맵 지정 화면", MapPickView(view), failed)
+    # 🚨 이 View는 봇 전체에 하나만 등록돼서 모든 팀짜기 메시지가 공유해요.
+    # 그래서 편성·팀장·맵 같은 **메시지별 상태를 self에 담아두면 안 돼요.**
+    # 빈 View의 속성(discord.py 내부용)과 버튼 자체는 빼고, **우리가 담은 것만** 봐요.
+    baseline = set(vars(discord.ui.View(timeout=None)))
+    allowed = {"_bot", "_fallback_session", "_stats_retries"}
+    leaked = [
+        name for name, value in vars(view).items()
+        if name not in baseline and name not in allowed
+        and not isinstance(value, discord.ui.Item)
+    ]
+    if leaked:
+        failed.append(f"뷰에 메시지별 상태가 남아있어요(공유되면 섞여요): {leaked}")
+    else:
+        print("  ✅ 뷰가 메시지별 상태를 들고 있지 않음")
+
+    # 하위 화면들(ephemeral)은 Session을 받아요. 가짜 세션으로 레이아웃만 봐요.
+    players = [
+        team_balance.Rated(key=i, label=f"P{i}", rating=10.0, tier_index=10, agwi_score=None)
+        for i in range(1, 5)
+    ]
+    fake = Session(1, {
+        "owner_id": 1, "guild_id": None, "mode": "balanced", "diff": 0.1,
+        "source_label": "🎧 테스트",
+        "players": [{"id": p.key, "label": p.label, "rating": p.rating,
+                     "tier_index": p.tier_index} for p in players],
+        "teams": [[{"id": 1, "label": "P1", "rating": 10.0, "tier_index": 10},
+                   {"id": 2, "label": "P2", "rating": 10.0, "tier_index": 10}],
+                  [{"id": 3, "label": "P3", "rating": 10.0, "tier_index": 10},
+                   {"id": 4, "label": "P4", "rating": 10.0, "tier_index": 10}]],
+    })
+    check_layout("👑 팀장 화면", CaptainPickView(None, fake), failed)
+    check_layout("🗺️ 맵 지정 화면", MapPickView(None, fake), failed)
     check_layout("🗺️ 보고 후 맵 화면", MatchMapView("x" * 24, 1, "요약"), failed)
     # 맵 드롭다운이 25개 한도를 넘지 않는지 (맵이 늘어나면 여기서 걸려요)
     from utils import valorant_maps

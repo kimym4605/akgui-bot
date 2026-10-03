@@ -118,47 +118,64 @@ check("모드 제목도 남아있음", embed.title.startswith("🎯 팀 나누�
 embed = _build_embed(A, B, 0.5, mode=team_store.MODE_BALANCED, source_label="x")
 check("맵이 없으면 제목에 안 붙음", "🗺️" in embed.title, False)
 
-print("\n저장·조회 (team_store)")
-check("처음엔 아무것도 없음", team_store.get_split(777), None)
-team_store.save_split(
-    777, team_a=A, team_b=B, mode=team_store.MODE_BALANCED, diff=0.33,
-    source_label="🎧 테스트방", captains=(2, 5), map_name="어센트",
-    message_url="https://discord.com/x", winner=None,
-)
-record = team_store.get_split(777)
+def save(message_id, *, guild=777, team_a=A, team_b=B, mode=team_store.MODE_BALANCED,
+         diff=0.33, label="🎧 테스트방", captains=(None, None), map_name=None,
+         url=None, winner=None, reported=False, match_id=None, players=None):
+    team_store.save_session(
+        message_id, guild_id=guild, owner_id=1,
+        players=players if players is not None else A + B,
+        team_a=team_a, team_b=team_b, mode=mode, diff=diff, source_label=label,
+        captains=captains, map_name=map_name, message_url=url, winner=winner,
+        reported=reported, match_id=match_id,
+    )
+
+
+print("\n저장·조회 (team_store — 메시지별 세션)")
+check("처음엔 아무것도 없음", team_store.get_session(1001), None)
+save(1001, captains=(2, 5), map_name="어센트", url="https://discord.com/x")
+record = team_store.get_session(1001)
 check("저장된 모드", record["mode"], team_store.MODE_BALANCED)
 check("저장된 맵", record["map"], "어센트")
 check("저장된 실력 차이", record["diff"], 0.33)
 check("저장된 팀장", team_store.load_captains(record), (2, 5))
 check("저장된 링크", record["message_url"], "https://discord.com/x")
+check("저장된 주인", record["owner_id"], 1)
+check("보고 전이면 reported=False", record["reported"], False)
 loaded_a, loaded_b = team_store.load_teams(record)
 check("A팀 명단 복원", [p.label for p in loaded_a], ["P1", "P2", "P3"])
 check("B팀 명단 복원", [p.label for p in loaded_b], ["P4", "P5", "P6"])
 check("티어가 살아있음", [p.tier_index for p in loaded_a], [12, 10, 8])
 check("rating이 살아있음", loaded_a[0].rating, 12.0)
-check("다른 서버는 영향 없음", team_store.get_split(778), None)
+check("전체 명단도 복원 (다시 섞기에 필요해요)",
+      [p.label for p in team_store.load_players(record)],
+      ["P1", "P2", "P3", "P4", "P5", "P6"])
+check("다른 메시지는 영향 없음", team_store.get_session(1002), None)
 
-print("\n덮어쓰기 (마지막 편성 하나만 남아야 해요)")
-team_store.save_split(
-    777, team_a=B, team_b=A, mode=team_store.MODE_MANUAL, diff=1.5,
-    source_label="✍️ 직접 지정 (6명)", captains=(None, None), winner=1,
-)
-record = team_store.get_split(777)
-check("새 편성으로 바뀜", [p.label for p in team_store.load_teams(record)[0]],
-      ["P4", "P5", "P6"])
-check("팀장도 비워짐", team_store.load_captains(record), (None, None))
-check("맵도 비워짐 (넘기지 않으면 None)", record["map"], None)
+print("\n메시지가 여러 개여도 각각 따로 살아있어요 (영속 버튼의 핵심)")
+save(1002, team_a=B, team_b=A, mode=team_store.MODE_MANUAL, diff=1.5, map_name="펄")
+check("1001은 그대로", team_store.get_session(1001)["map"], "어센트")
+check("1002는 따로", team_store.get_session(1002)["map"], "펄")
+check("두 세션이 다 남음", len(team_store._load_all()), 2)
+check("같은 서버면 최신 것을 돌려줌 (/팀보기)",
+      team_store.latest_for_guild(777)["map"], "펄")
+save(1003, guild=888, map_name="바인드")
+check("다른 서버는 섞이지 않음", team_store.latest_for_guild(888)["map"], "바인드")
+check("기록 없는 서버는 None", team_store.latest_for_guild(999), None)
+
+print("\n같은 메시지를 다시 저장하면 덮어써요")
+save(1001, map_name="로터스", winner=1, reported=True, match_id="m-9")
+record = team_store.get_session(1001)
+check("맵이 바뀜", record["map"], "로터스")
 check("승자 기록", record["winner"], 1)
-check("이력이 쌓이지 않음(서버당 1건)", len(team_store._load()), 1)
+check("보고 표시", record["reported"], True)
+check("경기 id 기록", record["match_id"], "m-9")
+check("세션 수는 그대로", len(team_store._load_all()), 3)
 
 print("\n못 재는 실력차(inf)는 저장하지 않아요 (JSON이 깨지면 안 돼요)")
-team_store.save_split(
-    777, team_a=A, team_b=[], mode=team_store.MODE_BALANCED,
-    diff=team_balance.imbalance(A, []), source_label="x",
-)
+save(1004, team_a=A, team_b=[], diff=team_balance.imbalance(A, []))
 raw = team_store.FILE_PATH.read_text(encoding="utf-8")
 check("inf가 파일에 안 들어감", "Infinity" in raw, False)
-check("diff는 None으로 저장", team_store.get_split(777)["diff"], None)
+check("diff는 None으로 저장", team_store.get_session(1004)["diff"], None)
 import json  # noqa: E402
 check("표준 JSON으로 다시 읽힘", isinstance(json.loads(raw), dict), True)
 
@@ -178,10 +195,34 @@ check("teams가 한 칸만 있으면 채워줌",
 check("captains가 없으면 (None, None)", team_store.load_captains({}), (None, None))
 
 print("\n지우기")
-team_store.clear_split(777)
-check("지워짐", team_store.get_split(777), None)
-team_store.clear_split(777)  # 두 번 지워도 안 터져야 해요.
-check("없는 걸 지워도 조용히 넘어감", team_store.get_split(777), None)
+team_store.delete_session(1004)
+check("지워짐", team_store.get_session(1004), None)
+team_store.delete_session(1004)  # 두 번 지워도 안 터져야 해요.
+check("없는 걸 지워도 조용히 넘어감", team_store.get_session(1004), None)
+
+print("\n오래된 세션 정리 (prune) — 파일이 무한정 안 커지게")
+old = team_store._load_all()
+old["9999"] = {**old["1001"],
+               "saved_at": (datetime.now(team_store.KST)
+                            - timedelta(days=team_store.SESSION_TTL_DAYS + 1)
+                            ).isoformat(timespec="seconds")}
+team_store._save_all(old)
+check("넣자마자는 보임", team_store.get_session(9999) is not None, True)
+removed = team_store.prune()
+check("오래된 걸 지움", removed, 1)
+check("정말 사라짐", team_store.get_session(9999), None)
+check("최근 것은 남음", team_store.get_session(1001) is not None, True)
+check("지울 게 없으면 0", team_store.prune(), 0)
+
+# 개수 상한도 지켜지는지 (MAX_SESSIONS를 잠깐 낮춰서 봐요)
+real_max = team_store.MAX_SESSIONS
+team_store.MAX_SESSIONS = 2
+save(2001, map_name="A")
+save(2002, map_name="B")
+save(2003, map_name="C")
+check("상한을 넘지 않음", len(team_store._load_all()) <= 2, True)
+check("가장 최근 것은 남아있음", team_store.get_session(2003) is not None, True)
+team_store.MAX_SESSIONS = real_max
 
 print("\n시각 표시 (_when_text)")
 now = datetime.now(team_store.KST)

@@ -18,10 +18,20 @@
 뽑을 수 있고, 정하면 명단에서 그 사람 앞에 👑이 붙어요(CaptainPickView). 편성이 통째로
 바뀌는 🔄/🎲는 팀장을 지우고, 🔀 직접 조정은 **팀장이 그 팀에 남아 있으면** 그대로 둬요.
 
-**`/팀보기`** 는 그 서버에서 마지막으로 짠 편성을 다시 보여줘요. `/팀짜기` 메시지는 10분 뒤에
-버튼이 꺼지고 채팅에 묻혀버려서, 한참 뒤에 "우리 팀 뭐였지?"를 볼 방법이 없었어요. 편성이
-바뀔 때마다 utils/team_store.py에 마지막 하나만 덮어써 두고, 거기서 읽어 그려요.
-명령어를 쓴 사람만이 아니라 **누구나** 볼 수 있어요.
+**`/팀보기`** 는 그 서버에서 마지막으로 짠 편성을 다시 보여줘요. `/팀짜기` 메시지가 채팅에
+묻혀버려도 볼 수 있어요. 명령어를 쓴 사람만이 아니라 **누구나** 볼 수 있어요.
+
+## ⚠️ 버튼은 영속이에요 (2026-10-03)
+
+예전에는 10분 타임아웃이 있는 보통 View였어요. 그래서 팀을 짜고 **게임에 들어가면 10분 만에
+버튼이 전부 꺼졌고**(발로란트 한 판은 30~45분), 봇을 재시작하면 눌러도 '상호작용 실패'가 났어요.
+경기가 끝나고 돌아오면 승리 보고를 누를 수가 없어서, **9/22 배포 이후 내전 경기가 한 건도
+기록되지 못했어요**(운영 DB에 `scrim_matches` 컬렉션이 아예 없었어요).
+
+지금은 `timeout=None` + 고정 custom_id + `bot.add_view`로 영속이에요. 대신 View가 상태를 들고
+있을 수 없어서(봇이 재시작되면 사라져요), **누른 메시지의 id로 utils/team_store.py에서 상태를
+읽고 써요**(`Session`). 🚨 그래서 `TeamSplitView`의 `self`에 편성·팀장·맵을 담아두면 안 돼요 —
+봇 전체에 그 View 하나만 등록돼서 **모든 팀짜기 메시지가 같은 객체를 공유해요.**
 
 점수의 출처(둘 다 이미 봇에 쌓여 있는 데이터예요. 새로 API를 부르지 않아요):
   - **티어 역할**: `/전적`을 본인 계정으로 돌리면 자동으로 붙어요(utils/tier_roles.py).
@@ -54,8 +64,9 @@ from utils import (
 
 log = logging.getLogger(__name__)
 
-# 버튼을 눌러 다시 섞을 수 있는 시간이에요. 내전 팀을 정하는 동안은 살아있어야 해요.
-VIEW_TIMEOUT = 600
+# 승리 보고 뒤에 뜨는 맵 드롭다운이 살아있는 시간이에요.
+# (`/팀짜기` 본 메시지의 버튼은 **영속**이라 타임아웃이 없어요 — TeamSplitView 주석 참고)
+MAP_FOLLOWUP_TIMEOUT = 900
 # 미리 뽑아둘 후보 편성 수. '다시 섞기'를 누르면 이 안에서 다음 것을 보여줘요.
 CANDIDATE_COUNT = 10
 # '🔀 직접 조정'과 '👑 팀장' 창이 열려 있는 시간이에요. 고르고 누르는 데만 쓰니 짧아도 돼요.
@@ -351,6 +362,77 @@ def build_stats_embed(stats: dict, winner_index: int) -> discord.Embed:
     return embed
 
 
+class Session:
+    """`/팀짜기` 메시지 하나의 상태예요.
+
+    버튼이 영속(`timeout=None`)이라 파이썬 객체로 상태를 들고 있을 수 없어요 - 봇이
+    재시작되면 사라지니까요. 그래서 **버튼을 누를 때마다 저장소에서 읽어오고, 바꾼 뒤 다시
+    써요.** 읽어온 뒤에 바로 바꾸고 저장하니까, 두 사람이 동시에 눌러도 마지막 것이 남아요
+    (한 메시지는 `/팀짜기`를 쓴 사람만 조작할 수 있어서 동시 조작이 사실상 없어요)."""
+
+    def __init__(self, message_id: int, record: dict):
+        self.message_id = message_id
+        self.players = team_store.load_players(record)
+        self.team_a, self.team_b = team_store.load_teams(record)
+        self.captains = team_store.load_captains(record)
+        self.mode = record.get("mode") or team_store.MODE_BALANCED
+        self.diff = record.get("diff")
+        self.map_name = record.get("map")
+        self.source_label = record.get("source_label") or ""
+        self.owner_id = int(record.get("owner_id") or 0)
+        self.guild_id = int(record["guild_id"]) if record.get("guild_id") else None
+        self.reported = bool(record.get("reported"))
+        self.winner = record.get("winner")
+        self.match_id = record.get("match_id")
+        self.message_url = record.get("message_url")
+
+    @classmethod
+    def load(cls, message_id: int) -> "Session | None":
+        record = team_store.get_session(message_id)
+        return cls(message_id, record) if record else None
+
+    def save(self) -> None:
+        team_store.save_session(
+            self.message_id,
+            guild_id=self.guild_id,
+            owner_id=self.owner_id,
+            players=self.players,
+            team_a=self.team_a,
+            team_b=self.team_b,
+            mode=self.mode,
+            diff=self.diff,
+            source_label=self.source_label,
+            captains=self.captains,
+            map_name=self.map_name,
+            message_url=self.message_url,
+            winner=self.winner,
+            reported=self.reported,
+            match_id=self.match_id,
+        )
+
+    def embed(self) -> discord.Embed:
+        return _build_embed(
+            self.team_a, self.team_b, self.diff,
+            mode=self.mode, source_label=self.source_label,
+            captains=self.captains, map_name=self.map_name,
+        )
+
+    @property
+    def roster(self) -> list[int]:
+        return [p.key for p in self.team_a + self.team_b]
+
+
+async def _edit_main(message: discord.Message, session: Session) -> None:
+    """팀짜기 본 메시지의 화면만 새로 그려요.
+
+    버튼은 **다시 보내지 않아요.** custom_id가 고정이라 이미 붙어 있는 버튼이 그대로
+    동작해요(예전엔 `view=self`를 같이 보내야 했어요)."""
+    try:
+        await message.edit(embed=session.embed())
+    except discord.HTTPException:
+        log.warning("팀짜기 화면을 못 고쳤어요 (message=%s)", message.id, exc_info=True)
+
+
 class _TeamMemberSelect(discord.ui.Select):
     """한 팀에서 한 명을 고르는 드롭다운이에요. 안 고르는 것도 허용해요(min_values=0)."""
 
@@ -379,32 +461,31 @@ class ManualAdjustView(discord.ui.View):
     한쪽만 고르면 그 사람만 반대편으로 옮겨요(인원이 한 명씩 어긋나는 건 일부러 허용해요 -
     관전자가 생겨서 4대6으로 돌리고 싶을 때가 있어요)."""
 
-    def __init__(self, parent: "TeamSplitView"):
+    def __init__(self, message: discord.Message, session: Session):
         super().__init__(timeout=MANUAL_TIMEOUT)
-        self._parent = parent
-        team_a, team_b = parent.current
-        self._a_select = _TeamMemberSelect("🅰️ A팀에서 뺄 사람 (안 골라도 돼요)", team_a)
-        self._b_select = _TeamMemberSelect("🅱️ B팀에서 뺄 사람 (안 골라도 돼요)", team_b)
+        self._message = message
+        self._a_select = _TeamMemberSelect("🅰️ A팀에서 뺄 사람 (안 골라도 돼요)", session.team_a)
+        self._b_select = _TeamMemberSelect("🅱️ B팀에서 뺄 사람 (안 골라도 돼요)", session.team_b)
         self.add_item(self._a_select)
         self.add_item(self._b_select)
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self._parent.owner_id:
-            return True
-        await interaction.response.send_message(
-            "`/팀짜기`를 실행한 사람만 조정할 수 있어요.", ephemeral=True
-        )
-        return False
-
     @discord.ui.button(label="적용", emoji="✅", style=discord.ButtonStyle.success, row=2)
     async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self._parent.reported:
+        # ⚠️ 저장소에서 **다시 읽어요.** 이 창을 열어둔 사이에 다시 섞기를 눌렀을 수도 있어서,
+        # 창을 열 때의 명단으로 덮어쓰면 화면과 기록이 어긋나요.
+        session = Session.load(self._message.id)
+        if session is None:
+            await interaction.response.edit_message(
+                content="이 팀짜기 기록이 없어요. `/팀짜기`를 새로 써주세요.", view=None
+            )
+            return
+        if session.reported:
             await interaction.response.edit_message(
                 content="이 경기는 이미 결과가 기록돼서 편성을 바꿀 수 없어요.", view=None
             )
             return
 
-        team_a, team_b = self._parent.current
+        team_a, team_b = session.team_a, session.team_b
         a_out = _pick(team_a, self._a_select.values)
         b_out = _pick(team_b, self._b_select.values)
 
@@ -422,7 +503,14 @@ class ManualAdjustView(discord.ui.View):
             )
             return
 
-        diff = await self._parent.apply_manual(new_a, new_b)
+        diff = team_balance.imbalance(new_a, new_b)
+        session.team_a, session.team_b = new_a, new_b
+        session.mode = team_store.MODE_MANUAL
+        session.diff = diff
+        # 팀장이 반대편으로 넘어갔으면 그 자리는 비워요.
+        session.captains = keep_valid_captains(new_a, new_b, session.captains)
+        session.save()
+        await _edit_main(self._message, session)
 
         if a_out and b_out:
             summary = f"🔀 **{a_out.label}** ↔ **{b_out.label}** 맞교환했어요."
@@ -498,28 +586,35 @@ class CaptainPickView(discord.ui.View):
     드롭다운으로 직접 고르거나 🎲 무작위로 뽑을 수 있어요. 한쪽만 골라도 되고(안 고른 쪽은
     지금 팀장을 그대로 둬요), 아무도 안 고르고 **👑 팀장 해제**로 둘 다 비울 수도 있어요."""
 
-    def __init__(self, parent: "TeamSplitView"):
+    def __init__(self, message: discord.Message, session: Session):
         super().__init__(timeout=MANUAL_TIMEOUT)
-        self._parent = parent
-        team_a, team_b = parent.current
-        self._a_select = _TeamMemberSelect("🅰️ A팀 팀장 (안 골라도 돼요)", team_a)
-        self._b_select = _TeamMemberSelect("🅱️ B팀 팀장 (안 골라도 돼요)", team_b)
+        self._message = message
+        self._a_select = _TeamMemberSelect("🅰️ A팀 팀장 (안 골라도 돼요)", session.team_a)
+        self._b_select = _TeamMemberSelect("🅱️ B팀 팀장 (안 골라도 돼요)", session.team_b)
         self.add_item(self._a_select)
         self.add_item(self._b_select)
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self._parent.owner_id:
-            return True
-        await interaction.response.send_message(
-            "`/팀짜기`를 실행한 사람만 팀장을 정할 수 있어요.", ephemeral=True
-        )
-        return False
+    async def _fresh(self, interaction: discord.Interaction) -> Session | None:
+        """저장소에서 다시 읽어요(창을 열어둔 사이에 편성이 바뀌었을 수 있어요)."""
+        session = Session.load(self._message.id)
+        if session is None:
+            await interaction.response.edit_message(
+                content="이 팀짜기 기록이 없어요. `/팀짜기`를 새로 써주세요.", view=None
+            )
+        return session
+
+    async def _apply(self, session: Session, captains: tuple[int | None, int | None]) -> None:
+        session.captains = keep_valid_captains(session.team_a, session.team_b, captains)
+        session.save()
+        await _edit_main(self._message, session)
 
     @discord.ui.button(label="적용", emoji="✅", style=discord.ButtonStyle.success, row=2)
     async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
-        team_a, team_b = self._parent.current
-        a_pick = _pick(team_a, self._a_select.values)
-        b_pick = _pick(team_b, self._b_select.values)
+        session = await self._fresh(interaction)
+        if session is None:
+            return
+        a_pick = _pick(session.team_a, self._a_select.values)
+        b_pick = _pick(session.team_b, self._b_select.values)
         if a_pick is None and b_pick is None:
             await interaction.response.send_message(
                 "팀장으로 세울 사람을 한 명 이상 골라주세요. "
@@ -529,12 +624,11 @@ class CaptainPickView(discord.ui.View):
             return
 
         # 안 고른 쪽은 지금 팀장을 그대로 둬요(한 팀만 바꾸고 싶을 때가 있어요).
-        current = self._parent.captains
-        captains = (
+        current = session.captains
+        await self._apply(session, (
             a_pick.key if a_pick else current[0],
             b_pick.key if b_pick else current[1],
-        )
-        await self._parent.apply_captains(captains)
+        ))
 
         named = []
         if a_pick:
@@ -547,9 +641,11 @@ class CaptainPickView(discord.ui.View):
 
     @discord.ui.button(label="무작위로 뽑기", emoji="🎲", style=discord.ButtonStyle.primary, row=2)
     async def roll(self, interaction: discord.Interaction, button: discord.ui.Button):
-        team_a, team_b = self._parent.current
-        captains = random_captains(team_a, team_b)
-        await self._parent.apply_captains(captains)
+        session = await self._fresh(interaction)
+        if session is None:
+            return
+        captains = random_captains(session.team_a, session.team_b)
+        await self._apply(session, captains)
 
         def name_of(team, captain_id):
             found = next((p for p in team if p.key == captain_id), None)
@@ -557,15 +653,18 @@ class CaptainPickView(discord.ui.View):
 
         await interaction.response.edit_message(
             content=(
-                f"🎲 팀장을 뽑았어요 — 🅰️ A팀 {name_of(team_a, captains[0])} · "
-                f"🅱️ B팀 {name_of(team_b, captains[1])}"
+                f"🎲 팀장을 뽑았어요 — 🅰️ A팀 {name_of(session.team_a, captains[0])} · "
+                f"🅱️ B팀 {name_of(session.team_b, captains[1])}"
             ),
             view=None,
         )
 
     @discord.ui.button(label="팀장 해제", emoji="👑", style=discord.ButtonStyle.secondary, row=3)
     async def clear(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._parent.apply_captains((None, None))
+        session = await self._fresh(interaction)
+        if session is None:
+            return
+        await self._apply(session, (None, None))
         await interaction.response.edit_message(content="👑 팀장을 없앴어요.", view=None)
 
 
@@ -589,30 +688,32 @@ class MapPickView(discord.ui.View):
 
     여기서 정해두면 🅰️/🅱️ 승리 버튼을 누를 때 그 맵으로 같이 기록돼요."""
 
-    def __init__(self, parent: "TeamSplitView"):
+    def __init__(self, message: discord.Message, session: Session):
         super().__init__(timeout=MANUAL_TIMEOUT)
-        self._parent = parent
-        self.add_item(_MapSelect(parent.map_name))
+        self._message = message
+        self.add_item(_MapSelect(session.map_name))
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self._parent.owner_id:
-            return True
-        await interaction.response.send_message(
-            "`/팀짜기`를 실행한 사람만 맵을 정할 수 있어요.", ephemeral=True
-        )
-        return False
+    async def _set_map(self, interaction: discord.Interaction, name: str | None, text: str):
+        session = Session.load(self._message.id)
+        if session is None:
+            await interaction.response.edit_message(
+                content="이 팀짜기 기록이 없어요. `/팀짜기`를 새로 써주세요.", view=None
+            )
+            return
+        session.map_name = name
+        session.save()
+        await _edit_main(self._message, session)
+        await interaction.response.edit_message(content=text, view=None)
 
     async def on_map_chosen(self, interaction: discord.Interaction, name: str):
-        await self._parent.apply_map(name)
-        await interaction.response.edit_message(
-            content=f"🗺️ 맵을 **{name}**으로 정했어요. 승리 버튼을 누르면 이 맵으로 기록돼요.",
-            view=None,
+        await self._set_map(
+            interaction, name,
+            f"🗺️ 맵을 **{name}**으로 정했어요. 승리 버튼을 누르면 이 맵으로 기록돼요.",
         )
 
     @discord.ui.button(label="맵 지우기", emoji="🗺️", style=discord.ButtonStyle.secondary, row=1)
     async def clear(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._parent.apply_map(None)
-        await interaction.response.edit_message(content="🗺️ 맵을 비웠어요.", view=None)
+        await self._set_map(interaction, None, "🗺️ 맵을 비웠어요.")
 
 
 class MatchMapView(discord.ui.View):
@@ -626,7 +727,7 @@ class MatchMapView(discord.ui.View):
     누를 수 있는 사람은 결과를 보고한 사람뿐이에요."""
 
     def __init__(self, match_id: str, reporter_id: int, summary: str):
-        super().__init__(timeout=VIEW_TIMEOUT)
+        super().__init__(timeout=MAP_FOLLOWUP_TIMEOUT)
         self._match_id = match_id
         self._reporter_id = reporter_id
         self._summary = summary
@@ -663,189 +764,102 @@ class MatchMapView(discord.ui.View):
 
 
 class TeamSplitView(discord.ui.View):
-    """'다시 섞기'와 '완전 랜덤'을 누를 수 있는 화면이에요. 명령어를 쓴 사람만 조작할 수 있어요."""
+    """`/팀짜기` 메시지에 붙는 버튼들이에요.
 
-    def __init__(
-        self,
-        players: list[team_balance.Rated],
-        candidates: list[tuple[list, list, float]],
-        *,
-        owner_id: int,
-        guild_id: int | None,
-        source_label: str,
-        initial: tuple[list, list],
-        mode: str,
-        diff: float | None,
-        bot: commands.Bot | None = None,
-    ):
-        super().__init__(timeout=VIEW_TIMEOUT)
-        self._players = players
-        self._candidates = candidates
-        self._index = 0
-        self._owner_id = owner_id
-        self._guild_id = guild_id
+    ## 영속 버튼 (timeout=None + 고정 custom_id)
+
+    예전에는 10분 타임아웃이 있는 보통 View였어요. 그래서 팀을 짜고 **게임에 들어가면 10분
+    만에 버튼이 전부 꺼졌고**(발로란트 한 판은 30~45분), 봇을 재시작하면 눌러도 '상호작용
+    실패'가 났어요. 경기가 끝나고 돌아오면 승리 보고를 누를 수가 없어서, 내전 전적이 한 건도
+    쌓이지 못했어요(운영 DB에 `scrim_matches`가 아예 없었어요).
+
+    그래서 영속 버튼으로 바꿨어요. 대신 **이 객체는 상태를 들고 있지 않아요** - 봇 전체에
+    하나만 등록되고(`bot.add_view`), 누른 메시지의 id로 `Session`을 읽어 씁니다.
+    ⚠️ 그래서 `self`에 편성·팀장·맵 같은 걸 담아두면 안 돼요(여러 메시지가 이 하나를 공유해요).
+    """
+
+    def __init__(self, bot: commands.Bot | None = None):
+        super().__init__(timeout=None)
         # 승리 보고 뒤에 HenrikDev를 부를 때 `/전적`의 aiohttp 세션을 빌리려고 들고 있어요.
+        # (봇/세션은 메시지별 상태가 아니라 여기 둬도 괜찮아요)
         self._bot = bot
         self._fallback_session: aiohttp.ClientSession | None = None
-        # 경기 기록 재시도 작업. 참조를 들고 있지 않으면 중간에 치워질 수 있어요.
-        self._stats_retry: asyncio.Task | None = None
-        self._source_label = source_label
-        self.message: discord.Message | None = None
-        # 지금 화면에 떠 있는 편성이에요. 승리 보고는 **이 편성 기준**으로 기록돼요.
-        # (다시 섞기를 누를 때마다 같이 갱신돼요 - 안 그러면 처음 편성으로 기록돼버려요.
-        #  '완전 랜덤'으로 시작하면 candidates[0]과 화면이 다르니 initial을 따로 받아요.)
-        self._current: tuple[list, list] = initial
-        # 지금 편성을 어떻게 만들었는지와 그때 잰 실력 차이예요. 팀장을 정할 때 화면을 다시
-        # 그려야 해서, 제목/색을 고를 근거를 들고 있어야 해요.
-        self._mode = mode
-        self._diff = diff
-        # 양 팀 팀장의 유저 id. 안 정했으면 None이에요.
-        self._captains: tuple[int | None, int | None] = (None, None)
-        # 이번 경기 맵. 승리 보고 때 같이 기록돼요(안 정해도 기록은 돼요).
-        self._map: str | None = None
-        # 결과를 한 번 기록했으면 더 못 바꾸게 잠가요.
-        self._reported = False
+        # 경기 기록 재시도 작업들. 참조를 들고 있지 않으면 중간에 치워질 수 있어요.
+        self._stats_retries: set[asyncio.Task] = set()
 
-    # ManualAdjustView / CaptainPickView가 들여다봐야 하는 값들이에요(상태는 이 View가 쥐고 있어요).
-    @property
-    def current(self) -> tuple[list[team_balance.Rated], list[team_balance.Rated]]:
-        return self._current
-
-    @property
-    def owner_id(self) -> int:
-        return self._owner_id
-
-    @property
-    def reported(self) -> bool:
-        return self._reported
-
-    @property
-    def captains(self) -> tuple[int | None, int | None]:
-        return self._captains
-
-    @property
-    def map_name(self) -> str | None:
-        return self._map
-
-    def build_embed(self) -> discord.Embed:
-        team_a, team_b = self._current
-        return _build_embed(
-            team_a, team_b, self._diff,
-            mode=self._mode, source_label=self._source_label, captains=self._captains,
-            map_name=self._map,
-        )
-
-    def save_state(self, *, winner: int | None = None) -> None:
-        """지금 편성을 그 서버의 '마지막 편성'으로 저장해요(`/팀보기`가 이걸 읽어요).
-
-        DM에서 쓰면 guild_id가 없어서 저장할 곳이 없어요 - 그때는 그냥 넘어가요.
-        저장이 실패해도 팀 나누기 자체는 굴러가야 하니 조용히 로그만 남겨요."""
-        if self._guild_id is None:
-            return
-        team_a, team_b = self._current
-        try:
-            team_store.save_split(
-                self._guild_id,
-                team_a=team_a, team_b=team_b,
-                mode=self._mode, diff=self._diff,
-                source_label=self._source_label,
-                captains=self._captains,
-                map_name=self._map,
-                message_url=self.message.jump_url if self.message else None,
-                winner=winner,
+    async def _session(
+        self, interaction: discord.Interaction, *, require_editable: bool = True
+    ) -> Session | None:
+        """누른 메시지의 상태를 읽어요. 못 읽거나 권한이 없으면 안내하고 None."""
+        session = Session.load(interaction.message.id) if interaction.message else None
+        if session is None:
+            await interaction.response.send_message(
+                "이 팀짜기 기록이 없어요. 너무 오래됐거나 정리됐어요 — "
+                "`/팀짜기`를 새로 써주세요.",
+                ephemeral=True,
             )
-        except Exception:
-            log.warning("마지막 팀 편성 저장 실패 (guild=%s)", self._guild_id, exc_info=True)
-
-    async def apply_manual(
-        self, new_a: list[team_balance.Rated], new_b: list[team_balance.Rated]
-    ) -> float:
-        """손으로 바꾼 편성을 화면에 반영해요. 돌려주는 값은 다시 잰 실력 차이예요.
-
-        `_current`도 같이 갱신해서, 승리 보고가 **바꾼 뒤 명단**으로 기록되게 해요."""
-        diff = team_balance.imbalance(new_a, new_b)
-        self._current = (new_a, new_b)
-        self._mode = team_store.MODE_MANUAL
-        self._diff = diff
-        # 팀장이 반대편으로 넘어갔으면 그 자리는 비워요.
-        self._captains = keep_valid_captains(new_a, new_b, self._captains)
-        if self.message is not None:
-            await self.message.edit(embed=self.build_embed(), view=self)
-        self.save_state()
-        return diff
-
-    async def apply_captains(self, captains: tuple[int | None, int | None]) -> None:
-        """팀장을 화면에 반영해요. 편성은 그대로 두고 명단 표시만 바뀌어요."""
-        team_a, team_b = self._current
-        self._captains = keep_valid_captains(team_a, team_b, captains)
-        if self.message is not None:
-            await self.message.edit(embed=self.build_embed(), view=self)
-        self.save_state()
-
-    async def apply_map(self, map_name: str | None) -> None:
-        """이번 경기 맵을 정해요. 제목에 뜨고, 승리 보고 때 같이 기록돼요."""
-        self._map = map_name
-        if self.message is not None:
-            await self.message.edit(embed=self.build_embed(), view=self)
-        self.save_state()
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self._owner_id:
-            return True
-        await interaction.response.send_message(
-            "`/팀짜기`를 실행한 사람만 편성을 바꾸거나 결과를 기록할 수 있어요. "
-            "직접 `/팀짜기`를 써주세요.",
-            ephemeral=True,
-        )
-        return False
-
-    async def on_timeout(self):
-        # 시간이 지난 화면의 버튼은 눌러도 반응이 없어서, 눌리지 않게 꺼둬요.
-        for item in self.children:
-            item.disabled = True
-        if self.message is not None:
-            try:
-                await self.message.edit(view=self)
-            except discord.HTTPException:
-                pass
-
-    @discord.ui.button(label="다시 섞기", emoji="🔄", style=discord.ButtonStyle.primary)
-    async def reshuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self._index += 1
-        if self._index >= len(self._candidates):
-            # 준비해둔 후보를 다 봤으면 새로 뽑아요(동률 편성은 매번 순서가 섞여요).
-            self._candidates = team_balance.balanced_splits(self._players, limit=CANDIDATE_COUNT)
-            self._index = 0
-        team_a, team_b, diff = self._candidates[self._index]
-        self._current = (team_a, team_b)
-        self._mode = team_store.MODE_BALANCED
-        self._diff = diff
-        # 편성이 통째로 바뀌니 팀장은 지워요(엉뚱한 팀의 팀장으로 남으면 안 돼요).
-        self._captains = (None, None)
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
-        self.save_state()
-
-    @discord.ui.button(label="완전 랜덤", emoji="🎲", style=discord.ButtonStyle.secondary)
-    async def pure_random(self, interaction: discord.Interaction, button: discord.ui.Button):
-        team_a, team_b, diff = team_balance.random_split(self._players)
-        self._current = (team_a, team_b)
-        self._mode = team_store.MODE_RANDOM
-        self._diff = diff
-        self._captains = (None, None)
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
-        self.save_state()
-
-    @discord.ui.button(label="직접 조정", emoji="🔀", style=discord.ButtonStyle.secondary)
-    async def manual_adjust(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self._reported:
+            return None
+        if interaction.user.id != session.owner_id:
+            await interaction.response.send_message(
+                "`/팀짜기`를 실행한 사람만 편성을 바꾸거나 결과를 기록할 수 있어요. "
+                "직접 `/팀짜기`를 써주세요.",
+                ephemeral=True,
+            )
+            return None
+        if require_editable and session.reported:
             await interaction.response.send_message(
                 "이 경기는 이미 결과가 기록돼서 편성을 바꿀 수 없어요. "
                 "다음 경기는 `/팀짜기`를 새로 써주세요.",
                 ephemeral=True,
             )
+            return None
+        return session
+
+    @discord.ui.button(
+        label="다시 섞기", emoji="🔄", style=discord.ButtonStyle.primary,
+        custom_id="akgui:team:reshuffle",
+    )
+    async def reshuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        session = await self._session(interaction)
+        if session is None:
             return
-        team_a, team_b = self._current
-        if max(len(team_a), len(team_b)) > SELECT_LIMIT:
+        # 후보 편성은 저장하지 않고 그때그때 다시 구해요(명단이 같으면 같은 후보가 나와요).
+        # 지금 편성과 다른 걸 보여주려고, 첫 후보가 지금과 같으면 다음 걸 집어요.
+        candidates = team_balance.balanced_splits(session.players, limit=CANDIDATE_COUNT)
+        current_keys = {p.key for p in session.team_a}
+        picked = next(
+            (c for c in candidates if {p.key for p in c[0]} != current_keys), candidates[0]
+        )
+        session.team_a, session.team_b, session.diff = picked
+        session.mode = team_store.MODE_BALANCED
+        # 편성이 통째로 바뀌니 팀장은 지워요(엉뚱한 팀의 팀장으로 남으면 안 돼요).
+        session.captains = (None, None)
+        session.save()
+        await interaction.response.edit_message(embed=session.embed())
+
+    @discord.ui.button(
+        label="완전 랜덤", emoji="🎲", style=discord.ButtonStyle.secondary,
+        custom_id="akgui:team:random",
+    )
+    async def pure_random(self, interaction: discord.Interaction, button: discord.ui.Button):
+        session = await self._session(interaction)
+        if session is None:
+            return
+        session.team_a, session.team_b, session.diff = team_balance.random_split(session.players)
+        session.mode = team_store.MODE_RANDOM
+        session.captains = (None, None)
+        session.save()
+        await interaction.response.edit_message(embed=session.embed())
+
+    @discord.ui.button(
+        label="직접 조정", emoji="🔀", style=discord.ButtonStyle.secondary,
+        custom_id="akgui:team:manual",
+    )
+    async def manual_adjust(self, interaction: discord.Interaction, button: discord.ui.Button):
+        session = await self._session(interaction)
+        if session is None:
+            return
+        if max(len(session.team_a), len(session.team_b)) > SELECT_LIMIT:
             await interaction.response.send_message(
                 f"한 팀이 {SELECT_LIMIT}명을 넘어서 드롭다운에 담을 수 없어요. "
                 "`/팀짜기 인원:`으로 명단을 직접 지정해 주세요.",
@@ -855,36 +869,47 @@ class TeamSplitView(discord.ui.View):
         await interaction.response.send_message(
             "바꿀 사람을 고르고 **✅ 적용**을 눌러주세요.\n"
             "-# 양쪽에서 한 명씩 고르면 맞교환하고, 한쪽만 고르면 그 사람만 반대편으로 옮겨요.",
-            view=ManualAdjustView(self),
+            view=ManualAdjustView(interaction.message, session),
             ephemeral=True,
         )
 
-    @discord.ui.button(label="팀장", emoji="👑", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(
+        label="팀장", emoji="👑", style=discord.ButtonStyle.secondary,
+        custom_id="akgui:team:captain",
+    )
     async def pick_captains(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 결과를 보고하면 이 화면의 버튼이 전부 꺼져서 팀장도 더 못 바꿔요(_report 참고).
-        team_a, team_b = self._current
-        if max(len(team_a), len(team_b)) > SELECT_LIMIT:
+        session = await self._session(interaction)
+        if session is None:
+            return
+        view = CaptainPickView(interaction.message, session)
+        if max(len(session.team_a), len(session.team_b)) > SELECT_LIMIT:
             await interaction.response.send_message(
                 f"한 팀이 {SELECT_LIMIT}명을 넘어서 드롭다운에 담을 수 없어요. "
                 "🎲 무작위로 뽑는 건 인원과 상관없이 돼요.",
                 ephemeral=True,
-                view=CaptainPickView(self),
+                view=view,
             )
             return
         await interaction.response.send_message(
             "팀장을 고르고 **✅ 적용**을 눌러주세요. 🎲를 누르면 무작위로 뽑아요.\n"
             "-# 한쪽만 골라도 돼요(안 고른 팀은 지금 팀장을 그대로 둬요).",
-            view=CaptainPickView(self),
+            view=view,
             ephemeral=True,
         )
 
-    @discord.ui.button(label="맵", emoji="🗺️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(
+        label="맵", emoji="🗺️", style=discord.ButtonStyle.secondary,
+        custom_id="akgui:team:map",
+    )
     async def pick_map(self, interaction: discord.Interaction, button: discord.ui.Button):
+        session = await self._session(interaction)
+        if session is None:
+            return
         # 맵은 편성과 무관해서 🔄/🎲로 팀을 다시 짜도 그대로 남아요.
         await interaction.response.send_message(
             "이번 경기 맵을 골라주세요. 승리 버튼을 누르면 이 맵으로 기록돼요.\n"
             "-# 지금 안 골라도 돼요 — 결과를 보고한 뒤에도 맵을 고를 수 있어요.",
-            view=MapPickView(self),
+            view=MapPickView(interaction.message, session),
             ephemeral=True,
         )
 
@@ -896,57 +921,58 @@ class TeamSplitView(discord.ui.View):
     #
     # 결과를 보고하면 팀 편성을 더 못 바꾸게 막아요. 이미 끝난 경기의 명단이 바뀌면
     # 기록과 화면이 어긋나거든요.
-    @discord.ui.button(label="🅰️ A팀 승리", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(
+        label="🅰️ A팀 승리", style=discord.ButtonStyle.success, row=1,
+        custom_id="akgui:team:win:a",
+    )
     async def report_a(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._report(interaction, winner_index=0)
 
-    @discord.ui.button(label="🅱️ B팀 승리", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(
+        label="🅱️ B팀 승리", style=discord.ButtonStyle.success, row=1,
+        custom_id="akgui:team:win:b",
+    )
     async def report_b(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._report(interaction, winner_index=1)
 
     async def _report(self, interaction: discord.Interaction, winner_index: int):
-        if self._reported:
-            await interaction.response.send_message(
-                "이 경기는 이미 결과가 기록됐어요. 다음 경기는 `/팀짜기`를 새로 써주세요.",
-                ephemeral=True,
-            )
+        session = await self._session(interaction)
+        if session is None:
             return
 
-        team_a, team_b = self._current
-        teams = [team_a, team_b]
+        teams = [session.team_a, session.team_b]
         winners = [p.key for p in teams[winner_index]]
         losers = [p.key for p in teams[1 - winner_index]]
 
         await interaction.response.defer()
-        self._reported = True
 
         match_id = await scrim_record_store.record_match(
             interaction.guild_id, winners, losers,
             reported_by=interaction.user.id,
-            note=f"/팀짜기 · {self._source_label}",
-            map_name=self._map,
+            note=f"/팀짜기 · {session.source_label}",
+            map_name=session.map_name,
         )
         if match_id is None:
-            self._reported = False
             await interaction.followup.send(
                 "한쪽 팀이 비어 있어서 기록하지 못했어요.", ephemeral=True
             )
             return
 
-        # 결과가 나온 뒤에는 편성을 못 바꾸게 잠가요.
-        for item in self.children:
-            item.disabled = True
-        if self.message is not None:
+        # 결과가 나온 뒤에는 편성을 못 바꾸게 잠가요. 영속 버튼은 '꺼진 상태'로 남겨두면
+        # 눌러도 되는 것처럼 보여서, **아예 떼어내요.**
+        session.reported = True
+        session.winner = winner_index
+        session.match_id = match_id
+        session.save()
+        if interaction.message is not None:
             try:
-                await self.message.edit(view=self)
+                await interaction.message.edit(embed=session.embed(), view=None)
             except discord.HTTPException:
-                pass
-
-        # `/팀보기`가 "이 경기는 A팀이 이겼다"까지 보여줄 수 있게 승자도 같이 남겨요.
-        self.save_state(winner=winner_index)
+                log.warning("보고 뒤 버튼을 못 떼어냈어요 (message=%s)",
+                            interaction.message.id, exc_info=True)
 
         won_name = "🅰️ A팀" if winner_index == 0 else "🅱️ B팀"
-        map_text = f" · 🗺️ **{self._map}**" if self._map else ""
+        map_text = f" · 🗺️ **{session.map_name}**" if session.map_name else ""
         lines = [
             f"🏆 **{won_name} 승리**로 기록했어요!{map_text} "
             f"(기록: {interaction.user.display_name})",
@@ -967,7 +993,7 @@ class TeamSplitView(discord.ui.View):
 
         # 맵을 안 정해뒀으면 여기서 고를 수 있게 드롭다운을 붙여요. 기록은 이미 들어갔으니
         # 안 고르고 넘어가도 전적은 남아요(맵별 집계에서만 빠져요).
-        if self._map or not match_id:
+        if session.map_name:
             await interaction.followup.send(summary)
         else:
             map_view = MatchMapView(match_id, interaction.user.id, summary)
@@ -979,8 +1005,7 @@ class TeamSplitView(discord.ui.View):
             )
 
         # 실제 경기 기록(KDA)을 찾아 붙여요. **여기서 실패해도 위 보고는 이미 끝났어요.**
-        if match_id:
-            await self._attach_real_stats(interaction, match_id, winners + losers, winner_index)
+        await self._attach_real_stats(interaction, match_id, winners + losers, winner_index)
 
     async def _attach_real_stats(
         self,
@@ -999,10 +1024,14 @@ class TeamSplitView(discord.ui.View):
         안 그러면 승리 보고 응답이 몇 분 멈춰요."""
         if await self._try_attach_stats(interaction, match_id, roster, winner_index):
             return
-        # 참조를 들고 있어야 가비지 컬렉터가 중간에 치우지 않아요.
-        self._stats_retry = asyncio.create_task(
+        # ⚠️ 참조를 들고 있어야 가비지 컬렉터가 중간에 치우지 않아요. 이 View는 봇 전체에
+        # 하나뿐이라 여러 경기가 동시에 재시도할 수 있어서, 하나짜리 변수가 아니라 set에 담아요
+        # (예전엔 변수 하나여서 뒤에 들어온 경기가 앞의 작업 참조를 덮어썼어요).
+        task = asyncio.create_task(
             self._retry_attach_stats(interaction, match_id, roster, winner_index)
         )
+        self._stats_retries.add(task)
+        task.add_done_callback(self._stats_retries.discard)
 
     async def _try_attach_stats(
         self, interaction: discord.Interaction, match_id: str,
@@ -1057,6 +1086,14 @@ class TeamSplitView(discord.ui.View):
             self._fallback_session = aiohttp.ClientSession()
         return self._fallback_session
 
+    async def close_session(self) -> None:
+        """직접 만든 폴백 세션을 닫아요(cog가 내려갈 때 불러요).
+
+        영속 뷰는 봇이 살아있는 동안 계속 남아서, 안 닫으면 종료할 때 'Unclosed client
+        session' 경고가 나요. `/전적`에서 빌린 세션은 그쪽이 닫으니 건드리지 않아요."""
+        if self._fallback_session is not None and not self._fallback_session.closed:
+            await self._fallback_session.close()
+
 
 async def _announce_achievements(interaction: discord.Interaction, user_ids: list[int]) -> list[str]:
     """경기 참가자들의 업적을 판정하고, 새로 열린 게 있으면 알림 줄을 만들어요.
@@ -1090,6 +1127,20 @@ async def _announce_achievements(interaction: discord.Interaction, user_ids: lis
 class Team(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.view: TeamSplitView | None = None
+
+    async def cog_load(self):
+        # 영속 버튼은 봇이 뜰 때 **한 번 등록**해둬야 재시작 전에 올라간 메시지의 버튼도
+        # 동작해요. 상태는 메시지 id로 찾으니 인스턴스는 하나로 충분해요.
+        self.view = TeamSplitView(self.bot)
+        self.bot.add_view(self.view)
+        removed = await asyncio.to_thread(team_store.prune)
+        if removed:
+            log.info("🧹 오래된 팀짜기 세션 %d개를 정리했어요.", removed)
+
+    async def cog_unload(self):
+        if self.view is not None:
+            await self.view.close_session()
 
     @app_commands.command(
         name="팀짜기",
@@ -1154,29 +1205,38 @@ class Team(commands.Cog):
         if 방식 == "random":
             team_a, team_b, diff = team_balance.random_split(players)
             mode = team_store.MODE_RANDOM
-            candidates = team_balance.balanced_splits(players, limit=CANDIDATE_COUNT)
         else:
-            candidates = team_balance.balanced_splits(players, limit=CANDIDATE_COUNT)
-            team_a, team_b, diff = candidates[0]
+            team_a, team_b, diff = team_balance.balanced_splits(players, limit=1)[0]
             mode = team_store.MODE_BALANCED
 
-        view = TeamSplitView(
-            players, candidates,
-            owner_id=interaction.user.id,
-            guild_id=interaction.guild_id,
-            source_label=source_label,
-            initial=(team_a, team_b),
-            mode=mode,
-            diff=diff,
-            bot=self.bot,
-        )
+        embed = _build_embed(team_a, team_b, diff, mode=mode, source_label=source_label)
         message = await interaction.followup.send(
-            embed=view.build_embed(), view=view, wait=True
+            embed=embed, view=TeamSplitView(self.bot), wait=True
         )
-        view.message = message
-        # 메시지를 받은 뒤에 저장해요 - `/팀보기`에 "원래 메시지로 가기" 링크를 넣으려면
-        # jump_url이 필요하고, 그건 메시지가 올라간 뒤에만 알 수 있어요.
-        view.save_state()
+        # ⚠️ 메시지를 **받은 뒤에** 저장해요. 영속 버튼은 눌린 메시지의 id로 상태를 찾으니까
+        # id를 알기 전엔 저장할 수가 없어요. (jump_url도 이때야 알 수 있어요)
+        def _save():
+            team_store.save_session(
+                message.id,
+                guild_id=interaction.guild_id,
+                owner_id=interaction.user.id,
+                players=players,
+                team_a=team_a, team_b=team_b,
+                mode=mode, diff=diff,
+                source_label=source_label,
+                message_url=message.jump_url,
+            )
+
+        try:
+            _save()
+        except Exception:
+            # 저장이 깨지면 버튼이 "기록이 없어요"만 뱉게 되니, 그건 알려줘야 해요.
+            log.warning("팀짜기 세션 저장 실패 (message=%s)", message.id, exc_info=True)
+            await interaction.followup.send(
+                "⚠️ 편성은 나왔지만 버튼 상태를 저장하지 못했어요. "
+                "버튼이 안 먹으면 `/팀짜기`를 다시 써주세요.",
+                ephemeral=True,
+            )
 
     @app_commands.command(
         name="팀보기",
@@ -1189,7 +1249,7 @@ class Team(commands.Cog):
             )
             return
 
-        record = team_store.get_split(interaction.guild_id)
+        record = team_store.latest_for_guild(interaction.guild_id)
         if record is None:
             await interaction.response.send_message(
                 "아직 짠 팀이 없어요. `/팀짜기`로 먼저 팀을 나눠주세요.", ephemeral=True
