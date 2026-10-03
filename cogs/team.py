@@ -10,6 +10,10 @@
 **티어와 악귀 스코어를 근거로 균형을 맞추는 방식**을 기본으로 바꿨어요. 완전 랜덤도
 버튼/옵션으로 그대로 쓸 수 있어요.
 
+편성이 마음에 안 들면 **🔀 직접 조정** 버튼으로 손을 볼 수 있어요. 양쪽에서 한 명씩 고르면
+맞교환하고, 한쪽만 고르면 그 사람만 반대편으로 옮겨요(ManualAdjustView). 바꾼 명단은
+`_current`에 반영돼서 승리 보고도 **바꾼 뒤 명단**으로 기록돼요.
+
 점수의 출처(둘 다 이미 봇에 쌓여 있는 데이터예요. 새로 API를 부르지 않아요):
   - **티어 역할**: `/전적`을 본인 계정으로 돌리면 자동으로 붙어요(utils/tier_roles.py).
   - **악귀 스코어**: `/전적`이 계산해서 `data/rank_stats.json`에 남겨둔 값(utils/rank_stats_store.py).
@@ -38,6 +42,10 @@ log = logging.getLogger(__name__)
 VIEW_TIMEOUT = 600
 # 미리 뽑아둘 후보 편성 수. '다시 섞기'를 누르면 이 안에서 다음 것을 보여줘요.
 CANDIDATE_COUNT = 10
+# '🔀 직접 조정' 창이 열려 있는 시간이에요. 고르고 누르는 데만 쓰니 짧아도 돼요.
+MANUAL_TIMEOUT = 180
+# 드롭다운 하나에 담을 수 있는 최대 항목 수(디스코드 제한).
+SELECT_LIMIT = 25
 # 이 차이 미만이면 "균형이 잘 맞는다"고 표시해요. (티어 단계 기준)
 GOOD_BALANCE = 0.5
 # `인원`에 적은 멘션을 떼어낼 때 써요. `<@123>`과 `<@!123>` 둘 다 들어와요.
@@ -163,11 +171,18 @@ def _build_embed(
     *,
     balanced: bool,
     source_label: str,
+    manual: bool = False,
 ) -> discord.Embed:
-    embed = discord.Embed(
-        title="🎯 팀 나누기 (실력 균형)" if balanced else "🎲 팀 나누기 (완전 랜덤)",
-        color=0x00B0F4 if balanced else 0x9B7BF0,
-    )
+    # manual은 '🔀 직접 조정'으로 손을 본 편성이에요. 이때도 점수와 실력 차이는 보여줘요 -
+    # 바꾼 뒤에 균형이 얼마나 틀어졌는지 봐야 하니까요.
+    if manual:
+        title, color = "✏️ 팀 나누기 (직접 조정)", 0xF2A900
+    elif balanced:
+        title, color = "🎯 팀 나누기 (실력 균형)", 0x00B0F4
+    else:
+        title, color = "🎲 팀 나누기 (완전 랜덤)", 0x9B7BF0
+    embed = discord.Embed(title=title, color=color)
+    balanced = balanced or manual
     embed.add_field(
         name=_team_field_name("🅰️ 팀 A", team_a, balanced),
         value="\n".join(_player_line(p) for p in team_a) or "-",
@@ -180,12 +195,17 @@ def _build_embed(
     )
 
     if balanced:
-        verdict = "균형이 잘 맞아요" if diff < GOOD_BALANCE else "이 인원에선 이게 가장 균형 잡힌 편성이에요"
-        embed.add_field(
-            name="⚖️ 실력 차이",
-            value=f"약 **{diff:.2f}단계** — {verdict}",
-            inline=False,
-        )
+        if diff < GOOD_BALANCE:
+            verdict = "균형이 잘 맞아요"
+        elif manual:
+            verdict = "직접 맞춘 편성이에요"
+        else:
+            verdict = "이 인원에선 이게 가장 균형 잡힌 편성이에요"
+        value = f"약 **{diff:.2f}단계** — {verdict}"
+        if manual:
+            # 손으로 바꿔놓고 다시 섞기를 누르면 날아가서, 미리 알려줘요.
+            value += "\n-# 🔄 다시 섞기를 누르면 직접 조정한 편성은 사라져요."
+        embed.add_field(name="⚖️ 실력 차이", value=value, inline=False)
 
     estimated = [p.label for p in team_a + team_b if p.estimated]
     if balanced and estimated:
@@ -209,6 +229,120 @@ def _build_embed(
         footer += " · 점수 근거: 티어 역할 + 악귀 스코어(250점 = 1단계, 최대 ±3단계)"
     embed.set_footer(text=footer)
     return embed
+
+
+class _TeamMemberSelect(discord.ui.Select):
+    """한 팀에서 한 명을 고르는 드롭다운이에요. 안 고르는 것도 허용해요(min_values=0)."""
+
+    def __init__(self, placeholder: str, team: list[team_balance.Rated]):
+        super().__init__(
+            placeholder=placeholder,
+            min_values=0,
+            max_values=1,
+            # 드롭다운은 25개까지만 담을 수 있어요. 한 팀이 25명을 넘는 경우는
+            # manual_adjust에서 미리 막아요.
+            options=[
+                discord.SelectOption(label=p.label[:100], value=str(p.key))
+                for p in team[:25]
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        # 고른 값은 self.values에 남아 있어요. 실제 교환은 '✅ 적용'에서 한꺼번에 해요.
+        # 여기서 응답을 안 하면 디스코드가 '상호작용 실패'를 띄워서 defer만 해둬요.
+        await interaction.response.defer()
+
+
+class ManualAdjustView(discord.ui.View):
+    """🅰️/🅱️에서 한 명씩 골라 맞교환하는 화면이에요. 명령어를 쓴 사람에게만 보여요.
+
+    한쪽만 고르면 그 사람만 반대편으로 옮겨요(인원이 한 명씩 어긋나는 건 일부러 허용해요 -
+    관전자가 생겨서 4대6으로 돌리고 싶을 때가 있어요)."""
+
+    def __init__(self, parent: "TeamSplitView"):
+        super().__init__(timeout=MANUAL_TIMEOUT)
+        self._parent = parent
+        team_a, team_b = parent.current
+        self._a_select = _TeamMemberSelect("🅰️ A팀에서 뺄 사람 (안 골라도 돼요)", team_a)
+        self._b_select = _TeamMemberSelect("🅱️ B팀에서 뺄 사람 (안 골라도 돼요)", team_b)
+        self.add_item(self._a_select)
+        self.add_item(self._b_select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self._parent.owner_id:
+            return True
+        await interaction.response.send_message(
+            "`/팀짜기`를 실행한 사람만 조정할 수 있어요.", ephemeral=True
+        )
+        return False
+
+    @discord.ui.button(label="적용", emoji="✅", style=discord.ButtonStyle.success, row=2)
+    async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._parent.reported:
+            await interaction.response.edit_message(
+                content="이 경기는 이미 결과가 기록돼서 편성을 바꿀 수 없어요.", view=None
+            )
+            return
+
+        team_a, team_b = self._parent.current
+        a_out = _pick(team_a, self._a_select.values)
+        b_out = _pick(team_b, self._b_select.values)
+
+        if a_out is None and b_out is None:
+            await interaction.response.send_message(
+                "바꿀 사람을 한 명 이상 골라주세요.", ephemeral=True
+            )
+            return
+
+        new_a, new_b = swap_players(team_a, team_b, a_out, b_out)
+        if not new_a or not new_b:
+            await interaction.response.send_message(
+                "한쪽 팀이 비어버려요. 맞교환으로 바꾸거나, `/팀짜기`를 새로 써주세요.",
+                ephemeral=True,
+            )
+            return
+
+        diff = await self._parent.apply_manual(new_a, new_b)
+
+        if a_out and b_out:
+            summary = f"🔀 **{a_out.label}** ↔ **{b_out.label}** 맞교환했어요."
+        elif a_out:
+            summary = f"🔀 **{a_out.label}** 를 🅱️ B팀으로 옮겼어요."
+        else:
+            summary = f"🔀 **{b_out.label}** 를 🅰️ A팀으로 옮겼어요."
+        await interaction.response.edit_message(
+            content=f"{summary} (실력 차이 약 {diff:.2f}단계)\n"
+                    "-# 더 바꾸려면 위 메시지에서 🔀 직접 조정을 다시 눌러주세요.",
+            view=None,
+        )
+
+
+def _pick(
+    team: list[team_balance.Rated], values: list[str]
+) -> team_balance.Rated | None:
+    """드롭다운이 돌려준 유저 id로 그 팀 안의 참가자를 찾아요."""
+    if not values:
+        return None
+    return next((p for p in team if str(p.key) == values[0]), None)
+
+
+def swap_players(
+    team_a: list[team_balance.Rated],
+    team_b: list[team_balance.Rated],
+    a_out: team_balance.Rated | None,
+    b_out: team_balance.Rated | None,
+) -> tuple[list[team_balance.Rated], list[team_balance.Rated]]:
+    """A에서 뺀 사람과 B에서 뺀 사람을 서로 보내요. 한쪽이 None이면 한 명만 이동해요.
+
+    원본 리스트는 건드리지 않고 새 리스트를 돌려줘요 - 원본을 제자리에서 고치면
+    `_candidates`에 들어있는 후보 편성까지 같이 망가져요(같은 리스트를 공유해요)."""
+    new_a = [p for p in team_a if p is not a_out]
+    new_b = [p for p in team_b if p is not b_out]
+    if b_out is not None:
+        new_a.append(b_out)
+    if a_out is not None:
+        new_b.append(a_out)
+    return new_a, new_b
 
 
 class TeamSplitView(discord.ui.View):
@@ -236,6 +370,37 @@ class TeamSplitView(discord.ui.View):
         self._current: tuple[list, list] = initial
         # 결과를 한 번 기록했으면 더 못 바꾸게 잠가요.
         self._reported = False
+
+    # ManualAdjustView가 들여다봐야 하는 값들이에요(상태는 이 View가 쥐고 있어요).
+    @property
+    def current(self) -> tuple[list[team_balance.Rated], list[team_balance.Rated]]:
+        return self._current
+
+    @property
+    def owner_id(self) -> int:
+        return self._owner_id
+
+    @property
+    def reported(self) -> bool:
+        return self._reported
+
+    async def apply_manual(
+        self, new_a: list[team_balance.Rated], new_b: list[team_balance.Rated]
+    ) -> float:
+        """손으로 바꾼 편성을 화면에 반영해요. 돌려주는 값은 다시 잰 실력 차이예요.
+
+        `_current`도 같이 갱신해서, 승리 보고가 **바꾼 뒤 명단**으로 기록되게 해요."""
+        diff = team_balance.imbalance(new_a, new_b)
+        self._current = (new_a, new_b)
+        if self.message is not None:
+            await self.message.edit(
+                embed=_build_embed(
+                    new_a, new_b, diff,
+                    balanced=True, source_label=self._source_label, manual=True,
+                ),
+                view=self,
+            )
+        return diff
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self._owner_id:
@@ -282,6 +447,30 @@ class TeamSplitView(discord.ui.View):
                 team_a, team_b, diff, balanced=False, source_label=self._source_label
             ),
             view=self,
+        )
+
+    @discord.ui.button(label="직접 조정", emoji="🔀", style=discord.ButtonStyle.secondary)
+    async def manual_adjust(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._reported:
+            await interaction.response.send_message(
+                "이 경기는 이미 결과가 기록돼서 편성을 바꿀 수 없어요. "
+                "다음 경기는 `/팀짜기`를 새로 써주세요.",
+                ephemeral=True,
+            )
+            return
+        team_a, team_b = self._current
+        if max(len(team_a), len(team_b)) > SELECT_LIMIT:
+            await interaction.response.send_message(
+                f"한 팀이 {SELECT_LIMIT}명을 넘어서 드롭다운에 담을 수 없어요. "
+                "`/팀짜기 인원:`으로 명단을 직접 지정해 주세요.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "바꿀 사람을 고르고 **✅ 적용**을 눌러주세요.\n"
+            "-# 양쪽에서 한 명씩 고르면 맞교환하고, 한쪽만 고르면 그 사람만 반대편으로 옮겨요.",
+            view=ManualAdjustView(self),
+            ephemeral=True,
         )
 
     # ── 경기 결과 보고 ─────────────────────────────────────────────

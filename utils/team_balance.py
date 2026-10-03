@@ -107,6 +107,13 @@ def _imbalance(team_a: list[Rated], team_b: list[Rated]) -> float:
     return abs(mean_a - mean_b)
 
 
+def imbalance(team_a: list[Rated], team_b: list[Rated]) -> float:
+    """손으로 바꾼 편성의 실력 차이를 다시 재요(`/팀짜기`의 🔀 직접 조정에서 써요).
+
+    후보 탐색이 돌려주는 diff와 같은 척도예요 - 그래야 조정 전후를 나란히 비교할 수 있어요."""
+    return _imbalance(team_a, team_b)
+
+
 def _exhaustive_candidates(players: list[Rated]) -> list[tuple[float, list[int], list[int]]]:
     """모든 편성을 다 따져서 (차이, A인덱스, B인덱스) 목록을 만들어요.
 

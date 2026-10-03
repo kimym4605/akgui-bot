@@ -57,8 +57,15 @@ async def main():
         print(f"  /업적 파라미터: {params}")
         choices = next((p.choices for p in ach_cmd.parameters if p.name == "분야"), [])
         print(f"  /업적 분야 선택지: {len(choices)}개")
-        if len(choices) != 7:
-            failed.append("/업적 분야 선택지 수")
+        from utils import achievement_data
+        # 6개 = CATEGORIES(출석·코인·내전·발로란트·미션·그 외).
+        # 2026-09-30 포켓몬 분야가 빠져서 7 → 6이 됐어요. 분야를 더하거나 뺄 땐
+        # 이 숫자와 #🤖-봇-사용법 안내문의 업적 개수도 같이 맞춰주세요.
+        if len(choices) != len(achievement_data.CATEGORIES):
+            failed.append(
+                f"/업적 분야 선택지 수 (선택지 {len(choices)}개 "
+                f"≠ CATEGORIES {len(achievement_data.CATEGORIES)}개)"
+            )
 
     # /팀짜기 뷰에 승리 보고 버튼이 붙었는지
     from cogs.team import TeamSplitView
@@ -68,10 +75,15 @@ async def main():
         for i in range(1, 5)
     ]
     candidates = team_balance.balanced_splits(players, limit=3)
-    view = TeamSplitView(players, candidates, owner_id=1, channel_name="테스트",
+    view = TeamSplitView(players, candidates, owner_id=1, source_label="🎧 테스트",
                          initial=(candidates[0][0], candidates[0][1]))
     labels = [item.label for item in view.children]
     print(f"\n  /팀짜기 버튼: {labels}")
+    if not any("직접 조정" in (l or "") for l in labels):
+        failed.append("직접 조정 버튼")
+    # 한 줄에 5개까지만 들어가요. 버튼을 더 늘리면 여기서 걸려요.
+    if len(view.children) > 5:
+        failed.append(f"/팀짜기 버튼이 {len(view.children)}개 (한 줄 한도 초과)")
     if not any("A팀 승리" in (l or "") for l in labels):
         failed.append("A팀 승리 버튼")
     if not any("B팀 승리" in (l or "") for l in labels):
