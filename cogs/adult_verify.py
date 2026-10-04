@@ -4,7 +4,7 @@
 - /성인인증 치면 생년월일(YYYYMMDD)을 입력받는 모달이 떠요.
 - 1차: 봇이 만 나이를 자동 계산해서 19세 미만이면 여기서 바로 안내하고 끝나요. (매니저한테 안 감)
 - 2차: 19세 이상이면 매니저 관리방(MANAGER_CHANNEL_ID)에 요청이 올라가고,
-  매니저/총매니저/방장이 버튼으로 승인하면 그때 "성인" 역할이 부여돼요.
+  매니저/부방장/방장이 버튼으로 승인하면 그때 "성인" 역할이 부여돼요.
 - ⚠️ 자가 신고(생년월일 입력) 방식이라 100% 실제 나이를 보장하진 않아요.
   통신사 본인인증(PASS 등)은 사업자 등록/건당 비용이 필요해서 이 프로젝트 규모에는 맞지 않아
   "자동 계산 + 사람 검토" 이중 확인으로 최소한의 필터링을 해요.
@@ -78,7 +78,7 @@ class AdultApprovalView(discord.ui.View):
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
         if not isinstance(member, discord.Member) or not _is_manager_or_senior(member):
-            await interaction.response.send_message("❌ 매니저/총매니저/방장만 사용할 수 있어요.", ephemeral=True)
+            await interaction.response.send_message("❌ 매니저/부방장/방장만 사용할 수 있어요.", ephemeral=True)
             return
 
         applicant = await _resolve_member(interaction.guild, self.applicant_id)
@@ -114,7 +114,7 @@ class AdultApprovalView(discord.ui.View):
     async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
         if not isinstance(member, discord.Member) or not _is_manager_or_senior(member):
-            await interaction.response.send_message("❌ 매니저/총매니저/방장만 사용할 수 있어요.", ephemeral=True)
+            await interaction.response.send_message("❌ 매니저/부방장/방장만 사용할 수 있어요.", ephemeral=True)
             return
 
         applicant = await _resolve_member(interaction.guild, self.applicant_id)

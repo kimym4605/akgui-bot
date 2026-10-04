@@ -70,7 +70,7 @@ async def _resolve_member(guild: discord.Guild, user_id: int):
 
 def _mention_seniors(guild: discord.Guild) -> str:
     roles = [guild.get_role(rid) for rid in SENIOR_ROLE_IDS]
-    return " ".join(role.mention for role in roles if role) or "총매니저/방장"
+    return " ".join(role.mention for role in roles if role) or "부방장/방장"
 
 
 def _mention_managers(guild: discord.Guild) -> str:
@@ -116,7 +116,7 @@ async def _send_guidance_prompt(interaction: discord.Interaction):
 
 
 # ============================================================
-# 2. 최종 승인 단계 (총매니저/방장 전용)
+# 2. 최종 승인 단계 (부방장/방장 전용)
 # ============================================================
 class FinalApprovalView(discord.ui.View):
     def __init__(self, applicant_id: int):
@@ -135,7 +135,7 @@ class FinalApprovalView(discord.ui.View):
     @discord.ui.button(label="🏆 최종 승인", style=discord.ButtonStyle.success, custom_id="onboarding:final_approve")
     async def final_approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not isinstance(interaction.user, discord.Member) or not _is_senior(interaction.user):
-            await interaction.response.send_message("❌ 총매니저/방장만 최종 승인할 수 있어요.", ephemeral=True)
+            await interaction.response.send_message("❌ 부방장/방장만 최종 승인할 수 있어요.", ephemeral=True)
             return
         guild = interaction.guild
         applicant = await _resolve_member(guild, self.applicant_id)
@@ -161,7 +161,7 @@ class FinalApprovalView(discord.ui.View):
     @discord.ui.button(label="❌ 최종 거절", style=discord.ButtonStyle.danger, custom_id="onboarding:final_reject")
     async def final_reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not isinstance(interaction.user, discord.Member) or not _is_senior(interaction.user):
-            await interaction.response.send_message("❌ 총매니저/방장만 최종 거절할 수 있어요.", ephemeral=True)
+            await interaction.response.send_message("❌ 부방장/방장만 최종 거절할 수 있어요.", ephemeral=True)
             return
         guild = interaction.guild
         applicant = await _resolve_member(guild, self.applicant_id)
@@ -179,7 +179,7 @@ class FinalApprovalView(discord.ui.View):
 
 
 # ============================================================
-# 3. 1차 요청 단계 (매니저는 추천만, 총매니저/방장은 즉시 확정)
+# 3. 1차 요청 단계 (매니저는 추천만, 부방장/방장은 즉시 확정)
 # ============================================================
 class RequestApprovalView(discord.ui.View):
     def __init__(self, applicant_id: int):
@@ -206,7 +206,7 @@ class RequestApprovalView(discord.ui.View):
                 await interaction.response.send_message("❌ 봇에게 역할 관리 권한이 없어요.", ephemeral=True)
                 return
             await interaction.response.edit_message(
-                content=f"🏆 {interaction.user.mention}님(총매니저/방장)이 **{applicant.mention}** 님을 바로 승인했어요!",
+                content=f"🏆 {interaction.user.mention}님(부방장/방장)이 **{applicant.mention}** 님을 바로 승인했어요!",
                 view=self,
             )
             try:
@@ -215,7 +215,7 @@ class RequestApprovalView(discord.ui.View):
                 pass
         else:
             await interaction.response.edit_message(
-                content=f"❌ {interaction.user.mention}님(총매니저/방장)이 **{applicant.mention}** 님을 바로 거절했어요.",
+                content=f"❌ {interaction.user.mention}님(부방장/방장)이 **{applicant.mention}** 님을 바로 거절했어요.",
                 view=self,
             )
             try:
@@ -243,7 +243,7 @@ class RequestApprovalView(discord.ui.View):
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
         if not isinstance(member, discord.Member) or not _is_manager_or_senior(member):
-            await interaction.response.send_message("❌ 매니저/총매니저/방장만 사용할 수 있어요.", ephemeral=True)
+            await interaction.response.send_message("❌ 매니저/부방장/방장만 사용할 수 있어요.", ephemeral=True)
             return
         if _is_senior(member):
             await self._finalize_as_senior(interaction, approve=True)
@@ -254,7 +254,7 @@ class RequestApprovalView(discord.ui.View):
     async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         member = interaction.user
         if not isinstance(member, discord.Member) or not _is_manager_or_senior(member):
-            await interaction.response.send_message("❌ 매니저/총매니저/방장만 사용할 수 있어요.", ephemeral=True)
+            await interaction.response.send_message("❌ 매니저/부방장/방장만 사용할 수 있어요.", ephemeral=True)
             return
         if _is_senior(member):
             await self._finalize_as_senior(interaction, approve=False)
@@ -590,7 +590,7 @@ class Onboarding(commands.Cog):
             description=(
                 f"{rules_text}\n\n"
                 "규칙을 모두 읽으셨다면 아래 **'규칙을 모두 확인했어요'** 버튼을 눌러주세요.\n"
-                "누르면 매니저가 확인하고, 총매니저/방장이 최종 승인해드려요!"
+                "누르면 매니저가 확인하고, 부방장/방장이 최종 승인해드려요!"
             ),
             color=0x2ECC71,
         )
