@@ -27,7 +27,11 @@ from utils.title_store import TITLE_DAYS, TITLE_PRICE
 log = logging.getLogger(__name__)
 
 # 이 역할 바로 위에 칭호를 놓아요. 없으면 위치 조정을 건너뛰어요(역할은 정상 생성돼요).
-ANCHOR_ROLE_NAME = "😈 악귀"
+#
+# 2026-10-05: "😈 악귀"에서 "⚔️ 타격대"로 바꿨어요. 역할 순서를 정리하면서 "😈 악귀"(전원이 가진
+# 멤버 역할)를 티어 역할들 **아래**로 내렸는데, 그러면 앵커 바로 위 = 티어 묶음 아래가 되어서
+# 칭호 색이 티어 색에 가려져요. "⚔️ 타격대"는 티어·포지션 묶음의 맨 위라 그 위가 안전해요.
+ANCHOR_ROLE_NAME = "⚔️ 타격대"
 
 MAX_NAME_LENGTH = 20
 HEX_PATTERN = re.compile(r"^#?([0-9a-fA-F]{6})$")
