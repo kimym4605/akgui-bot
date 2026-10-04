@@ -223,6 +223,10 @@ class Mission(commands.Cog):
                 f"/valorant/v3/matches/{DEFAULT_REGION}/{name}/{tag}",
                 headers={"Authorization": api_key},
                 params={"size": MATCH_FETCH_SIZE},
+                # 이건 30분마다 백그라운드로 도는 거라 사람이 앞에서 기다리지 않아요.
+                # 기본값(15초)으로 두면 "60초 뒤에 오라"는 429에서 그냥 포기해버려서,
+                # 2026-10-05 실측 기준 전적 조회의 64%가 이렇게 실패하고 있었어요.
+                max_retry_wait=90.0,
             )
         except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError):
             log.warning("전적 조회 중 네트워크 오류 (%s#%s)", name, tag, exc_info=True)
