@@ -28,7 +28,6 @@ from discord.ext import commands
 from utils import bet_store, coin_wallet
 from utils.bet_store import (
     MAX_WAGER,
-    MIN_WAGER,
     STATUS_CANCELLED,
     STATUS_LOCKED,
     STATUS_OPEN,
@@ -140,49 +139,15 @@ class Betting(commands.Cog):
         if doc is None:
             await interaction.followup.send("이 채널에 진행 중인 베팅이 없어요.", ephemeral=True)
             return
-        if doc["status"] != STATUS_OPEN:
-            await interaction.followup.send("이미 마감된 베팅이에요.", ephemeral=True)
-            return
-
-        if not (MIN_WAGER <= amount <= MAX_WAGER):
-            await interaction.followup.send(
-                f"{MIN_WAGER}~{MAX_WAGER}개 사이로 걸어주세요.", ephemeral=True
-            )
-            return
-
-        # 이미 건 팀과 다른 팀에는 못 걸어요(양쪽에 걸면 무조건 이득이라 베팅이 아니게 돼요).
-        my_team, my_total = bet_store.user_wager(doc, interaction.user.id)
-        if my_team is not None and my_team != team:
-            await interaction.followup.send(
-                f"이미 **{_team_name(doc, my_team)}**에 {my_total}개를 걸었어요. 양쪽에는 못 걸어요.",
-                ephemeral=True,
-            )
-            return
-        if my_total + amount > MAX_WAGER:
-            await interaction.followup.send(
-                f"한 경기에 최대 {MAX_WAGER}개까지예요. (지금까지 {my_total}개)", ephemeral=True
-            )
-            return
-
-        # ⚠️ 코인부터 빼요(에스크로). 기록을 먼저 남기면 잔액이 모자란 베팅이 들어가요.
-        if not await coin_wallet.spend(interaction.user.id, amount, reason="내전베팅"):
-            balance = await coin_wallet.get_balance(interaction.user.id)
-            await interaction.followup.send(
-                f"악귀코인이 부족해요. 지금 **{balance}개** 갖고 있어요.", ephemeral=True
-            )
-            return
-
-        if not await bet_store.add_wager(doc["_id"], interaction.user.id, team, amount):
-            # 그 찰나에 마감됐어요. 코인을 돌려줘요.
-            await coin_wallet.add(interaction.user.id, amount, reason="베팅 마감으로 환불")
-            await interaction.followup.send(
-                "방금 베팅이 마감돼서 취소했어요. 코인은 돌려드렸어요.", ephemeral=True
-            )
+        # 검증·에스크로·기록은 bet_store.place_wager가 맡아요(`/팀짜기` 🎲 버튼도 같은 함수를 써요).
+        ok, message = await bet_store.place_wager(doc, interaction.user.id, team, amount)
+        if not ok:
+            await interaction.followup.send(message, ephemeral=True)
             return
 
         doc = await bet_store.get(doc["_id"])
         await interaction.followup.send(
-            content=f"{interaction.user.mention}님이 **{_team_name(doc, team)}**에 **{amount}코인**을 걸었어요!",
+            content=f"{interaction.user.mention}님이 {message}",
             embed=_build_status_embed(doc, interaction.guild),
         )
 
@@ -263,14 +228,12 @@ class Betting(commands.Cog):
         await self._settle(interaction, doc, values[0])
 
     async def _settle(self, interaction: discord.Interaction, doc: dict, winner: int):
-        # ⚠️ 상태를 먼저 settled로 바꿔요. 두 팀장이 동시에 입력하면 정산이 두 번 돌 수 있어요.
-        if not await bet_store.set_status(doc["_id"], STATUS_SETTLED, STATUS_LOCKED):
+        # 상태 전환 + 지급은 bet_store.settle이 맡아요(`/팀짜기` 승리 버튼도 같은 함수를 써요).
+        result = await bet_store.settle(doc["_id"], winner, expected=STATUS_LOCKED)
+        if result is None:
             await interaction.followup.send("이미 정산된 베팅이에요.", ephemeral=True)
             return
-
-        payouts, refunded = bet_store.compute_payouts(doc, winner)
-        for user_id, amount in payouts.items():
-            await coin_wallet.add(user_id, amount, reason=f"베팅정산:{'환불' if refunded else '승리'}")
+        payouts, refunded = result
 
         t1, t2 = bet_store.totals(doc)
         if refunded:
@@ -289,8 +252,7 @@ class Betting(commands.Cog):
             )
 
         embed = discord.Embed(title="🎲 베팅 정산 완료", description=description[:4000], color=0x2ECC71)
-        await interaction.followup.send(embed=embed)
-        log.info("🎲 베팅 정산: channel=%s winner=%s payouts=%s", doc["channelId"], winner, payouts)
+        await interaction.followup.send(embed=embed)   # 정산 로그는 bet_store.settle이 남겨요.
 
     # ------------------------------------------------------------------
     @app_commands.command(name="베팅취소", description="베팅을 취소하고 건 코인을 전부 돌려줘요.")

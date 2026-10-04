@@ -52,6 +52,7 @@ from discord.ext import commands
 
 from utils import (
     achievement_store,
+    bet_store,
     rank_stats_store,
     riot_account_store,
     scrim_record_store,
@@ -763,6 +764,84 @@ class MatchMapView(discord.ui.View):
                 pass
 
 
+class _WagerModal(discord.ui.Modal, title="🎲 얼마나 거시겠어요?"):
+    """팀을 고른 뒤 금액만 받는 창이에요. 팀을 글자로 받으면 오타가 나서 버튼으로 받아요."""
+
+    amount = discord.ui.TextInput(
+        label="걸 악귀코인",
+        placeholder=f"{bet_store.MIN_WAGER} ~ {bet_store.MAX_WAGER} 사이 숫자",
+        required=True,
+        max_length=4,
+    )
+
+    def __init__(self, bet_id, team: int, team_label: str):
+        super().__init__()
+        self._bet_id = bet_id
+        self._team = team
+        self.amount.label = f"{team_label}에 걸 악귀코인"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.amount.value).strip()
+        if not raw.isdigit():
+            await interaction.response.send_message("숫자만 적어주세요.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        # 모달을 띄워둔 사이에 마감됐을 수 있어서 **지금 다시 읽어요.**
+        doc = await bet_store.get(self._bet_id)
+        if doc is None:
+            await interaction.followup.send("베팅을 찾을 수 없어요.", ephemeral=True)
+            return
+
+        ok, message = await bet_store.place_wager(doc, interaction.user.id, self._team, int(raw))
+        if not ok:
+            await interaction.followup.send(message, ephemeral=True)
+            return
+
+        doc = await bet_store.get(self._bet_id)
+        t1, t2 = bet_store.totals(doc)
+        await interaction.followup.send(
+            f"✅ {message}\n-# 지금 판돈 — {bet_store.team_name(doc, 1)} {t1}코인 · "
+            f"{bet_store.team_name(doc, 2)} {t2}코인",
+            ephemeral=True,
+        )
+        # 건 사람이 누군지 채널에도 알려줘야 베팅이 눈에 보여요(판이 커지는 재미).
+        if interaction.channel is not None:
+            try:
+                await interaction.channel.send(
+                    f"🎲 {interaction.user.mention}님이 {message}"
+                    f"\n-# 판돈 {t1 + t2}코인 · 경기 결과가 보고되면 자동 정산돼요"
+                )
+            except discord.HTTPException:
+                log.warning("베팅 알림을 채널에 못 보냈어요", exc_info=True)
+
+
+class BetPanelView(discord.ui.View):
+    """🎲 버튼을 누른 사람에게만 보이는 패널이에요(ephemeral).
+
+    팀짜기 메시지 자체에 팀별 버튼을 더 붙이면 버튼이 7개가 되어 복잡해져서, 한 단계 안으로
+    넣었어요. 이 패널은 누른 사람만 보니까 `timeout`을 둬도 안전해요(영속일 필요가 없어요).
+    """
+
+    def __init__(self, bet_id, team1_label: str, team2_label: str):
+        super().__init__(timeout=300)
+        self._bet_id = bet_id
+        self.team1.label = f"🅰️ {team1_label}"
+        self.team2.label = f"🅱️ {team2_label}"
+
+    @discord.ui.button(label="🅰️", style=discord.ButtonStyle.primary)
+    async def team1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            _WagerModal(self._bet_id, 1, button.label or "🅰️ A팀")
+        )
+
+    @discord.ui.button(label="🅱️", style=discord.ButtonStyle.primary)
+    async def team2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            _WagerModal(self._bet_id, 2, button.label or "🅱️ B팀")
+        )
+
+
 class TeamSplitView(discord.ui.View):
     """`/팀짜기` 메시지에 붙는 버튼들이에요.
 
@@ -922,6 +1001,69 @@ class TeamSplitView(discord.ui.View):
     # 결과를 보고하면 팀 편성을 더 못 바꾸게 막아요. 이미 끝난 경기의 명단이 바뀌면
     # 기록과 화면이 어긋나거든요.
     @discord.ui.button(
+        label="베팅", emoji="🎲", style=discord.ButtonStyle.secondary, row=1,
+        custom_id="akgui:team:bet",
+    )
+    async def bet(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """악귀코인을 거는 버튼이에요. **편성 버튼과 달리 누구나 누를 수 있어요.**
+
+        코인이 849개 풀려 있는데 쓸 데가 없어서(2026-10-05 기준 소비 5%), 이미 만들어둔
+        베팅 기능이 `/베팅개설`→`/베팅`→`/베팅마감`→`/베팅결과` 네 단계라 아무도 안 썼어요.
+        여기 붙여서 **내전 흐름 안에서 자연스럽게 보이게** 했어요.
+        """
+        session = Session.load(interaction.message.id) if interaction.message else None
+        if session is None:
+            await interaction.response.send_message(
+                "이 팀짜기 기록이 없어요. `/팀짜기`를 새로 써주세요.", ephemeral=True
+            )
+            return
+        if session.reported:
+            await interaction.response.send_message(
+                "이미 결과가 나온 경기예요.", ephemeral=True
+            )
+            return
+
+        doc = await bet_store.active(interaction.channel_id)
+        if doc is None:
+            # 아직 없으면 이 팀짜기에 묶인 베팅을 열어요. 팀장을 안 뽑았으면 `/팀짜기`를 쓴
+            # 사람을 양쪽 팀장으로 넣어요(팀장 자리는 `/베팅결과` 수동 보고용이고, 보통은
+            # 승리 보고 버튼이 자동 정산해요).
+            cap_a, cap_b = session.captains
+            doc = await bet_store.create(
+                interaction.guild_id, interaction.channel_id, interaction.user.id,
+                cap_a or session.owner_id, cap_b or session.owner_id,
+                "A팀", "B팀",
+                source_message_id=interaction.message.id,
+            )
+            if doc is None:
+                await interaction.response.send_message(
+                    "이 채널에 이미 다른 베팅이 진행 중이에요.", ephemeral=True
+                )
+                return
+            log.info("🎲 팀짜기에서 베팅 개설: message=%s", interaction.message.id)
+
+        if doc["status"] != bet_store.STATUS_OPEN:
+            await interaction.response.send_message(
+                "베팅이 이미 마감됐어요.", ephemeral=True
+            )
+            return
+
+        t1, t2 = bet_store.totals(doc)
+        my_team, my_total = bet_store.user_wager(doc, interaction.user.id)
+        mine = (
+            f"\n지금 **{bet_store.team_name(doc, my_team)}**에 {my_total}코인 걸어둔 상태예요."
+            if my_team else ""
+        )
+        await interaction.response.send_message(
+            f"🎲 **어느 팀에 거시겠어요?**\n"
+            f"판돈 — 🅰️ A팀 **{t1}코인** · 🅱️ B팀 **{t2}코인**\n"
+            f"진 쪽 판돈을 이긴 쪽이 건 비율대로 나눠 가져요. "
+            f"한 사람당 최대 {bet_store.MAX_WAGER}코인이에요.{mine}",
+            view=BetPanelView(doc["_id"], "A팀", "B팀"),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
         label="🅰️ A팀 승리", style=discord.ButtonStyle.success, row=1,
         custom_id="akgui:team:win:a",
     )
@@ -987,6 +1129,14 @@ class TeamSplitView(discord.ui.View):
             lines.append("")
             lines.extend(unlocked_lines)
 
+        # 이 팀짜기에서 연 베팅이 있으면 같이 정산해요. 예전엔 `/베팅마감` + 양 팀장의
+        # `/베팅결과`까지 받아야 해서 2번 쓰이고 멈췄어요. 승리를 보고하는 이 순간이
+        # 곧 결과라서, 여기서 끝내요.
+        bet_lines = await self._settle_bet(interaction, winner_index)
+        if bet_lines:
+            lines.append("")
+            lines.extend(bet_lines)
+
         lines.append("")
         lines.append("-# `/내전전적`으로 내 승패·연승·맵별 성적·KDA를 볼 수 있어요.")
         summary = "\n".join(lines)
@@ -1006,6 +1156,45 @@ class TeamSplitView(discord.ui.View):
 
         # 실제 경기 기록(KDA)을 찾아 붙여요. **여기서 실패해도 위 보고는 이미 끝났어요.**
         await self._attach_real_stats(interaction, match_id, winners + losers, winner_index)
+
+    async def _settle_bet(self, interaction: discord.Interaction, winner_index: int) -> list[str]:
+        """이 팀짜기에서 연 베팅을 정산하고, 보고 메시지에 붙일 줄들을 돌려줘요.
+
+        ⚠️ **이 팀짜기에서 연 베팅만** 건드려요(`sourceMessageId` 대조). 누가 `/베팅개설`로
+        따로 연 베팅이 같은 채널에 있을 수 있는데, 그걸 엉뚱하게 정산하면 안 되니까요.
+        ⚠️ 여기서 실패해도 **경기 기록은 이미 끝났어요.** 예외를 먹고 빈 목록을 돌려줘요.
+        """
+        try:
+            doc = await bet_store.active(interaction.channel_id)
+            if doc is None:
+                return []
+            source = doc.get("sourceMessageId")
+            if not source or str(source) != str(interaction.message.id if interaction.message else ""):
+                return []
+
+            wagers = doc.get("wagers", [])
+            winner = winner_index + 1   # 베팅은 1/2, 팀 인덱스는 0/1이에요.
+
+            if not wagers:
+                # 아무도 안 걸었으면 조용히 닫기만 해요(빈 정산 메시지는 지저분해요).
+                await bet_store.set_status(doc["_id"], bet_store.STATUS_CANCELLED,
+                                           bet_store.STATUS_OPEN)
+                return []
+
+            result = await bet_store.settle(doc["_id"], winner, expected=bet_store.STATUS_OPEN)
+            if result is None:
+                return []
+            payouts, refunded = result
+
+            t1, t2 = bet_store.totals(doc)
+            if refunded:
+                return [f"🎲 **베팅 전원 환불** — 이긴 팀에 아무도 걸지 않았어요. (판돈 {t1 + t2}코인)"]
+            got = [f"<@{uid}> **+{amount}코인**"
+                   for uid, amount in sorted(payouts.items(), key=lambda x: -x[1])]
+            return [f"🎲 **베팅 정산** (판돈 {t1 + t2}코인) — " + ", ".join(got)]
+        except Exception:
+            log.warning("베팅 자동 정산에 실패했어요 (경기 기록은 이미 끝났어요)", exc_info=True)
+            return []
 
     async def _attach_real_stats(
         self,
