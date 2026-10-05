@@ -629,6 +629,12 @@ class Rank(commands.Cog):
                     role_sync_note = (
                         f"🔄 티어 역할을 **{sync_result['previous']} → {sync_result['role'].name}**(으)로 갱신했어요."
                     )
+                elif sync_result["status"] == "cleaned":
+                    removed = " · ".join(sync_result.get("removed") or [])
+                    role_sync_note = (
+                        f"🧹 티어 역할은 **{sync_result['role'].name}** 그대로예요. "
+                        f"같이 달려 있던 옛 역할({removed})은 치웠어요."
+                    )
                 # status가 "unchanged"면 이미 맞는 상태라 별도 안내 없이 넘어가요.
             except discord.Forbidden:
                 role_sync_note = "⚠️ 봇에게 역할 관리 권한이 없어서 티어 역할을 갱신하지 못했어요."

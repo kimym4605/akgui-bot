@@ -181,6 +181,19 @@ async def sync_tier_role(member: discord.Member, tier_name: str, icon_bytes: Opt
 
     if display_name in previous_names:
         matching = next(r for r in current_roles if r.name == display_name)
+        # 🚨 맞는 역할을 이미 갖고 있어도, **다른 티어 역할이 같이 달려 있으면 치워야** 해요.
+        # 예전엔 여기서 그냥 돌아갔어요. 그래서 티어 역할 2개가 달린 사람은 `/전적`을 몇 번
+        # 돌려도 영구히 그대로였어요(2026-10-05 실측: 2명이 플래티넘 1 + 골드 1을 동시 보유).
+        # `member_tier_index()`가 max()를 쓰니 밸런싱은 안 깨졌지만, 역할 색이 엉뚱하게 보여요.
+        stale = [r for r in current_roles if r.name != display_name]
+        if stale:
+            await member.remove_roles(*stale, reason="티어 역할 중복 정리")
+            return {
+                "role": matching,
+                "status": "cleaned",
+                "previous": display_name,
+                "removed": [r.name for r in stale],
+            }
         return {"role": matching, "status": "unchanged", "previous": display_name}
 
     new_role = await get_or_create_tier_role(member.guild, tier_name, icon_bytes=icon_bytes)
