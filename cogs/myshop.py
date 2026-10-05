@@ -45,6 +45,7 @@ from discord.ext import commands, tasks
 from utils.channel_check import restrict_to_channel
 from utils import (
     atomic_json,
+    notify_prefs,
     riot_auth,
     riot_session_store,
     valorant_accessories,
@@ -1627,7 +1628,10 @@ class MyShop(commands.Cog):
             color=0xFF4655,
         )
         check_time = WISHLIST_CHECK_TIME.strftime("%H:%M")
-        if not riot_session_store.has_session(interaction.user.id):
+        if not await notify_prefs.is_enabled(interaction.user.id, "wishlist_dm"):
+            # 본인이 끈 거지만, 담아두고 "왜 안 와요?" 하는 걸 막으려고 여기서 알려줘요.
+            embed.set_footer(text="🔕 /알림설정에서 위시리스트 DM을 꺼둔 상태예요. 지금은 알림이 안 가요.")
+        elif not riot_session_store.has_session(interaction.user.id):
             embed.set_footer(text="⚠️ 자동 알림을 받으려면 /오상에서 쿠키 등록이 필요해요.")
         elif wishlist_store.is_dm_blocked(interaction.user.id):
             embed.description += f"\n\n{_DM_BLOCKED_TIP}"
@@ -1681,6 +1685,10 @@ class MyShop(commands.Cog):
 
         위 루프가 사람 단위로 예외를 가두려고 따로 뺀 함수예요."""
         if wishlist_store.was_notified_today(discord_id, today):
+            return 0, 0
+        # `/알림설정`에서 껐으면 상점 조회 자체를 건너뛰어요. 어차피 안 보낼 DM 때문에
+        # 라이엇 API를 계정 수만큼 두드릴 이유가 없어요.
+        if not await notify_prefs.is_enabled(discord_id, "wishlist_dm"):
             return 0, 0
         accounts = riot_session_store.list_accounts(discord_id)
         if not accounts:

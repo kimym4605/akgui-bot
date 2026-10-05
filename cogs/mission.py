@@ -22,7 +22,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from cogs.rank import _extract_player_match_stats
-from utils import coin_wallet, henrik_api, mission_store, riot_account_store
+from utils import coin_wallet, henrik_api, mission_store, notify_prefs, riot_account_store
 from utils.channel_check import restrict_to_channel
 from utils.mission_store import MISSIONS, ONE_TIME_MISSIONS
 
@@ -99,10 +99,15 @@ class Mission(commands.Cog):
 
         if channel is None:
             return
+        # 끈 사람에겐 알림만 생략해요. 코인은 위에서 이미 들어갔어요.
+        if not await notify_prefs.is_enabled(user_id, "mission_channel"):
+            return
         try:
             await channel.send(
                 f"🎯 <@{user_id}> **{info['title']}** 미션 완료! "
-                f"악귀코인 **+{mission_store.REWARD_PER_MISSION}개** (보유 {balance}개)"
+                f"악귀코인 **+{mission_store.REWARD_PER_MISSION}개** (보유 {balance}개)",
+                # 멘션 글씨는 남기고 핑만 안 쏴요. 미션은 하루 3개라 핑까지 가면 꽤 거슬려요.
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException:
             # 알림 실패로 코인 지급을 되돌리진 않아요. 코인은 이미 들어갔어요.
@@ -154,10 +159,13 @@ class Mission(commands.Cog):
             balance = await coin_wallet.add(
                 member.id, mission_store.REWARD_PER_MISSION, reason="미션:voice_together"
             )
+            if not await notify_prefs.is_enabled(member.id, "mission_channel"):
+                return
             try:
                 await channel.send(
                     f"🎯 {member.mention} **{MISSIONS['voice_together']['title']}** 미션 완료! "
-                    f"악귀코인 **+{mission_store.REWARD_PER_MISSION}개** (보유 {balance}개)"
+                    f"악귀코인 **+{mission_store.REWARD_PER_MISSION}개** (보유 {balance}개)",
+                    allowed_mentions=discord.AllowedMentions.none(),
                 )
             except (discord.HTTPException, AttributeError):
                 log.warning("통화 미션 알림 실패 (user=%s)", member.id, exc_info=True)
@@ -385,7 +393,13 @@ class Mission(commands.Cog):
         """자동으로 깬 미션은 본인에게만 DM으로 알려줘요.
 
         채널에 뿌리면 30분마다 알림이 쌓여서 시끄러워요. DM을 막아둔 사람은 그냥 넘어가요
-        (코인은 이미 들어갔고, `/미션`에서 확인할 수 있어요)."""
+        (코인은 이미 들어갔고, `/미션`에서 확인할 수 있어요).
+
+        ⚠️ 이 DM은 게임이 끝난 직후에 와요. 다음 판 중이면 오버레이 알림으로 떠서 방해되니까
+        `/알림설정`에서 끌 수 있어요(끄면 조용히 코인만 들어가요)."""
+        if not await notify_prefs.is_enabled(user_id, "mission_dm"):
+            return
+
         user = self.bot.get_user(user_id)
         if user is None:
             try:
@@ -486,6 +500,9 @@ class Mission(commands.Cog):
             )
         if note:
             embed.set_footer(text=note)
+        else:
+            # 알림을 끄는 방법은 여기서 알려주는 게 제일 눈에 띄어요(미션 화면이니까요).
+            embed.set_footer(text="미션 알림이 방해되면 /알림설정 에서 끌 수 있어요.")
 
         await interaction.followup.send(embed=embed)
 

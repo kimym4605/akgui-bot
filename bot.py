@@ -102,6 +102,7 @@ COG_GROUPS: dict[str, list[str]] = {
         "autorole",      # 자동 역할 부여
         "birthday",      # 생일 알림
         "adult_verify",  # 성인 인증(생년월일 자동 확인 + 매니저 승인)
+        "notify",        # /알림설정 - 미션 완료·위시리스트 알림을 개인별로 끄고 켜기
         "ping",          # 핑 테스트
     ],
 }
