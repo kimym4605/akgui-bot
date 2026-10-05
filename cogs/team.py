@@ -62,6 +62,7 @@ from utils import (
     tier_roles,
     valorant_maps,
 )
+from utils.staff_check import restrict_to_staff
 
 log = logging.getLogger(__name__)
 
@@ -1333,7 +1334,16 @@ class Team(commands.Cog):
 
     @app_commands.command(
         name="팀짜기",
-        description="음성채널 인원(또는 직접 지정한 사람들)을 티어·전적 기준으로 두 팀으로 나눠요.",
+        description="[운영진] 음성채널 인원을 티어·전적 기준으로 두 팀으로 나눠요.",
+    )
+    # 2026-10-05부터 운영진 전용이에요. 아무나 열면 같은 방에서 편성이 덮어쓰이고, 여기 딸린
+    # 👑 팀장 뽑기·🎲 베팅·🗡️ KDA 자동기록까지 같이 흔들려요.
+    # ⚠️ 명령어 자체는 모두에게 보여요(목록에서 숨기려면 디스코드 권한 기반이어야 하는데,
+    #    담당자 역할엔 특별한 권한이 없어서 역할로는 표현이 안 돼요). 누르면 안내가 떠요.
+    # 🎲 베팅 버튼은 **그대로 누구나** 눌러요 — 코인 소비처라 좁히면 안 돼요.
+    @restrict_to_staff(
+        "`/팀짜기`",
+        hint="편성은 `/팀보기` 로 다시 볼 수 있어요. 내전을 열고 싶으면 운영진에게 말해주세요.",
     )
     @app_commands.describe(
         인원="직접 지정할 때만 적어요. @로 멘션해서 나열하세요. 비우면 지금 있는 음성채널 인원으로 해요.",
