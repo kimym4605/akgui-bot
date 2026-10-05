@@ -28,6 +28,7 @@ from utils import (
     agwi_weekly_store,
     birthday_store,
     coin_wallet,
+    cosmetic_store,
     riot_account_store,
     scrim_record_store,
     tier_roles,
@@ -118,6 +119,8 @@ async def collect(member: discord.Member | discord.User, *, evaluate_achievement
         "title_color": title_color,
         "tier": tier_name,
         "accent_color": accent,
+        # 카드 배경 테마 (`/악귀상점`에서 사서 고른 것). 모르는 이름이면 카드가 기본으로 그려요.
+        "theme": await cosmetic_store.selected_theme(member.id),
         "coin": coin,
         "record": {
             "wins": record["wins"],

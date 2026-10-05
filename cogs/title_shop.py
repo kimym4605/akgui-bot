@@ -22,7 +22,7 @@ from discord.ext import commands, tasks
 
 from utils import coin_wallet, title_store
 from utils.channel_check import restrict_to_channel
-from utils.title_store import TITLE_DAYS, TITLE_PRICE
+from utils.title_store import TITLE_DAYS, TITLE_PLANS, TITLE_PRICE
 
 log = logging.getLogger(__name__)
 
@@ -56,12 +56,16 @@ class TitleModal(discord.ui.Modal, title="칭호 만들기"):
         required=True,
     )
 
-    def __init__(self, cog: "TitleShop"):
-        super().__init__()
+    def __init__(self, cog: "TitleShop", days: int = TITLE_DAYS):
+        # 제목에 기간·가격을 박아서, 모달이 열린 순간 뭘 사는지 보이게 해요.
+        super().__init__(title=f"칭호 만들기 ({days}일 · {TITLE_PLANS[days]}코인)")
         self.cog = cog
+        # 기간은 모달 입력이 아니라 **명령어 선택지**로 받아요. 모달에 숫자를 직접 치게 하면
+        # 가격표에 없는 값이 들어와서 검증 코드가 늘어나요.
+        self.days = days
 
     async def on_submit(self, interaction: discord.Interaction):
-        await self.cog.purchase(interaction, str(self.name), str(self.color))
+        await self.cog.purchase(interaction, str(self.name), str(self.color), days=self.days)
 
 
 class TitleShop(commands.Cog):
@@ -99,7 +103,9 @@ class TitleShop(commands.Cog):
 
         return None, int(matched.group(1), 16)
 
-    async def purchase(self, interaction: discord.Interaction, name: str, color_raw: str):
+    async def purchase(
+        self, interaction: discord.Interaction, name: str, color_raw: str, days: int = TITLE_DAYS
+    ):
         await interaction.response.defer(ephemeral=True)
 
         guild, user = interaction.guild, interaction.user
@@ -114,12 +120,16 @@ class TitleShop(commands.Cog):
 
         name = name.strip()
         existing = await title_store.get(user.id)
+        # 가격표에 없는 기간이 흘러들어오면 기본(30일)으로 떨어뜨려요.
+        days = days if days in TITLE_PLANS else TITLE_DAYS
+        price = TITLE_PLANS[days]
 
         # ⚠️ 코인부터 빼요. 역할을 먼저 만들면, 코인이 모자랄 때 역할만 덩그러니 남아요.
-        if not await coin_wallet.spend(user.id, TITLE_PRICE, reason="칭호구매"):
+        if not await coin_wallet.spend(user.id, price, reason=f"칭호구매:{days}일"):
             balance = await coin_wallet.get_balance(user.id)
             await interaction.followup.send(
-                f"악귀코인이 부족해요. 칭호는 **{TITLE_PRICE}개**가 필요한데 지금 **{balance}개** 갖고 있어요.\n"
+                f"악귀코인이 부족해요. **{days}일 칭호**는 **{price}개**가 필요한데 "
+                f"지금 **{balance}개** 갖고 있어요.\n"
                 f"-# `/출석`과 `/미션`으로 매일 모을 수 있어요.",
                 ephemeral=True,
             )
@@ -128,33 +138,33 @@ class TitleShop(commands.Cog):
         try:
             role = await self._apply_role(guild, user, existing, name, color_value)
         except discord.Forbidden:
-            await coin_wallet.add(user.id, TITLE_PRICE, reason="칭호구매 실패 환불")
+            await coin_wallet.add(user.id, price, reason="칭호구매 실패 환불")
             await interaction.followup.send(
                 "역할을 만들 권한이 없어요. 코인은 돌려드렸어요. (봇 역할이 충분히 위에 있는지 확인해주세요)",
                 ephemeral=True,
             )
             return
         except discord.HTTPException:
-            await coin_wallet.add(user.id, TITLE_PRICE, reason="칭호구매 실패 환불")
+            await coin_wallet.add(user.id, price, reason="칭호구매 실패 환불")
             log.exception("칭호 역할 생성 실패 (user=%s)", user.id)
             await interaction.followup.send("역할을 만들지 못했어요. 코인은 돌려드렸어요.", ephemeral=True)
             return
 
-        doc = await title_store.save(user.id, guild.id, role.id, name, color_value)
+        doc = await title_store.save(user.id, guild.id, role.id, name, color_value, days=days)
         remaining = title_store.remaining_days(doc)
 
         embed = discord.Embed(
             title="🏷️ 칭호를 달았어요!",
             description=(
                 f"칭호: {role.mention}\n"
-                f"사용한 악귀코인: **{TITLE_PRICE}개** (남은 코인 {await coin_wallet.get_balance(user.id)}개)\n"
+                f"사용한 악귀코인: **{price}개** (남은 코인 {await coin_wallet.get_balance(user.id)}개)\n"
                 f"남은 기간: **{remaining}일**"
             ),
             color=color_value,
         )
         embed.set_footer(text="기간이 끝나면 자동으로 사라져요. 그 전에 다시 사면 기간이 이어져요.")
         await interaction.followup.send(embed=embed, ephemeral=True)
-        log.info("🏷️ 칭호 구매: %s → '%s' (#%06x)", user, name, color_value)
+        log.info("🏷️ 칭호 구매: %s → '%s' (#%06x, %d일 %d코인)", user, name, color_value, days, price)
 
     async def _apply_role(
         self, guild: discord.Guild, user: discord.Member, existing: dict | None, name: str, color: int
@@ -197,16 +207,22 @@ class TitleShop(commands.Cog):
     # ------------------------------------------------------------------
     # 명령어
     # ------------------------------------------------------------------
-    @app_commands.command(name="칭호구매", description=f"악귀코인 {TITLE_PRICE}개로 나만의 칭호를 {TITLE_DAYS}일간 달아요.")
+    @app_commands.command(name="칭호구매", description=f"악귀코인 {TITLE_PLANS[10]}개(10일) 또는 {TITLE_PRICE}개({TITLE_DAYS}일)로 나만의 칭호를 달아요.")
     # ⚠️ 그룹이 "attendance"(=#포켓몬)에서 "title"로 바뀌었어요.
     #
     # 칭호는 코인을 쓰는 거의 유일한 곳인데 실사용이 0건이었어요. 2026-09-29에 재보니
     # #포켓몬은 마지막 글이 9일 전인 사실상 죽은 채널이었고(#일반❓은 하루 50개),
     # "20코인을 쓰려면 아무도 안 가는 채널로 가야 하는" 상태였어요. 그게 원인일 수 있어서
     # 떼어냈어요. 설정값이 없으면 제한이 없으니 기본은 아무 채널에서나 돼요.
+    @app_commands.describe(기간="칭호를 며칠 달지 골라요. 기본은 30일이에요.")
+    @app_commands.choices(기간=[
+        app_commands.Choice(name=f"10일 — {TITLE_PLANS[10]}코인", value=10),
+        app_commands.Choice(name=f"{TITLE_DAYS}일 — {TITLE_PLANS[TITLE_DAYS]}코인 (하루 단가가 더 싸요)",
+                            value=TITLE_DAYS),
+    ])
     @restrict_to_channel("title")
-    async def buy(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(TitleModal(self))
+    async def buy(self, interaction: discord.Interaction, 기간: int = TITLE_DAYS):
+        await interaction.response.send_modal(TitleModal(self, days=기간))
 
     @app_commands.command(name="칭호", description="지금 달고 있는 칭호와 남은 기간을 확인해요.")
     @restrict_to_channel("title")
@@ -216,8 +232,9 @@ class TitleShop(commands.Cog):
         doc = await title_store.get(interaction.user.id)
         if doc is None:
             await interaction.followup.send(
-                f"아직 칭호가 없어요. `/칭호구매`로 악귀코인 **{TITLE_PRICE}개**를 내면 "
-                f"이름과 색을 직접 정해서 **{TITLE_DAYS}일간** 달 수 있어요.",
+                "아직 칭호가 없어요. `/칭호구매`로 이름과 색을 직접 정해서 달 수 있어요.\n"
+                f"**{TITLE_PLANS[10]}코인 = 10일** · **{TITLE_PRICE}코인 = {TITLE_DAYS}일** "
+                f"(하루 단가는 {TITLE_DAYS}일권이 더 싸요 · 기간이 남았을 때 또 사면 이어붙어요)",
                 ephemeral=True,
             )
             return

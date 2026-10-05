@@ -36,6 +36,11 @@ KST = timezone(timedelta(hours=9))
 REWARD_PER_MISSION = 1   # 미션 하나당 악귀코인
 DAILY_MISSION_COUNT = 3  # 하루에 배정되는 미션 수 (= 하루 최대 3코인)
 
+# 🎲 미션 리롤권 (`/악귀상점`). 하루 1회만 — 안 그러면 쉬운 미션이 나올 때까지 돌릴 수 있어요.
+# 가격은 보상(1코인)보다 비싸게 둬요. 그래야 "코인을 벌려고 리롤"이 성립하지 않아요.
+REROLL_PRICE = 2
+REROLL_LIMIT_PER_DAY = 1
+
 # 통화방 미션에서 "함께 있었다"로 인정할 최소 인원(본인 포함). 혼자 접속해두는 걸 막아요.
 VOICE_MIN_MEMBERS = 2
 
@@ -218,6 +223,63 @@ def _progress_sync(user_id, key: str, amount: int = 1) -> bool:
     return res.modified_count == 1
 
 
+def _reroll_sync(user_id, key: str) -> tuple[str | None, str]:
+    """미션 하나를 **서버 미션**으로 바꿔요. (새 미션 키, 실패 사유) - 성공하면 사유는 "".
+
+    ## 왜 꼭 서버 미션으로 바꾸는가
+
+    연동자는 `pick_missions()`에서 **발로 2 + 서버 1**을 받아요. 그래서 발로란트를 안 하는
+    날은 3개 중 **1개만** 깰 수 있고, 이게 미션 완료율이 14%에 머무는 구조적 이유예요
+    (2026-10-05 실측). 리롤 수요는 정확히 "오늘 발로 안 하는데 발로 미션이 뽑혔다"라서,
+    같은 종류로 바꿔주면 아무 의미가 없어요. 그래서 교체는 늘 서버 미션 풀에서 골라요.
+    비연동자는 어차피 서버 미션만 갖고 있어서 자연스럽게 같은 규칙으로 돌아가요
+    (⚠️ 반대로 발로 미션을 주면 라이엇 연동이 없는 사람은 깰 방법이 없어요).
+
+    실패 사유: no_doc(오늘 미션 없음) / not_assigned / already_done / limit(하루 한도) /
+    exhausted(바꿀 서버 미션이 남지 않음) / race(그 찰나에 다른 리롤이 먼저 들어감)
+    """
+    uid, today = str(user_id), today_iso()
+    doc = _missions.find_one({"_id": uid})
+    if doc is None or doc.get("date") != today:
+        return None, "no_doc"
+
+    picks = list(doc.get("picks") or [])
+    if key not in picks:
+        return None, "not_assigned"
+    if key in (doc.get("done") or []):
+        return None, "already_done"
+    if int(doc.get("rerolls") or 0) >= REROLL_LIMIT_PER_DAY:
+        return None, "limit"
+
+    candidates = [k for k in SERVER_KEYS if k not in picks]
+    if not candidates:
+        return None, "exhausted"
+
+    new_key = random.choice(candidates)
+    new_picks = [new_key if p == key else p for p in picks]
+    # 바뀐 미션의 진행도는 지워요. 안 그러면 "방 만들기 1/1"이 엉뚱한 미션에 남아있어요.
+    progress = {k: v for k, v in (doc.get("progress") or {}).items() if k != key}
+
+    # ⚠️ 필터에 **읽어온 picks를 그대로** 넣어요(낙관적 동시성). 그 사이 다른 리롤이
+    #    먼저 들어갔으면 picks가 달라서 이 update가 안 맞고, 코인만 두 번 빠지는 걸 막아요.
+    #    `rerolls`는 필드가 없을 수도 있어서 필터 조건으로 쓰면 안 돼요(`{"rerolls": 0}`은
+    #    필드가 없는 문서를 못 잡아요).
+    res = _missions.update_one(
+        {"_id": uid, "date": today, "picks": picks},
+        {"$set": {"picks": new_picks, "progress": progress}, "$inc": {"rerolls": 1}},
+    )
+    if res.modified_count != 1:
+        return None, "race"
+    return new_key, ""
+
+
+def _rerolls_left_sync(user_id) -> int:
+    doc = _missions.find_one({"_id": str(user_id)}, {"rerolls": 1, "date": 1})
+    if doc is None or doc.get("date") != today_iso():
+        return REROLL_LIMIT_PER_DAY      # 오늘 문서가 아직 없으면 아직 안 쓴 거예요
+    return max(0, REROLL_LIMIT_PER_DAY - int(doc.get("rerolls") or 0))
+
+
 def _claim_one_time_sync(user_id, key: str) -> bool:
     """1회성 미션을 처음 깼으면 True. 이미 받았으면 False.
 
@@ -246,3 +308,13 @@ async def progress(user_id, key: str, amount: int = 1) -> bool:
 
 async def claim_one_time(user_id, key: str) -> bool:
     return await asyncio.to_thread(_claim_one_time_sync, user_id, key)
+
+
+async def reroll(user_id, key: str) -> tuple[str | None, str]:
+    """미션 하나를 서버 미션으로 교체해요. 코인 차감은 **부르는 쪽**에서 해요
+    (실패 사유를 보고 환불할 수 있게 하려고 일부러 분리했어요)."""
+    return await asyncio.to_thread(_reroll_sync, user_id, key)
+
+
+async def rerolls_left(user_id) -> int:
+    return await asyncio.to_thread(_rerolls_left_sync, user_id)

@@ -60,6 +60,21 @@ GOLD = (255, 200, 80)
 WIN_COLOR = (88, 214, 141)
 LOSE_COLOR = (231, 106, 106)
 
+# ── 카드 테마 (`/악귀상점`에서 코인으로 사요) ──────────────────────────────
+# ⚠️ 전부 **어두운 색**으로만 만들어요. 패널(PANEL)·글씨(TEXT)가 어두운 배경 기준으로
+# 맞춰져 있어서, 밝은 배경을 넣으면 글씨가 안 보여요. 바꾸는 건 배경 두 색뿐이에요.
+THEMES: dict[str, dict] = {
+    "기본":   {"emoji": "🌃", "top": BG_TOP,          "bottom": BG_BOTTOM,      "desc": "어두운 남색 (기본)"},
+    "자정":   {"emoji": "🌑", "top": (10, 10, 12),    "bottom": (28, 28, 34),   "desc": "거의 검정, 가장 담백해요"},
+    "라디안": {"emoji": "🔥", "top": (38, 14, 14),    "bottom": (72, 26, 22),   "desc": "발로란트 레드"},
+    "심해":   {"emoji": "🌊", "top": (8, 24, 34),     "bottom": (14, 48, 64),   "desc": "짙은 청록"},
+    "자수정": {"emoji": "🔮", "top": (26, 14, 38),    "bottom": (48, 26, 70),   "desc": "보라"},
+    "숲":     {"emoji": "🌲", "top": (12, 26, 20),    "bottom": (20, 46, 34),   "desc": "깊은 초록"},
+    "황혼":   {"emoji": "🌆", "top": (34, 18, 26),    "bottom": (62, 34, 30),   "desc": "노을빛 자주"},
+}
+# 기본은 공짜예요. 나머지만 코인을 받아요.
+THEME_PRICE = 15
+
 FONT_DIRS = [
     # 배포 환경 (Dockerfile에서 fonts-nanum 설치)
     "/usr/share/fonts/truetype/nanum",
@@ -111,14 +126,27 @@ def _font(weight: str, size: int):
     return loaded
 
 
-def _gradient_background() -> "Image.Image":
-    """위에서 아래로 어두운 남색 그라데이션. 세로줄 560개라 픽셀 루프보다 훨씬 빨라요."""
-    image = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT), BG_TOP)
+def _panel_colors(theme: dict) -> tuple[tuple, tuple]:
+    """배경 두 색에서 패널·테두리 색을 뽑아요.
+
+    테마마다 패널 색을 손으로 적지 않는 이유는, 빠뜨리거나 어긋나기 쉬워서예요. 기본 테마에
+    넣고 돌려보면 원래 쓰던 PANEL(23,26,40)·PANEL_EDGE(44,49,72)와 거의 같은 값이 나와요
+    (그게 `scripts/test_akgui_shop.py`가 고정하는 조건이에요). 배경이 빨강이면 패널도 같이
+    붉어져서, 남색 패널이 혼자 겉도는 게 사라져요."""
+    top, bottom = theme["top"], theme["bottom"]
+    panel = tuple(int(top[i] + (bottom[i] - top[i]) * 0.7) for i in range(3))
+    edge = tuple(min(255, int(bottom[i] * 1.55)) for i in range(3))
+    return panel, edge
+
+
+def _gradient_background(top=BG_TOP, bottom=BG_BOTTOM) -> "Image.Image":
+    """위에서 아래로 그라데이션. 세로줄 560개라 픽셀 루프보다 훨씬 빨라요."""
+    image = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT), top)
     draw = ImageDraw.Draw(image)
     for y in range(CARD_HEIGHT):
         ratio = y / CARD_HEIGHT
         color = tuple(
-            int(BG_TOP[i] + (BG_BOTTOM[i] - BG_TOP[i]) * ratio) for i in range(3)
+            int(top[i] + (bottom[i] - top[i]) * ratio) for i in range(3)
         )
         draw.line([(0, y), (CARD_WIDTH, y)], fill=color)
     return image
@@ -156,18 +184,21 @@ def _fit_text(draw, text: str, font, max_width: int) -> str:
     return trimmed + ellipsis
 
 
-def _stat_box(draw, x, y, width, height, label: str, value: str, value_color=TEXT, sub: str = ""):
+def _stat_box(draw, x, y, width, height, label: str, value: str, value_color=TEXT, sub: str = "",
+              panel=PANEL, edge=PANEL_EDGE):
     """작은 통계 칸 하나. 라벨(위 작은 글씨) + 값(아래 큰 글씨) + 보조설명."""
-    _rounded_panel(draw, (x, y, x + width, y + height))
+    _rounded_panel(draw, (x, y, x + width, y + height), fill=panel, outline=edge)
     draw.text((x + 18, y + 16), label, font=_font("regular", 19), fill=TEXT_SUB)
     draw.text((x + 18, y + 44), value, font=_font("bold", 34), fill=value_color)
     if sub:
         draw.text((x + 18, y + 88), sub, font=_font("regular", 17), fill=TEXT_DIM)
 
 
-def _progress_bar(draw, x, y, width, height, ratio: float, color=GOLD):
+def _progress_bar(draw, x, y, width, height, ratio: float, color=GOLD, track=(38, 42, 62)):
+    """⚠️ 바탕(track)도 테마 색을 받아요. 예전엔 남색으로 박혀 있어서, 빨강 테마 카드에서
+    진행바만 혼자 파랗게 떠 보였어요(2026-10-05에 실제 카드를 뽑아보고 찾았어요)."""
     ratio = max(0.0, min(1.0, ratio))
-    draw.rounded_rectangle((x, y, x + width, y + height), radius=height // 2, fill=(38, 42, 62))
+    draw.rounded_rectangle((x, y, x + width, y + height), radius=height // 2, fill=track)
     filled = int(width * ratio)
     # 반지름보다 짧으면 rounded_rectangle이 에러를 내요(0%일 때 실제로 터졌어요).
     if filled > height:
@@ -176,7 +207,10 @@ def _progress_bar(draw, x, y, width, height, ratio: float, color=GOLD):
 
 def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
     """실제 그리기. **동기 함수**라 반드시 to_thread로 불러야 해요."""
-    image = _gradient_background()
+    # 모르는 테마 이름이 들어와도(테마를 지웠거나 데이터가 낡았거나) 기본으로 그려요.
+    theme = THEMES.get(data.get("theme") or "", THEMES["기본"])
+    image = _gradient_background(theme["top"], theme["bottom"])
+    panel, panel_edge = _panel_colors(theme)
     draw = ImageDraw.Draw(image)
 
     accent = data.get("accent_color") or (88, 101, 242)
@@ -198,7 +232,7 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
     else:
         draw.ellipse(
             (avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size),
-            fill=PANEL, outline=accent, width=4,
+            fill=panel, outline=accent, width=4,
         )
 
     # ── 닉네임 · 칭호 · 티어 ─────────────────────────────────
@@ -280,27 +314,31 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
     total_games = record["wins"] + record["losses"]
     rate_sub = f"승률 {record['win_rate']:.0f}%" if total_games else "아직 기록 없음"
 
-    _stat_box(draw, left, box_y, box_w, box_h, "악귀코인", f"{data['coin']:,}", GOLD)
+    _stat_box(draw, left, box_y, box_w, box_h, "악귀코인", f"{data['coin']:,}", GOLD,
+              panel=panel, edge=panel_edge)
     _stat_box(
         draw, left + (box_w + gap), box_y, box_w, box_h, "내전 전적",
         f"{record['wins']}승 {record['losses']}패",
         WIN_COLOR if record["wins"] >= record["losses"] and total_games else TEXT,
-        rate_sub,
+        rate_sub, panel=panel, edge=panel_edge,
     )
     _stat_box(
         draw, left + (box_w + gap) * 2, box_y, box_w, box_h, "최고 연승",
         f"{record['best_streak']}", TEXT, data.get("streak_now", ""),
+        panel=panel, edge=panel_edge,
     )
     agwi = data.get("agwi")
     _stat_box(
         draw, left + (box_w + gap) * 3, box_y, box_w, box_h, "이번 주 악귀력",
         f"{agwi:,.0f}" if agwi else "-", accent,
         data.get("agwi_grade", "") if agwi else "/전적 을 돌려주세요",
+        panel=panel, edge=panel_edge,
     )
 
     # ── 업적 진행 ────────────────────────────────────────────
     ach_y = box_y + box_h + 24
-    _rounded_panel(draw, (left, ach_y, CARD_WIDTH - 44, ach_y + 92))
+    _rounded_panel(draw, (left, ach_y, CARD_WIDTH - 44, ach_y + 92),
+                   fill=panel, outline=panel_edge)
     unlocked, total = data["achievements"], data["achievements_total"]
     draw.text((left + 18, ach_y + 16), "업적", font=_font("regular", 19), fill=TEXT_SUB)
     draw.text(
@@ -314,7 +352,8 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
         (CARD_WIDTH - 62 - draw.textlength(percent_text, font=percent_font), ach_y + 22),
         percent_text, font=percent_font, fill=GOLD,
     )
-    _progress_bar(draw, left + 160, ach_y + 56, CARD_WIDTH - 44 - left - 160 - 18, 16, percent / 100)
+    _progress_bar(draw, left + 160, ach_y + 56, CARD_WIDTH - 44 - left - 160 - 18, 16,
+                  percent / 100, track=panel_edge)
 
     # ── 하단 한 줄 (출석) ───────────────────────────
     footer_y = ach_y + 108
