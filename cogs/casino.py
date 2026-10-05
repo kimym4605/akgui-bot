@@ -17,7 +17,7 @@
    반대로 하면(이기면 주고 지면 빼기) 중간에 봇이 죽었을 때 공짜 판이 돼요.
 """
 import logging
-import random
+import os
 
 import discord
 from discord import app_commands
@@ -37,6 +37,41 @@ LOSE_COLOR = 0x95A5A6
 # 블랙잭 버튼이 살아있는 시간. 지나면 자동으로 '스탠드'로 정산해요
 # (그냥 꺼지면 차감된 코인이 허공에 떠요).
 BJ_TIMEOUT = 120
+
+# 🔞 성인만 쓸 수 있어요. `/채널설정`으로 도박장 채널에 묶더라도 **명령어 자체를 막지 않으면
+# 다른 채널에서 그냥 쓸 수 있어요.** 채널을 가리는 것만으로는 잠금이 안 돼요.
+# adult_verify와 같은 ADULT_ROLE_ID를 봐요(여기서 또 상수를 만들면 둘이 어긋나요).
+ADULT_ROLE_ID = os.getenv("ADULT_ROLE_ID")
+
+
+def _is_adult(user: discord.abc.User | None) -> bool:
+    if not isinstance(user, discord.Member):
+        return False          # DM이면 서버 역할을 못 봐요
+    if user.guild_permissions.administrator:
+        return True           # 운영진은 통과 (역할 설정이 꼬여도 잠기지 않게)
+    if not ADULT_ROLE_ID:
+        return False          # ⚠️ 설정이 없으면 **막는 쪽**으로. 열어주면 미성년자가 통과해요.
+    return any(str(role.id) == ADULT_ROLE_ID for role in user.roles)
+
+
+def adult_only():
+    """성인 역할이 없으면 조용히 거절해요. 거절 안내는 본인에게만 보여요.
+
+    `bot.tree.error`가 CheckFailure를 '이미 안내한 의도된 거절'로 보고 넘겨요
+    (채널 제한·운영진 제한과 같은 방식이에요)."""
+
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if _is_adult(interaction.user):
+            return True
+        log.info("🔞 도박 사용을 막았어요(성인 역할 없음): user=%s", interaction.user)
+        await interaction.response.send_message(
+            "🔞 `/도박`은 **성인 인증을 받은 분**만 쓸 수 있어요.\n"
+            "-# `/성인인증`으로 신청하면 관리진 승인 후 역할이 붙어요.",
+            ephemeral=True,
+        )
+        return False
+
+    return app_commands.check(predicate)
 
 
 async def take_bet(interaction: discord.Interaction, amount: int) -> tuple[bool, str]:
@@ -173,6 +208,7 @@ class Casino(commands.Cog):
     @group.command(name="슬롯", description="릴 3개를 돌려요. 두 개 일치=본전, 세 개 일치=4~7배")
     @app_commands.describe(금액=f"{MIN_BET}~{MAX_BET}코인")
     @restrict_to_channel("casino")
+    @adult_only()
     async def slot(self, interaction: discord.Interaction, 금액: int):
         await interaction.response.defer()
         ok, error = await take_bet(interaction, 금액)
@@ -200,6 +236,7 @@ class Casino(commands.Cog):
         app_commands.Choice(name="⬇️ 낮다 (1~45)", value="low"),
     ])
     @restrict_to_channel("casino")
+    @adult_only()
     async def highlow(self, interaction: discord.Interaction, 금액: int, 선택: str):
         await interaction.response.defer()
         ok, error = await take_bet(interaction, 금액)
@@ -227,6 +264,7 @@ class Casino(commands.Cog):
     @group.command(name="블랙잭", description="딜러와 21 승부. 무승부는 돌려드려요")
     @app_commands.describe(금액=f"{MIN_BET}~{MAX_BET}코인")
     @restrict_to_channel("casino")
+    @adult_only()
     async def blackjack(self, interaction: discord.Interaction, 금액: int):
         await interaction.response.defer()
         ok, error = await take_bet(interaction, 금액)
@@ -257,6 +295,7 @@ class Casino(commands.Cog):
 
     # ------------------------------------------------------------------
     @group.command(name="현황", description="오늘 남은 베팅 한도와 각 게임의 환수율을 봐요.")
+    @adult_only()
     async def status(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         wagered = await casino_store.wagered_today(interaction.user.id)

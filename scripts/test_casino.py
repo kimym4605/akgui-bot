@@ -242,6 +242,92 @@ biggest_win = casino_store.MAX_BET * max(p for _, p in games.SLOT_SYMBOLS)
 check(f"한 방 최대 당첨 {biggest_win}코인 (지갑 최대 97코인 대비 과하지 않음)",
       biggest_win <= 40, str(biggest_win))
 
+print("8) 🔞 성인 전용 게이트 (채널을 가리는 것만으로는 안 막혀요)")
+os.chdir(BOT_DIR)
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(os.path.join(BOT_DIR, ".env"))
+os.environ["MONGODB_DB_NAME"] = "agwi_casino_test"
+os.environ["BIRTHDAY_DB_NAME"] = "agwi_casino_test"
+
+import discord  # noqa: E402
+
+from cogs import casino as casino_cog  # noqa: E402
+
+ADULT_ID = casino_cog.ADULT_ROLE_ID
+check("ADULT_ROLE_ID가 설정돼 있다 (없으면 전원 차단돼요)", bool(ADULT_ID), str(ADULT_ID))
+
+
+class FakeRole:
+    def __init__(self, rid):
+        self.id = int(rid)
+
+
+class FakePerms:
+    def __init__(self, administrator=False):
+        self.administrator = administrator
+
+
+class FakeMember(discord.Member):
+    """`roles`·`guild_permissions`는 읽기 전용 property라 클래스 본문에서 덮어써요."""
+
+    roles = ()
+    guild_permissions = None
+
+    def __init__(self, role_ids, administrator=False):
+        self.roles = [FakeRole(r) for r in role_ids]
+        self.guild_permissions = FakePerms(administrator)
+
+    def __str__(self):
+        return "테스터"
+
+
+class FakeUser:
+    def __str__(self):
+        return "DM유저"
+
+
+if ADULT_ID:
+    check("성인 역할이 있으면 통과", casino_cog._is_adult(FakeMember([ADULT_ID])) is True)
+    check("다른 역할만 있으면 차단", casino_cog._is_adult(FakeMember([999999])) is False)
+    check("역할이 없으면 차단", casino_cog._is_adult(FakeMember([])) is False)
+check("운영진(ADMIN)은 통과", casino_cog._is_adult(FakeMember([999999], administrator=True)) is True)
+check("DM(서버 밖)은 차단", casino_cog._is_adult(FakeUser()) is False)
+check("None도 차단", casino_cog._is_adult(None) is False)
+
+# 설정이 비었을 때 **막는 쪽**으로 기우는지 (열어주면 미성년자가 통과해요)
+saved = casino_cog.ADULT_ROLE_ID
+casino_cog.ADULT_ROLE_ID = None
+check("ADULT_ROLE_ID가 비면 일반 유저는 차단", casino_cog._is_adult(FakeMember([999999])) is False)
+check("설정이 비어도 운영진은 통과(잠김 방지)",
+      casino_cog._is_adult(FakeMember([999999], administrator=True)) is True)
+casino_cog.ADULT_ROLE_ID = saved
+
+
+async def check_commands():
+    from discord.ext import commands as dcommands
+
+    bot = dcommands.Bot(command_prefix="!", intents=discord.Intents.default())
+    await bot.load_extension("cogs.casino")
+    group = bot.tree.get_command("도박")
+    subs = {c.name: c for c in group.commands}
+    check("하위 명령 4개", sorted(subs) == sorted(["슬롯", "하이로우", "블랙잭", "현황"]), str(sorted(subs)))
+    for name, cmd in subs.items():
+        check(f"/도박 {name} 에 체크가 붙어 있다", len(cmd.checks) >= 1, f"{len(cmd.checks)}개")
+    # 성인이 아니면 실제로 거절되는지 체크 체인으로 확인
+    for name in ("슬롯", "현황"):
+        it = type("I", (), {"user": FakeMember([999999]), "guild": None,
+                            "response": type("R", (), {"send_message": _noop})()})()
+        results = [await c(it) for c in subs[name].checks]
+        check(f"/도박 {name}: 성인 아니면 거절", any(r is False for r in results), str(results))
+
+
+async def _noop(*a, **kw):
+    return None
+
+
+asyncio.run(check_commands())
+
 print()
 if failures:
     print(f"❌ 실패 {len(failures)}건: {failures}")
