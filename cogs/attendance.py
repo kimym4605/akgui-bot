@@ -302,6 +302,7 @@ class Attendance(commands.Cog):
         app_commands.Choice(name="악귀코인 (/코인, /코인보내기)", value="coin"),
         app_commands.Choice(name="칭호 상점 (/칭호구매, /칭호, /칭호해제)", value="title"),
         app_commands.Choice(name="미션 (/미션)", value="mission"),
+        app_commands.Choice(name="도박 (/도박 슬롯·하이로우·블랙잭)", value="casino"),
         app_commands.Choice(name="즉석생성형 통화방 명령어 (/방만들기 등)", value="room"),
         app_commands.Choice(name="전적 조회 명령어 (/전적)", value="tier_lookup"),
         app_commands.Choice(name="발로란트 개인 상점 (/오상)", value="valorant_shop"),
