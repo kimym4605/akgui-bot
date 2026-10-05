@@ -24,7 +24,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils import coin_wallet, cosmetic_store, mission_store, riot_account_store
+from utils import attend_service, coin_wallet, cosmetic_store, inventory_store, mission_store, riot_account_store
+from utils.inventory_store import PROTECT_MAX, PROTECT_PRICE
 from utils.mission_store import MISSIONS, REROLL_LIMIT_PER_DAY, REROLL_PRICE
 from utils.profile_card import THEME_PRICE, THEMES
 from utils.title_store import TITLE_DAYS, TITLE_PLANS
@@ -42,7 +43,8 @@ REROLL_ERRORS = {
 }
 
 
-def _shop_embed(balance: int, rerolls_left: int, owned: list[str], selected: str) -> discord.Embed:
+def _shop_embed(balance: int, rerolls_left: int, owned: list[str], selected: str,
+                protects: int) -> discord.Embed:
     embed = discord.Embed(
         title="🪙 악귀상점",
         description=f"내 악귀코인: **{balance}개**\n`/출석` · `/미션` · `/업적`으로 모아요.",
@@ -62,6 +64,15 @@ def _shop_embed(balance: int, rerolls_left: int, owned: list[str], selected: str
         value=(
             "이름과 색을 직접 정하는 나만의 역할이에요.\n"
             "　└ `/칭호구매` 에서 기간을 골라 사요 (기간이 남았을 때 또 사면 이어붙어요)"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"🧊 출석 보호권 — {PROTECT_PRICE}코인",
+        value=(
+            "하루 빠져도 **연속 출석이 안 끊겨요.** 다음 출석 때 자동으로 쓰여요.\n"
+            "　└ 살릴 수 있는 건 **하루치**예요 (이틀 이상 빠지면 못 살려요)\n"
+            f"　└ 지금 가진 보호권: **{protects}/{PROTECT_MAX}장**"
         ),
         inline=False,
     )
@@ -252,6 +263,44 @@ class ShopView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="출석 보호권", emoji="🧊", style=discord.ButtonStyle.primary)
+    async def protect(self, interaction: discord.Interaction, button: discord.ui.Button):
+        have = await inventory_store.protect_count(interaction.user.id)
+        if have >= PROTECT_MAX:
+            await interaction.response.send_message(
+                f"보호권은 최대 **{PROTECT_MAX}장**까지만 가질 수 있어요. 지금 {have}장 갖고 있어요.\n"
+                "-# 쌓아둘 수 있으면 사실상 연속 출석이 무의미해져서 상한을 뒀어요.",
+                ephemeral=True,
+            )
+            return
+
+        # ⚠️ 코인부터 빼요. 지급을 먼저 하면 코인이 모자랄 때 공짜로 받아가요.
+        if not await coin_wallet.spend(interaction.user.id, PROTECT_PRICE, reason="출석보호권"):
+            balance = await coin_wallet.get_balance(interaction.user.id)
+            await interaction.response.send_message(
+                f"악귀코인이 부족해요. 보호권은 **{PROTECT_PRICE}개**가 필요한데 "
+                f"지금 **{balance}개** 갖고 있어요.",
+                ephemeral=True,
+            )
+            return
+
+        if not await inventory_store.grant_protect(interaction.user.id):
+            # 그 찰나에 상한이 찼어요(동시에 두 번 눌렀을 때). 코인은 돌려줘요.
+            await coin_wallet.add(interaction.user.id, PROTECT_PRICE, reason="출석보호권 환불")
+            await interaction.response.send_message(
+                f"보호권이 이미 {PROTECT_MAX}장이에요. 코인은 돌려드렸어요.", ephemeral=True
+            )
+            return
+
+        have = await inventory_store.protect_count(interaction.user.id)
+        balance = await coin_wallet.get_balance(interaction.user.id)
+        await interaction.response.send_message(
+            f"🧊 출석 보호권을 샀어요. 지금 **{have}장** · 남은 코인 {balance}개\n"
+            "-# 하루 빠진 뒤 `/출석`을 하면 **자동으로** 쓰여서 연속이 이어져요.",
+            ephemeral=True,
+        )
+        log.info("🧊 출석 보호권 구매: %s (보유 %d장)", interaction.user.id, have)
+
     @discord.ui.button(label="카드 테마", emoji="🎨", style=discord.ButtonStyle.secondary)
     async def theme(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = await cosmetic_store.get(interaction.user.id)
@@ -276,7 +325,7 @@ class AkguiShop(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="악귀상점", description="악귀코인으로 미션 리롤권·칭호·카드 테마를 사요.")
+    @app_commands.command(name="악귀상점", description="악귀코인으로 미션 리롤권·출석 보호권·칭호·카드 테마를 사요.")
     async def shop(self, interaction: discord.Interaction):
         # 채널 제한을 안 걸었어요. 소비처가 없어서 코인이 쌓이는 게 문제였는데, 여기에
         # "그건 저쪽 채널에서" 를 또 붙이면 안 쓰는 이유를 하나 더 만드는 거예요.
@@ -284,10 +333,11 @@ class AkguiShop(commands.Cog):
         balance = await coin_wallet.get_balance(interaction.user.id)
         left = await mission_store.rerolls_left(interaction.user.id)
         state = await cosmetic_store.get(interaction.user.id)
+        protects = await inventory_store.protect_count(interaction.user.id)
 
         view = ShopView(self, interaction.user.id)
         view.message = await interaction.followup.send(
-            embed=_shop_embed(balance, left, state["themes"], state["theme"]),
+            embed=_shop_embed(balance, left, state["themes"], state["theme"], protects),
             view=view, ephemeral=True, wait=True,
         )
 

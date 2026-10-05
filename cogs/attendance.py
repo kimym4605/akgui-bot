@@ -184,6 +184,42 @@ class Attendance(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    @app_commands.command(name="출석순위", description="연속 출석·누적 출석 순위를 봐요.")
+    @restrict_to_channel("attend")
+    async def attend_ranking(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        data = await attend_service.rankings(limit=10)
+
+        def render(rows, suffix: str) -> str:
+            if not rows:
+                return "아직 아무도 없어요."
+            medals = ["🥇", "🥈", "🥉"]
+            out = []
+            for i, row in enumerate(rows):
+                uid, value = row[0], row[1]
+                mark = medals[i] if i < 3 else f"`{i + 1}.`"
+                # 오늘 아직 출석 안 한 사람은 표시해줘요(연속 순위에서만 세 번째 값이 있어요).
+                todo = "" if len(row) < 3 or row[2] else " ⏳"
+                out.append(f"{mark} <@{uid}> — **{value}{suffix}**{todo}")
+            return "\n".join(out)
+
+        embed = discord.Embed(
+            title="🏆 출석 순위",
+            color=0xFFC850,
+            description="-# ⏳ 는 오늘 출석을 아직 안 한 사람이에요.",
+        )
+        embed.add_field(name="🔥 연속 출석", value=render(data["streak"], "일"), inline=False)
+        embed.add_field(name="📅 누적 출석", value=render(data["total"], "회"), inline=False)
+        if data["risky"]:
+            names = " · ".join(f"<@{uid}> ({streak}일)" for uid, streak in data["risky"])
+            embed.add_field(
+                name="🧊 오늘 안 오면 끊겨요",
+                value=f"{names}\n-# `/악귀상점`의 출석 보호권으로 되살릴 수 있어요.",
+                inline=False,
+            )
+        # 멘션 글씨는 보이되 핑은 안 쏴요 (순위표가 사람들을 호출하면 시끄러워요).
+        await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
     @app_commands.command(name="출석", description="오늘의 출석체크를 합니다. (하루 1회, 악귀코인 획득)")
     @restrict_to_channel("attend")
     async def do_attend(self, interaction: discord.Interaction):
@@ -203,14 +239,31 @@ class Attendance(commands.Cog):
             )
             return
 
-        description = (
-            f"획득 악귀코인: **+{info['coinGain']}개**\n"
-            f"보유 악귀코인: **{info['coin']}개**\n"
-            f"🔥 연속 출석: **{info['streak']}일째**"
-        )
+        streak = info["streak"]
+        lines = [f"획득 악귀코인: **+{info['coinGain']}개**"]
+        # 보너스가 붙었으면 **왜 더 받았는지** 한 줄로 보여줘요. 숫자만 바뀌면 왜 늘었는지 몰라요.
+        if info.get("streakBonus"):
+            lines.append(f"　└ 🔥 연속 {streak}일 보너스 **+{info['streakBonus']}**")
+        if info.get("weeklyBonus"):
+            lines.append(f"　└ 📅 {attend_service.WEEKLY_BONUS_EVERY}일 개근 보너스 **+{info['weeklyBonus']}**")
+        lines.append(f"보유 악귀코인: **{info['coin']}개**")
+        lines.append(f"🔥 연속 출석: **{streak}일째**")
+        if info.get("usedProtect"):
+            lines.append("🧊 **출석 보호권을 써서 연속이 안 끊겼어요!** (어제 빠진 걸 메웠어요)")
+        else:
+            # 다음 보너스까지 얼마나 남았는지 알려줘요. 이게 없으면 연속이 그냥 숫자예요.
+            to_weekly = attend_service.WEEKLY_BONUS_EVERY - (streak % attend_service.WEEKLY_BONUS_EVERY)
+            next_tier = next(
+                (t for t, _ in reversed(attend_service.STREAK_BONUS_TIERS) if streak < t), None
+            )
+            tail = f"-# {to_weekly}일 더 모으면 개근 보너스 **+{attend_service.WEEKLY_BONUS_COIN}**"
+            if next_tier:
+                tail += f" · {next_tier - streak}일 더 가면 매일 받는 코인이 올라요"
+            lines.append(tail)
+
         embed = discord.Embed(
             title="✅ 출석 완료!",
-            description=description,
+            description="\n".join(lines),
             color=0x57F287,
         )
         embed.set_thumbnail(url="attachment://coin.png")
