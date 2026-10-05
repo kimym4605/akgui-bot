@@ -95,6 +95,15 @@ async def take_bet(interaction: discord.Interaction, amount: int) -> tuple[bool,
     return True, ""
 
 
+async def refund_bet(user_id: int, amount: int) -> None:
+    """게임이 시작도 못 했을 때 **코인과 하루 한도를 둘 다** 되돌려요.
+
+    둘 중 하나만 돌려주면 "코인은 돌아왔는데 한도는 줄어든 채"가 돼요(2026-10-05 신고 내용이
+    정확히 그거였어요 — 15코인만 썼는데 한도는 20으로 찍힘)."""
+    await coin_wallet.add(user_id, amount, reason="도박 환불")
+    await casino_store.refund_wager(user_id, amount)
+
+
 async def pay_out(user_id: int, bet: int, multiplier: int) -> tuple[int, int]:
     """돌려받을 금액을 넣고 (받은 금액, 잔액). multiplier는 **총 반환 배수**예요(0이면 꽝)."""
     payout = bet * multiplier
@@ -185,7 +194,11 @@ class BlackjackView(discord.ui.View):
         # 버튼만 꺼버리면 차감된 코인이 허공에 떠요. 자동으로 스탠드 처리해서 정산해요.
         await self.finish(None)
 
-    @discord.ui.button(label="히트", emoji="🂠", style=discord.ButtonStyle.primary)
+    # ⚠️ 여기 이모지로 `🂠`(U+1F0A0 카드 뒷면)을 썼다가 **블랙잭이 통째로 터졌어요**
+    # (2026-10-05). 유니코드 '카드' 블록 문자는 생긴 건 이모지 같아도 디스코드가
+    # 이모지로 안 받아줘요 → `400 Invalid Form Body: components.0.components.0.emoji.name`.
+    # 버튼이 필요 없는 '처음부터 21' 판만 성공해서 더 늦게 발견됐어요.
+    @discord.ui.button(label="히트", emoji="➕", style=discord.ButtonStyle.primary)
     async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.player.append(self.deck.pop())
         if games.hand_value(self.player) >= 21:
@@ -290,8 +303,24 @@ class Casino(commands.Cog):
             log.info("🃏 블랙잭(즉시): %s %d코인 → %d코인", interaction.user.id, 금액, payout)
             return
 
-        view.message = await interaction.followup.send(embed=view.table_embed(reveal=False),
-                                                       view=view, wait=True)
+        # 🚨 판을 띄우지 못하면 **코인과 한도를 반드시 돌려줘야** 해요. 코인은 이미 빠진
+        # 뒤라, 여기서 터지면 유저는 하지도 않은 판에 돈을 낸 셈이 돼요.
+        # 2026-10-05에 실제로 그랬어요 — 버튼 이모지가 잘못돼서 디스코드가 400을 냈고,
+        # 한 사람이 5코인과 하루 한도 5를 날렸어요(그걸로 이 버그를 발견했어요).
+        try:
+            view.message = await interaction.followup.send(
+                embed=view.table_embed(reveal=False), view=view, wait=True
+            )
+        except discord.HTTPException:
+            view.done = True
+            view.stop()
+            await refund_bet(interaction.user.id, 금액)
+            log.exception("🃏 블랙잭 판을 띄우지 못했어요 — 코인·한도를 돌려줬어요 (user=%s)",
+                          interaction.user.id)
+            await interaction.followup.send(
+                "⚠️ 판을 여는 데 실패했어요. **건 코인과 오늘 한도는 돌려드렸어요.** 다시 시도해주세요.",
+                ephemeral=True,
+            )
 
     # ------------------------------------------------------------------
     @group.command(name="현황", description="오늘 남은 베팅 한도와 각 게임의 환수율을 봐요.")
