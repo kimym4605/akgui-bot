@@ -11,12 +11,22 @@
 - **지급 vs 소비**: 소비가 지급의 20%도 안 되면 코인이 쌓이기만 하는 거예요. 그때는
   소비처를 더 만들기 전에 `attend_service.STREAK_BONUS_TIERS`·`WEEKLY_BONUS_COIN`부터
   낮추는 게 맞아요(발행을 줄이는 쪽이 확실해요).
-- 🚨 **내전베팅은 소비가 아니에요.** 파리뮤추얼이라 진 쪽 판돈이 이긴 쪽으로 **재분배**될
-  뿐 코인이 사라지지 않아요. 그래서 '진짜 소각'을 따로 세요.
+- 🚨 **`coin_log`의 kind만 보고 세면 양쪽이 다 부풀어요.** 돈이 오가는 기능은 `spend`로
+  나갔다가 `add`로 돌아오기 때문에, **차액만** 발행/소각이에요. 2026-10-06에 이걸 안 빼서
+  소각률을 17.5%로 읽었는데 실제로는 6.4%였어요(도박 베팅 148코인 중 121코인이 당첨금으로
+  돌아왔는데 그게 '소각 148 + 발행 121'로 이중 계상됐어요). 그래서 아래 세 갈래로 나눠요:
+    - **발행/소각**: 출석·미션·업적(add) vs 칭호·리롤권·보호권·테마(spend) ← 이것만 총량을 바꿔요
+    - **재분배**: `내전베팅`(spend) ↔ `베팅정산:*`(add). 파리뮤추얼이라 **총량 불변** → 양쪽 다 제외
+    - **도박**: `도박`(spend) ↔ `도박 당첨`·`도박 환불`(add). **차액(하우스 몫)만 소각**
 - 🚨 **카드 테마는 유한한 소비처예요**(6종 × 15 = 90코인이면 소진). 반복되는 소각은
-  칭호 유지와 미션 리롤뿐이라, 장기 균형은 그 둘이 결정해요.
-- **미션**: `val_*`가 발로란트 자동판정 대상이에요. 2026-10-05 05:33에 429를 고쳤으니
-  그 전후를 비교해요. 발로 미션 완료는 17~01시에 몰려서 **아침에 재야** 하루치가 잡혀요.
+  칭호 유지와 미션 리롤, 그리고 도박 하우스 몫뿐이라 장기 균형은 그것들이 결정해요.
+- 🚨 **도박은 소각 속도가 느려요.** 엣지가 ~9%라 148코인이 돌아도 27코인만 사라져요.
+  "많이 쓴다"와 "많이 태운다"는 다른 얘기라, 베팅총액이 아니라 **순소각**을 보세요.
+- **미션**: `val_*`가 발로란트 자동판정 대상이에요. 2026-10-05 05:33에 429를 고쳤어요
+  (2026-10-06 로그로 429·조회실패 0건 / 30분 루프 무중단 확인 — 기술적으론 해결됐어요).
+  남은 건 완료율인데, 발로 미션 완료는 17~01시에 몰려서 **아침에 재야** 하루치가 잡혀요.
+- ⚠️ **`coin_log`의 유저 필드는 kind에 따라 달라요.** `add`는 `to`, `spend`는 `from`이에요.
+  한쪽만 보면 "이용자 1명"처럼 나와요(실제로는 9명이었어요).
 """
 import os
 import statistics
@@ -35,13 +45,36 @@ from utils.pokemon_store import _db  # noqa: E402
 
 KST = timezone(timedelta(hours=9))
 TODAY = datetime.now(KST).date()
-# 재분배일 뿐 소각이 아닌 항목이에요. 진짜 소각을 셀 때 빼요.
-NON_BURN_NOTES = ("내전베팅",)
+# 나갔다가 그대로 돌아오는 재분배예요(파리뮤추얼). 총량이 안 바뀌니 발행·소각 양쪽에서 빼요.
+REDIST_SPEND = ("내전베팅",)
+REDIST_ADD = ("베팅정산",)
+# 나갔다가 일부만 돌아와요. 차액(하우스 몫)만 소각이에요.
+GAMBLE_SPEND = ("도박",)
+GAMBLE_ADD = ("도박 당첨", "도박 환불", "도박 버그 보상")
 
 
 def kst_of(oid):
     """coin_log에는 시각 필드가 없어요. ObjectId 앞 4바이트에 생성시각이 들어있어요."""
     return oid.generation_time.astimezone(KST)
+
+
+def classify(entry):
+    """로그 한 줄을 'issue(발행)/burn(소각)/gamble_bet/gamble_back/redist' 로 갈라요.
+
+    ⚠️ `도박 당첨`이 `도박`으로도 시작하니까, **add/spend를 먼저 보고** 판단해요.
+    """
+    note = entry["note"] or ""
+    if entry["kind"] == "add":
+        if note.startswith(GAMBLE_ADD):
+            return "gamble_back"
+        if note.startswith(REDIST_ADD):
+            return "redist"
+        return "issue"
+    if note.startswith(GAMBLE_SPEND):
+        return "gamble_bet"
+    if note.startswith(REDIST_SPEND):
+        return "redist"
+    return "burn"
 
 
 def bar(n, scale=1):
@@ -53,47 +86,70 @@ print(f"악귀 경제 리포트 — {datetime.now(KST):%Y-%m-%d %H:%M} KST")
 print("=" * 72)
 
 # ── 1. 코인 지급 vs 소비 ────────────────────────────────────────────
-logs = list(_db["coin_log"].find({}, {"kind": 1, "amount": 1, "note": 1}))
-add = [l for l in logs if l["kind"] == "add"]
-spend = [l for l in logs if l["kind"] == "spend"]
-burn = [l for l in spend if not l["note"].startswith(NON_BURN_NOTES)]
+logs = list(_db["coin_log"].find({}, {"kind": 1, "amount": 1, "note": 1, "to": 1, "from": 1}))
+for entry in logs:
+    entry["cls"] = classify(entry)
+
+
+def total(cls, rows=None):
+    return sum(l["amount"] for l in (rows or logs) if l["cls"] == cls)
+
+
+def rows_of(cls, rows=None):
+    return [l for l in (rows or logs) if l["cls"] == cls]
+
+
+issued = total("issue")
+burned = total("burn")
+bet, back = total("gamble_bet"), total("gamble_back")
+house = bet - back                      # 도박에서 실제로 사라진 코인
+net_burn = burned + house
 
 print(f"\n[1] 코인 흐름 (전체 기간, 기록 {len(logs)}건)")
-print(f"  지급      {len(add):4d}건 / {sum(l['amount'] for l in add):5d}코인")
-print(f"  소비      {len(spend):4d}건 / {sum(l['amount'] for l in spend):5d}코인")
-print(f"  └ 진짜 소각 {len(burn):3d}건 / {sum(l['amount'] for l in burn):5d}코인"
-      "   (내전베팅은 재분배라 제외)")
-issued = sum(l["amount"] for l in add) or 1
-print(f"  소각률    {sum(l['amount'] for l in burn) / issued * 100:.1f}%  "
-      "← 20% 아래면 발행을 줄이는 걸 먼저 검토")
+print(f"  발행       {len(rows_of('issue')):4d}건 / {issued:5d}코인   (출석·미션·업적)")
+print(f"  소각       {len(rows_of('burn')):4d}건 / {burned:5d}코인   (칭호·리롤권·보호권·테마)")
+print(f"  도박       {len(rows_of('gamble_bet')):4d}판 / 베팅 {bet}코인 → 환급 {back}코인 "
+      f"→ **순소각 {house}코인** (실측 하우스몫 {house / max(bet, 1) * 100:.0f}%)")
+print(f"  내전베팅   {len(rows_of('redist')):4d}건 / {total('redist'):5d}코인   "
+      "(파리뮤추얼 = 재분배, 총량 불변이라 양쪽에서 제외)")
+print(f"  ─────────────────────────────────────────")
+print(f"  순소각     {net_burn}코인 / 발행 {issued}코인 → **소각률 {net_burn / max(issued, 1) * 100:.1f}%**")
+print("             ← 20% 아래면 소비처를 더 만들기보다 발행을 줄이는 쪽을 먼저 검토")
 
-print("\n  소비처별:")
+print("\n  소각·소비처별 (spend 기준, 실제 사라진 양은 도박만 다름):")
+spend = [l for l in logs if l["kind"] == "spend"]
 for note, count in Counter(l["note"] for l in spend).most_common():
-    amount = sum(l["amount"] for l in spend if l["note"] == note)
-    tag = "  (재분배)" if note.startswith(NON_BURN_NOTES) else ""
-    print(f"    {note:22s} {count:3d}건 / {amount:4d}코인{tag}")
+    rows = [l for l in spend if l["note"] == note]
+    amount = sum(l["amount"] for l in rows)
+    users = len({l.get("from") for l in rows})          # ⚠️ spend는 from이 유저예요
+    cls = rows[0]["cls"]
+    tag = {"redist": "  (재분배 — 소각 아님)",
+           "gamble_bet": f"  (환급 {back} 제외하면 실소각 {house})"}.get(cls, "")
+    print(f"    {note:16s} {count:3d}건 / {amount:4d}코인 / {users:2d}명{tag}")
 
-print("\n  2026-10-05에 만든 소비처:")
+print("\n  2026-10-05에 만든 소비처가 실제로 쓰이는지:")
 for key, label in [("미션리롤", "🎲 미션 리롤권"), ("출석보호권", "🧊 출석 보호권"),
-                   ("카드테마", "🎨 카드 테마"), ("칭호구매", "🏷️ 칭호")]:
-    rows = [l for l in spend if l["note"].startswith(key)]
-    print(f"    {label:16s} {len(rows):3d}건 / {sum(l['amount'] for l in rows):4d}코인")
+                   ("카드테마", "🎨 카드 테마"), ("칭호구매", "🏷️ 칭호"), ("도박", "🎰 도박")]:
+    rows = [l for l in spend if (l["note"] or "").startswith(key)]
+    users = len({l.get("from") for l in rows})
+    flag = "" if rows else "   ← 0건. 구매력 문제인지 발견 문제인지 [3]과 함께 보세요"
+    print(f"    {label:16s} {len(rows):3d}건 / {sum(l['amount'] for l in rows):4d}코인 / {users:2d}명{flag}")
 
-# ── 2. 최근 7일 지급/소비 추이 ──────────────────────────────────────
-print("\n[2] 최근 7일 흐름 (지급 ■ / 소각 □)")
-daily = defaultdict(lambda: [0, 0])
+# ── 2. 최근 7일 발행/소각 추이 ──────────────────────────────────────
+print("\n[2] 최근 7일 흐름 — 순증이 +면 코인이 쌓이는 중이에요")
+print("    (도박은 베팅총액이 아니라 하우스 몫만 소각으로 넣었어요)")
+daily = defaultdict(lambda: defaultdict(int))
 for l in logs:
     day = kst_of(l["_id"]).date()
     if (TODAY - day).days > 6:
         continue
-    if l["kind"] == "add":
-        daily[day][0] += l["amount"]
-    elif not l["note"].startswith(NON_BURN_NOTES):
-        daily[day][1] += l["amount"]
+    daily[day][l["cls"]] += l["amount"]
+print(f"  {'날짜':12s}{'발행':>6s}{'소각':>6s}{'도박순소각':>11s}{'순증':>8s}")
 for day in sorted(daily):
-    give, take = daily[day]
-    print(f"  {day}  지급 {give:3d} {bar(give, 2)}")
-    print(f"              소각 {take:3d} {bar(take, 2)}")
+    r = daily[day]
+    gh = r["gamble_bet"] - r["gamble_back"]
+    net = r["issue"] - r["burn"] - gh
+    print(f"  {day}  {r['issue']:6d}{r['burn']:6d}{gh:11d}{net:+8d}  {bar(max(net, 0), 2)}")
 
 # ── 3. 지갑 분포 ────────────────────────────────────────────────────
 balances = []
@@ -121,6 +177,27 @@ for day in sorted(by_day)[-10:]:
     r = by_day[day]
     mark = "  ← 429 수정 이후" if day >= "2026-10-05" else ""
     print(f"  {day:12s} {r['val']:5d} {r['server']:5d} {len(r['users']):5d}{mark}")
+
+# `missions`는 유저당 문서 1개를 당일로 덮어써요(replace_one). 그래서 완료율은 **오늘치만**
+# 구할 수 있어요. 과거는 위 coin_log 건수로 보세요.
+today_iso = TODAY.isoformat()
+docs = [d for d in _db["missions"].find({}, {"date": 1, "picks": 1, "done": 1})
+        if d.get("date") == today_iso]
+tally = defaultdict(lambda: [0, 0])     # [배정, 완료]
+for d in docs:
+    done = set(d.get("done") or [])
+    for pick in d.get("picks") or []:
+        kind = "발로(자동판정)" if pick.startswith("val_") else "서버(수동)"
+        tally[kind][0] += 1
+        tally[kind][1] += pick in done
+print(f"\n  오늘({today_iso}) 완료율 — {len(docs)}명 배정, {datetime.now(KST):%H시} 현재")
+for kind in ("발로(자동판정)", "서버(수동)"):
+    picked, done = tally[kind]
+    print(f"    {kind:14s} {done:3d}/{picked:3d} = {done / max(picked, 1) * 100:3.0f}%")
+picked = sum(v[0] for v in tally.values())
+done = sum(v[1] for v in tally.values())
+print(f"    {'전체':14s} {done:3d}/{picked:3d} = {done / max(picked, 1) * 100:3.0f}%"
+      "   ← 2026-10-05 기준값 14%, 10-06 20시 19%")
 
 # ── 5. 연속 출석 ────────────────────────────────────────────────────
 print("\n[5] 연속 출석 (2026-10-05 개편: 보호권·주간/구간 보너스)")
