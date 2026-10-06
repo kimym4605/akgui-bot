@@ -10,6 +10,21 @@
 올라가서 배당표만으로는 소각량을 못 묶거든요.
 
 날짜가 바뀌면 그냥 새 문서로 덮어써요(기록을 쌓을 이유가 없어요 - 통계는 `coin_log`에 남아요).
+
+## 🔓 한도 연장권 (2026-10-06)
+
+한도는 **실제로 병목이다.** 그날 도박한 9명 중 **5명이 20코인을 전부 소진**했고, 한도 근처
+(15~19코인)에서 멈춘 사람은 **0명**이었어요 - 닿으면 끝까지 써요. 그래서 "더 걸고 싶으면
+코인을 내라"는 소비처를 붙였어요. 코인이 **확실히 사라지는** 소각이라, 엣지로 조금씩 태우는
+도박 본체보다 소각 효율이 좋아요(5코인 즉시 + 늘어난 10코인에서 엣지 ~1코인).
+
+🚨 **그래도 한도 자체를 없애면 안 돼요.** 위에 적은 "잃어도 내일이면 돌아온다"가 무너져요.
+그래서 **하루 1회 · +10코인**으로 묶었어요(20 → 30이 천장). 무제한으로 열면 지갑이 두꺼운
+사람이 하루에 전재산을 넣을 수 있어요.
+
+⚠️ 한도 도달자의 지갑은 대개 비어 있어요(실측: 5명 중 3명이 잔액 0~1코인). 한도까지 걸었다는
+건 보통 코인을 다 태웠다는 뜻이라, **연장권의 실수요자는 "한도는 찼지만 지갑이 두꺼운 사람"**
+이에요. 그래서 가격을 5코인으로 잡았어요 - 지갑 중앙값 3코인 기준으로 아무나 못 사는 값이에요.
 """
 import asyncio
 import logging
@@ -25,7 +40,11 @@ KST = timezone(timedelta(hours=9))
 
 MIN_BET = 1
 MAX_BET = 5          # 1회 최대
-DAILY_LIMIT = 20     # 하루 총 베팅액
+DAILY_LIMIT = 20     # 하루 총 베팅액 (연장권을 사면 늘어나요)
+
+EXTEND_PRICE = 5         # 🔓 한도 연장권 값
+EXTEND_BONUS = 10        # 한 번 사면 늘어나는 한도
+EXTEND_MAX_PER_DAY = 1   # 🚨 하루 1회. 올리면 "잃어도 내일이면 돌아온다"가 무너져요.
 
 
 def today_iso() -> str:
@@ -36,11 +55,21 @@ def _uid(user_id) -> str:
     return str(user_id)
 
 
-def _wagered_sync(user_id) -> int:
-    doc = _casino.find_one({"_id": _uid(user_id)}, {"date": 1, "wagered": 1})
+def limit_of(extended: int) -> int:
+    """연장 횟수에 맞는 그 사람의 오늘 한도."""
+    return DAILY_LIMIT + EXTEND_BONUS * max(0, int(extended or 0))
+
+
+def _state_sync(user_id) -> tuple[int, int]:
+    """(오늘 누적 베팅액, 오늘 연장 횟수). 날짜가 지난 문서는 0으로 봐요."""
+    doc = _casino.find_one({"_id": _uid(user_id)}, {"date": 1, "wagered": 1, "extended": 1})
     if not doc or doc.get("date") != today_iso():
-        return 0
-    return int(doc.get("wagered") or 0)
+        return 0, 0
+    return int(doc.get("wagered") or 0), int(doc.get("extended") or 0)
+
+
+def _wagered_sync(user_id) -> int:
+    return _state_sync(user_id)[0]
 
 
 def _try_wager_sync(user_id, amount: int) -> tuple[bool, int]:
@@ -49,7 +78,10 @@ def _try_wager_sync(user_id, amount: int) -> tuple[bool, int]:
     ⚠️ 읽고 나서 더하면 동시에 두 번 들어왔을 때 한도를 넘어요. 그래서 **조건을 붙인 한 번의
     update**로 처리해요. 날짜가 바뀐 경우를 같은 쿼리에서 다루려고 두 번 시도해요."""
     uid, today = _uid(user_id), today_iso()
-    limit_left = DAILY_LIMIT - amount
+    # ⚠️ 한도가 사람마다 달라졌으니(연장권) 먼저 읽어야 해요. 읽은 뒤에 연장권이 팔려도
+    #    **한도를 작게 보는 쪽**으로만 틀려서 안전해요(`extended`는 늘기만 해요). 열어주는
+    #    쪽으로 틀리면 한도가 무의미해지니까, 거절 쪽으로 기우는 게 맞아요.
+    limit_left = limit_of(_state_sync(user_id)[1]) - amount
 
     # ① 오늘 문서가 이미 있고 한도가 남은 경우
     res = _casino.update_one(
@@ -60,9 +92,11 @@ def _try_wager_sync(user_id, amount: int) -> tuple[bool, int]:
         return True, _wagered_sync(user_id)
 
     # ② 오늘 문서가 없거나 날짜가 지난 경우 → 새로 시작
+    # 🚨 `extended`를 0으로 **반드시 같이** 되돌려요. 안 그러면 어제 산 연장권이 오늘도 살아서
+    #    한도가 영구히 30코인이 돼요.
     res = _casino.update_one(
         {"_id": uid, "date": {"$ne": today}},
-        {"$set": {"date": today, "wagered": amount}},
+        {"$set": {"date": today, "wagered": amount, "extended": 0}},
     )
     if res.modified_count == 1:
         return True, amount
@@ -70,13 +104,38 @@ def _try_wager_sync(user_id, amount: int) -> tuple[bool, int]:
     # ③ 문서 자체가 없으면 만들어요(처음 하는 사람).
     if _casino.find_one({"_id": uid}, {"_id": 1}) is None:
         try:
-            _casino.insert_one({"_id": uid, "date": today, "wagered": amount})
+            _casino.insert_one({"_id": uid, "date": today, "wagered": amount, "extended": 0})
             return True, amount
         except Exception:  # noqa: BLE001  (그 찰나에 누가 먼저 만들었어요)
             pass
 
     # 여기까지 왔으면 한도를 넘은 거예요.
     return False, _wagered_sync(user_id)
+
+
+def _extend_sync(user_id) -> tuple[bool, int]:
+    """한도를 늘려 **자리를 먼저 잡아요**. (성공, 늘어난 뒤의 한도).
+
+    🚨 코인을 빼기 **전에** 이걸 불러요. 버튼을 연타하면 결제가 두 번 될 수 있는데, 그걸
+    막을 수 있는 건 이 조건부 update 하나뿐이에요. 코인 차감이 실패하면 `_undo_extend_sync`로
+    되돌려요.
+    ⚠️ `extended` 필드가 **없는 옛 문서**가 있어요(연장권 전에 만들어진 것). `{"$lt": 1}`만
+    쓰면 그 문서들이 필터에 안 걸려서 아무도 연장을 못 사요. `$exists: False`를 같이 봐요."""
+    uid, today = _uid(user_id), today_iso()
+    res = _casino.update_one(
+        {"_id": uid, "date": today,
+         "$or": [{"extended": {"$exists": False}},
+                 {"extended": {"$lt": EXTEND_MAX_PER_DAY}}]},
+        {"$inc": {"extended": 1}},
+    )
+    if res.modified_count != 1:
+        return False, limit_of(_state_sync(user_id)[1])
+    return True, limit_of(_state_sync(user_id)[1])
+
+
+def _undo_extend_sync(user_id) -> None:
+    _casino.update_one({"_id": _uid(user_id), "date": today_iso()},
+                       {"$inc": {"extended": -1}})
 
 
 # ------------------------------------------------------------------
@@ -89,6 +148,26 @@ async def wagered_today(user_id) -> int:
         # 조회 실패 시 **한도를 다 쓴 것처럼** 봐요. 열어주는 쪽으로 틀리면 한도가 무의미해져요.
         log.warning("도박 한도 조회 실패 - 한도 소진으로 처리해요 (user=%s)", user_id, exc_info=True)
         return DAILY_LIMIT
+
+
+async def state_today(user_id) -> tuple[int, int]:
+    """(오늘 누적 베팅액, 오늘 한도). 조회가 실패하면 **한도를 다 쓴 것처럼** 봐요."""
+    try:
+        wagered, extended = await asyncio.to_thread(_state_sync, user_id)
+        return wagered, limit_of(extended)
+    except Exception:  # noqa: BLE001
+        log.warning("도박 한도 조회 실패 - 한도 소진으로 처리해요 (user=%s)", user_id, exc_info=True)
+        return DAILY_LIMIT, DAILY_LIMIT
+
+
+async def extend_limit(user_id) -> tuple[bool, int]:
+    """한도 연장 자리를 선점해요. (성공, 늘어난 뒤의 한도). 코인 차감 **전에** 부르세요."""
+    return await asyncio.to_thread(_extend_sync, user_id)
+
+
+async def undo_extend(user_id) -> None:
+    """연장을 선점했는데 코인을 못 뺐을 때 되돌려요."""
+    await asyncio.to_thread(_undo_extend_sync, user_id)
 
 
 async def try_wager(user_id, amount: int) -> tuple[bool, int]:

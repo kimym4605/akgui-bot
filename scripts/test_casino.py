@@ -10,6 +10,8 @@
   4) 블랙잭 규칙(A 처리·버스트·무승부 반환·블랙잭 배당)이 정확한지
   5) 베팅 한도: 1회 최대·하루 총액이 지켜지고 동시 요청에도 안 뚫리는지
   6) 한도 조회가 실패하면 **막는 쪽**으로 기운다 (열어주면 한도가 무의미해져요)
+  7) 🔓 한도 연장권: 하루 1회가 지켜지고, 날짜가 바뀌면 리셋되고, 결제 실패 시
+     공짜 연장이 남지 않는지 (+ `extended` 필드가 없는 옛 문서도 살 수 있는지)
 """
 import asyncio
 import os
@@ -143,11 +145,22 @@ class FakeCasino:
         for key, cond in flt.items():
             if key == "_id":
                 continue
+            # ⚠️ `$or`는 **키가 아니라 조건 목록**이에요. 여기서 안 다루면 연장권 쿼리
+            #    (`extended`가 없는 옛 문서 + 아직 안 늘린 문서)가 조용히 통과해버려서,
+            #    테스트가 실제 Mongo와 다른 답을 내요.
+            if key == "$or":
+                if not any(self._match(doc, sub) for sub in cond):
+                    return False
+                continue
             value = (doc or {}).get(key)
             if isinstance(cond, dict):
                 if "$lte" in cond and not (isinstance(value, int) and value <= cond["$lte"]):
                     return False
+                if "$lt" in cond and not (isinstance(value, int) and value < cond["$lt"]):
+                    return False
                 if "$ne" in cond and value == cond["$ne"]:
+                    return False
+                if "$exists" in cond and (value is not None) != cond["$exists"]:
                     return False
             elif value != cond:
                 return False
@@ -234,7 +247,69 @@ check("조회 실패 시 한도 소진으로 본다",
       asyncio.run(casino_store.wagered_today(1)) == casino_store.DAILY_LIMIT)
 casino_store._casino = fake
 
-print("7) 한 판에 잃을 수 있는 최대와 하루 최대")
+print("7) 🔓 한도 연장권 (하루 1회 · +10코인)")
+fake.docs.clear()
+check(f"값 {casino_store.EXTEND_PRICE}코인 · +{casino_store.EXTEND_BONUS}코인 · 하루 {casino_store.EXTEND_MAX_PER_DAY}회",
+      (casino_store.EXTEND_PRICE, casino_store.EXTEND_BONUS, casino_store.EXTEND_MAX_PER_DAY) == (5, 10, 1))
+check("연장 0회 = 한도 20", casino_store.limit_of(0) == 20)
+check("연장 1회 = 한도 30", casino_store.limit_of(1) == 30)
+check("None도 0으로 본다 (옛 문서)", casino_store.limit_of(None) == 20)
+
+for _ in range(4):
+    asyncio.run(casino_store.try_wager(10, 5))
+ok, _ = asyncio.run(casino_store.try_wager(10, 1))
+check("연장 전엔 20에서 막힌다", ok is False)
+ok, limit = asyncio.run(casino_store.extend_limit(10))
+check("연장 성공 → 한도 30", ok is True and limit == 30, f"{ok} {limit}")
+check("state_today가 늘어난 한도를 돌려준다",
+      asyncio.run(casino_store.state_today(10)) == (20, 30),
+      str(asyncio.run(casino_store.state_today(10))))
+ok, total = asyncio.run(casino_store.try_wager(10, 5))
+check("연장하면 다시 걸 수 있다", ok is True and total == 25, f"{ok} {total}")
+ok, _ = asyncio.run(casino_store.try_wager(10, 5))
+check("25 + 5 = 30 은 통과 (새 경계값)", ok is True)
+ok, _ = asyncio.run(casino_store.try_wager(10, 1))
+check("30을 넘기면 다시 막힌다 (= 연장도 천장이 있다)", ok is False)
+
+# 🚨 하루 1회. 이게 뚫리면 지갑이 두꺼운 사람이 한도를 무한히 늘릴 수 있어요.
+ok, limit = asyncio.run(casino_store.extend_limit(10))
+check("두 번째 연장은 거절 (하루 1회)", ok is False and limit == 30, f"{ok} {limit}")
+check("거절돼도 한도가 더 안 늘어난다", fake.docs["10"]["extended"] == 1,
+      str(fake.docs["10"].get("extended")))
+
+# 코인 차감이 실패했을 때 선점을 되돌리는 경로 (공짜 연장 방지)
+fake.docs.clear()
+asyncio.run(casino_store.try_wager(11, 5))
+asyncio.run(casino_store.extend_limit(11))
+check("되돌리기 전 한도 30", asyncio.run(casino_store.state_today(11))[1] == 30)
+asyncio.run(casino_store.undo_extend(11))
+check("되돌리면 한도 20 (결제 실패 시 공짜 연장이 안 남는다)",
+      asyncio.run(casino_store.state_today(11))[1] == 20,
+      str(asyncio.run(casino_store.state_today(11))))
+
+# ⚠️ `extended` 필드가 **없는** 옛 문서 (연장권 전에 만들어진 기록)
+fake.docs.clear()
+fake.docs["12"] = {"_id": "12", "date": casino_store.today_iso(), "wagered": 20}
+ok, limit = asyncio.run(casino_store.extend_limit(12))
+check("extended 필드가 없는 옛 문서도 연장할 수 있다", ok is True and limit == 30, f"{ok} {limit}")
+
+# 🚨 날짜가 바뀌면 연장도 함께 리셋돼야 해요 (안 그러면 한도가 영구히 30)
+fake.docs.clear()
+fake.docs["13"] = {"_id": "13", "date": "2020-01-01", "wagered": 30, "extended": 1}
+ok, total = asyncio.run(casino_store.try_wager(13, 5))
+check("어제 산 연장권은 오늘로 안 넘어온다",
+      ok is True and total == 5 and fake.docs["13"]["extended"] == 0,
+      f"{ok} {total} extended={fake.docs['13'].get('extended')}")
+for _ in range(3):
+    asyncio.run(casino_store.try_wager(13, 5))
+ok, _ = asyncio.run(casino_store.try_wager(13, 1))
+check("그래서 오늘 한도는 다시 20에서 막힌다", ok is False)
+
+# ⚠️ `cogs.casino`(=EXTEND_NOTE)는 여기서 import하면 안 돼요. `.env`를 읽기 **전**이라
+#    `ADULT_ROLE_ID`가 None으로 캐시돼서 아래 성인 게이트 검사가 통째로 깨져요.
+#    그 검사는 9) 뒤로 옮겼어요.
+
+print("8) 한 판에 잃을 수 있는 최대와 하루 최대")
 check(f"1회 최대 {casino_store.MAX_BET}코인", casino_store.MAX_BET == 5)
 check(f"하루 최대 {casino_store.DAILY_LIMIT}코인", casino_store.DAILY_LIMIT == 20)
 check("최소 베팅 1코인", casino_store.MIN_BET == 1)
@@ -242,7 +317,7 @@ biggest_win = casino_store.MAX_BET * max(p for _, p in games.SLOT_SYMBOLS)
 check(f"한 방 최대 당첨 {biggest_win}코인 (지갑 최대 97코인 대비 과하지 않음)",
       biggest_win <= 40, str(biggest_win))
 
-print("8) 🔞 성인 전용 게이트 (채널을 가리는 것만으로는 안 막혀요)")
+print("9) 🔞 성인 전용 게이트 (채널을 가리는 것만으로는 안 막혀요)")
 os.chdir(BOT_DIR)
 from dotenv import load_dotenv  # noqa: E402
 
@@ -327,6 +402,25 @@ async def _noop(*a, **kw):
 
 
 asyncio.run(check_commands())
+
+print("10) 🔓 연장권 버튼이 디스코드에 보낼 수 있는 모양인지")
+# 🚨 2026-10-05에 버튼 이모지(`🂠`)가 거부돼 블랙잭이 통째로 터졌어요. 여기선 `emoji=`를
+#    안 쓰고 **label 안에** 🔓를 넣었는데(label은 자유 텍스트라 안전해요), 눈으로 믿지 말고
+#    실제로 보낼 payload를 뽑아서 확인해요.
+view = casino_cog.ExtendLimitView(123)
+rows = view.to_components()
+buttons = [c for row in rows for c in row["components"]]
+check("버튼 1개 · 줄 1개", len(buttons) == 1 and len(rows) == 1, f"{len(buttons)}개/{len(rows)}줄")
+check("emoji= 를 안 쓴다 (블랙잭 사고 경로를 아예 안 탐)",
+      all("emoji" not in b for b in buttons))
+check("label이 80자 이하", all(len(b["label"]) <= 80 for b in buttons),
+      str([len(b["label"]) for b in buttons]))
+check("custom_id가 100자 이하", all(len(b["custom_id"]) <= 100 for b in buttons))
+check("label에 값과 증분이 적혀 있다 (누르기 전에 얼마인지 보여야 해요)",
+      str(casino_store.EXTEND_PRICE) in buttons[0]["label"]
+      and str(casino_store.EXTEND_BONUS) in buttons[0]["label"], buttons[0]["label"])
+check("연장권 note가 '도박'으로 시작하지 않는다 (경제 리포트가 베팅액으로 오인해요)",
+      not casino_cog.EXTEND_NOTE.startswith("도박"), casino_cog.EXTEND_NOTE)
 
 print()
 if failures:
