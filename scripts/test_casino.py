@@ -10,8 +10,9 @@
   4) 블랙잭 규칙(A 처리·버스트·무승부 반환·블랙잭 배당)이 정확한지
   5) 베팅 한도: 1회 최대·하루 총액이 지켜지고 동시 요청에도 안 뚫리는지
   6) 한도 조회가 실패하면 **막는 쪽**으로 기운다 (열어주면 한도가 무의미해져요)
-  7) 🔓 한도 연장권: 5코인마다 +10씩 **여러 번** 늘어나고, 날짜가 바뀌면 리셋되고,
-     결제 실패 시 공짜 연장이 남지 않는지 (+ `extended` 없는 옛 문서도 살 수 있는지)
+  7) 🔓 한도 연장권: **살수록 값이 오르고**(5→10→15) +10씩 여러 번 늘어나는지,
+     버튼 라벨이 그 값을 따라가는지, 날짜가 바뀌면 리셋되는지, 결제 실패 시 공짜
+     연장이 남지 않는지 (+ `extended` 없는 옛 문서도 살 수 있는지)
 """
 import asyncio
 import os
@@ -247,10 +248,24 @@ check("조회 실패 시 한도 소진으로 본다",
       asyncio.run(casino_store.wagered_today(1)) == casino_store.DAILY_LIMIT)
 casino_store._casino = fake
 
-print("7) 🔓 한도 연장권 (5코인마다 +10 · 횟수 제한 없음)")
+print("7) 🔓 한도 연장권 (+10씩 · 값은 5 → 10 → 15 로 오름 · 횟수 제한 없음)")
 fake.docs.clear()
-check(f"값 {casino_store.EXTEND_PRICE}코인 · 한 번에 +{casino_store.EXTEND_BONUS}코인",
-      (casino_store.EXTEND_PRICE, casino_store.EXTEND_BONUS) == (5, 10))
+check(f"첫 값 {casino_store.EXTEND_BASE_PRICE}코인 · 한 번에 +{casino_store.EXTEND_BONUS}코인",
+      (casino_store.EXTEND_BASE_PRICE, casino_store.EXTEND_BONUS) == (5, 10))
+# 🚨 살수록 비싸져야 해요. 고정가면 지갑 두꺼운 사람이 한도를 사실상 무한히 늘려요.
+check("값이 5 → 10 → 15 → 20 으로 오른다",
+      [casino_store.extend_price(i) for i in range(4)] == [5, 10, 15, 20],
+      str([casino_store.extend_price(i) for i in range(4)]))
+check("누적 지출 = 5·n(n+1)/2 (0·1·2·3·4번 → 0·5·15·30·50)",
+      [casino_store.extend_spent(n) for n in range(5)] == [0, 5, 15, 30, 50],
+      str([casino_store.extend_spent(n) for n in range(5)]))
+check("누적 지출이 값의 합과 맞는다",
+      all(casino_store.extend_spent(n) == sum(casino_store.extend_price(i) for i in range(n))
+          for n in range(6)))
+# 98코인 지갑이 연장만으로 바닥나는 지점 — 제동이 실제로 걸리는지
+afford = max(n for n in range(20) if casino_store.extend_spent(n) <= 98)
+check(f"98코인으로 살 수 있는 연장은 {afford}번까지 (그때 {casino_store.extend_spent(afford)}코인 소진)",
+      afford == 5 and casino_store.extend_spent(afford) == 75, f"{afford}번/{casino_store.extend_spent(afford)}코인")
 check("연장 0회 = 한도 20", casino_store.limit_of(0) == 20)
 check("연장 1회 = 한도 30", casino_store.limit_of(1) == 30)
 check("연장 4회 = 한도 60 (상한이 따로 없다)", casino_store.limit_of(4) == 60)
@@ -425,8 +440,15 @@ check("label이 80자 이하", all(len(b["label"]) <= 80 for b in buttons),
       str([len(b["label"]) for b in buttons]))
 check("custom_id가 100자 이하", all(len(b["custom_id"]) <= 100 for b in buttons))
 check("label에 값과 증분이 적혀 있다 (누르기 전에 얼마인지 보여야 해요)",
-      str(casino_store.EXTEND_PRICE) in buttons[0]["label"]
+      str(casino_store.extend_price(0)) in buttons[0]["label"]
       and str(casino_store.EXTEND_BONUS) in buttons[0]["label"], buttons[0]["label"])
+
+# 🚨 값이 오르니 **라벨도 같이 올라야** 해요. 데코레이터에 박힌 채로 두면 3번째 연장인데도
+#    "5코인"으로 보이고, 실제로는 15코인이 빠져서 사기처럼 느껴져요.
+for already, expected in [(0, 5), (1, 10), (2, 15), (4, 25)]:
+    label = casino_cog.ExtendLimitView(123, already).to_components()[0]["components"][0]["label"]
+    check(f"{already}번 산 사람의 버튼은 {expected}코인으로 보인다",
+          f"({expected}코인)" in label, label)
 check("연장권 note가 '도박'으로 시작하지 않는다 (경제 리포트가 베팅액으로 오인해요)",
       not casino_cog.EXTEND_NOTE.startswith("도박"), casino_cog.EXTEND_NOTE)
 
