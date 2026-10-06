@@ -16,11 +16,15 @@
 한도는 **실제로 병목이다.** 그날 도박한 9명 중 **5명이 20코인을 전부 소진**했고, 한도 근처
 (15~19코인)에서 멈춘 사람은 **0명**이었어요 - 닿으면 끝까지 써요. 그래서 "더 걸고 싶으면
 코인을 내라"는 소비처를 붙였어요. 코인이 **확실히 사라지는** 소각이라, 엣지로 조금씩 태우는
-도박 본체보다 소각 효율이 좋아요(5코인 즉시 + 늘어난 10코인에서 엣지 ~1코인).
+도박 본체보다 소각 효율이 좋아요(5코인당 즉시 5 + 늘어난 10코인에서 엣지 ~1).
 
-🚨 **그래도 한도 자체를 없애면 안 돼요.** 위에 적은 "잃어도 내일이면 돌아온다"가 무너져요.
-그래서 **하루 1회 · +10코인**으로 묶었어요(20 → 30이 천장). 무제한으로 열면 지갑이 두꺼운
-사람이 하루에 전재산을 넣을 수 있어요.
+**5코인을 낼 때마다 +10코인씩, 횟수 제한 없이** 늘어나요(사용자 결정, 2026-10-06).
+처음엔 하루 1회로 막아뒀다가 풀었어요.
+
+🚨 **그래서 하루 상한은 사실상 "그 사람 지갑"이에요.** 98코인을 가진 사람은 연장 6번이면
+하루에 전재산을 넣을 수 있어요. 이건 알고 연 거예요 - 소각이 그만큼 빨라지니까요. 대신
+자각할 수 있게 **몇 번째 연장인지와 연장에만 쓴 누적 코인**을 매번 보여줘요(`extended` ×
+`EXTEND_PRICE`). 숫자가 눈에 보이는 게 유일한 제동이라 **이 안내를 빼면 안 돼요.**
 
 ⚠️ 한도 도달자의 지갑은 대개 비어 있어요(실측: 5명 중 3명이 잔액 0~1코인). 한도까지 걸었다는
 건 보통 코인을 다 태웠다는 뜻이라, **연장권의 실수요자는 "한도는 찼지만 지갑이 두꺼운 사람"**
@@ -42,9 +46,8 @@ MIN_BET = 1
 MAX_BET = 5          # 1회 최대
 DAILY_LIMIT = 20     # 하루 총 베팅액 (연장권을 사면 늘어나요)
 
-EXTEND_PRICE = 5         # 🔓 한도 연장권 값
-EXTEND_BONUS = 10        # 한 번 사면 늘어나는 한도
-EXTEND_MAX_PER_DAY = 1   # 🚨 하루 1회. 올리면 "잃어도 내일이면 돌아온다"가 무너져요.
+EXTEND_PRICE = 5         # 🔓 한도 연장권 값 (낼 때마다 한도가 늘어요)
+EXTEND_BONUS = 10        # 한 번 살 때마다 늘어나는 한도
 
 
 def today_iso() -> str:
@@ -113,24 +116,21 @@ def _try_wager_sync(user_id, amount: int) -> tuple[bool, int]:
     return False, _wagered_sync(user_id)
 
 
-def _extend_sync(user_id) -> tuple[bool, int]:
-    """한도를 늘려 **자리를 먼저 잡아요**. (성공, 늘어난 뒤의 한도).
+def _extend_sync(user_id) -> tuple[bool, int, int]:
+    """한도를 늘려 **자리를 먼저 잡아요**. (성공, 늘어난 뒤의 한도, 오늘 몇 번째인지).
 
-    🚨 코인을 빼기 **전에** 이걸 불러요. 버튼을 연타하면 결제가 두 번 될 수 있는데, 그걸
-    막을 수 있는 건 이 조건부 update 하나뿐이에요. 코인 차감이 실패하면 `_undo_extend_sync`로
-    되돌려요.
-    ⚠️ `extended` 필드가 **없는 옛 문서**가 있어요(연장권 전에 만들어진 것). `{"$lt": 1}`만
-    쓰면 그 문서들이 필터에 안 걸려서 아무도 연장을 못 사요. `$exists: False`를 같이 봐요."""
+    🚨 코인을 빼기 **전에** 이걸 불러요. 코인 차감이 실패하면 `_undo_extend_sync`로 되돌려서
+    공짜 연장이 안 남게 해요.
+    횟수 제한은 없어요(5코인 낼 때마다 +10). 그래서 **몇 번째인지를 돌려줘요** - 호출부가
+    그 숫자와 누적 지출을 보여줘야 사는 사람이 자기가 얼마를 쓰고 있는지 알 수 있어요.
+    오늘 문서가 없으면(= 오늘 아직 한 판도 안 걸었으면) 실패해요. 연장권은 한도에 막힌
+    자리에서만 파니까 그 상황은 안 생겨요."""
     uid, today = _uid(user_id), today_iso()
-    res = _casino.update_one(
-        {"_id": uid, "date": today,
-         "$or": [{"extended": {"$exists": False}},
-                 {"extended": {"$lt": EXTEND_MAX_PER_DAY}}]},
-        {"$inc": {"extended": 1}},
-    )
+    res = _casino.update_one({"_id": uid, "date": today}, {"$inc": {"extended": 1}})
+    _, extended = _state_sync(user_id)
     if res.modified_count != 1:
-        return False, limit_of(_state_sync(user_id)[1])
-    return True, limit_of(_state_sync(user_id)[1])
+        return False, limit_of(extended), extended
+    return True, limit_of(extended), extended
 
 
 def _undo_extend_sync(user_id) -> None:
@@ -160,9 +160,17 @@ async def state_today(user_id) -> tuple[int, int]:
         return DAILY_LIMIT, DAILY_LIMIT
 
 
-async def extend_limit(user_id) -> tuple[bool, int]:
-    """한도 연장 자리를 선점해요. (성공, 늘어난 뒤의 한도). 코인 차감 **전에** 부르세요."""
+async def extend_limit(user_id) -> tuple[bool, int, int]:
+    """한도 연장 자리를 선점해요. (성공, 늘어난 뒤의 한도, 오늘 몇 번째). 차감 **전에** 부르세요."""
     return await asyncio.to_thread(_extend_sync, user_id)
+
+
+async def extend_count(user_id) -> int:
+    """오늘 몇 번 늘렸는지. 조회가 실패하면 0으로 봐요(안내용 숫자라 막을 이유가 없어요)."""
+    try:
+        return (await asyncio.to_thread(_state_sync, user_id))[1]
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 async def undo_extend(user_id) -> None:

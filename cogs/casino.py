@@ -10,8 +10,9 @@
 
 지갑 **중앙값이 3코인**인 서버라 변동성이 그대로 사고가 돼요. 그래서:
   - 1회 최대 5코인 · 하루 총 20코인 (출석·미션으로 하루면 회복되는 수준)
-  - 🔓 더 걸고 싶으면 **5코인을 내고 하루 한 번 +10코인**까지 늘릴 수 있어요(천장 30코인).
+  - 🔓 더 걸고 싶으면 **5코인을 낼 때마다 +10코인**씩 늘릴 수 있어요(횟수 제한 없음).
     한도에 막힌 **그 자리에서** 버튼으로 파는 게 핵심이에요 — `send_bet_error` 주석 참고.
+    🚨 상한이 사실상 지갑 잔액이라, **몇 번째 연장인지와 누적 지출을 반드시 같이 보여줘요.**
   - 환수율을 `/도박 현황`에 **그대로 공개**해요. 숨기면 "따려고" 하게 돼요
   - 잃은 걸 만회하라고 부추기는 문구는 쓰지 않아요
 
@@ -30,7 +31,6 @@ from utils import casino_store, coin_wallet
 from utils.casino_store import (
     DAILY_LIMIT,
     EXTEND_BONUS,
-    EXTEND_MAX_PER_DAY,
     EXTEND_PRICE,
     MAX_BET,
     MIN_BET,
@@ -172,14 +172,11 @@ class ExtendLimitView(discord.ui.View):
     async def extend(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
 
-        # 🚨 **자리를 먼저 선점**해요. 버튼을 연타하면 결제가 두 번 될 수 있는데, 그걸 막는
-        #    건 `extend_limit`의 조건부 update 하나뿐이에요. 코인은 그다음에 빼요.
-        ok, limit = await casino_store.extend_limit(self.user_id)
+        # 🚨 **자리를 먼저 선점**해요. 코인은 그다음에 빼고, 결제가 실패하면 되돌려요.
+        ok, limit, times = await casino_store.extend_limit(self.user_id)
         if not ok:
             await interaction.followup.send(
-                f"오늘은 이미 한도를 늘렸어요. (하루 **{EXTEND_MAX_PER_DAY}번**까지)\n"
-                f"-# 지금 한도는 {limit}코인이에요. 자정(한국시간)에 다시 차요.",
-                ephemeral=True,
+                "한도를 늘리지 못했어요. 잠시 뒤 다시 해주세요.", ephemeral=True
             )
             await self._disable()
             return
@@ -198,12 +195,16 @@ class ExtendLimitView(discord.ui.View):
 
         wagered, limit = await casino_store.state_today(self.user_id)
         balance = await coin_wallet.get_balance(self.user_id)
-        log.info("🔓 도박 한도 연장: %s %d코인 → 한도 %d코인", self.user_id, EXTEND_PRICE, limit)
+        log.info("🔓 도박 한도 연장: %s %d코인 → 한도 %d코인 (오늘 %d번째)",
+                 self.user_id, EXTEND_PRICE, limit, times)
         await interaction.followup.send(
             f"🔓 오늘 한도를 **{limit}코인**으로 늘렸어요. "
             f"(지금까지 {wagered}코인 / 남은 한도 **{max(0, limit - wagered)}코인**)\n"
-            f"쓴 코인 {EXTEND_PRICE}개는 돌아오지 않아요. 남은 악귀코인 **{balance}개**\n"
-            "-# 연장은 하루 한 번까지예요. 자정(한국시간)에 한도가 다시 차요.",
+            # 🚨 횟수 제한이 없으니, **얼마나 쓰고 있는지 숫자로 보여주는 게 유일한 제동**이에요.
+            #    이 두 줄을 빼면 자기도 모르게 지갑을 비우게 돼요.
+            f"오늘 **{times}번째** 연장이에요 · 연장에만 쓴 코인 **{times * EXTEND_PRICE}개**\n"
+            f"쓴 코인은 돌아오지 않아요. 남은 악귀코인 **{balance}개**\n"
+            "-# 자정(한국시간)에 한도가 20코인으로 돌아가요.",
             ephemeral=True,
         )
         await self._disable()
@@ -443,14 +444,14 @@ class Casino(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         wagered, limit = await casino_store.state_today(interaction.user.id)
         balance = await coin_wallet.get_balance(interaction.user.id)
-        extended = limit > DAILY_LIMIT
+        times = await casino_store.extend_count(interaction.user.id)
 
         embed = discord.Embed(
             title="🎲 도박 현황",
             description=(
                 f"오늘 건 금액: **{wagered}/{limit}코인** "
                 f"(남은 한도 **{max(0, limit - wagered)}코인**)"
-                + ("  🔓 연장함" if extended else "")
+                + (f"  🔓 {times}번 연장 ({times * EXTEND_PRICE}코인)" if times else "")
                 + f"\n내 악귀코인: **{balance}개** · 한 판 {MIN_BET}~{MAX_BET}코인"
             ),
             color=HOUSE_COLOR,
@@ -471,8 +472,8 @@ class Casino(commands.Cog):
             text="오래 하면 잃는 쪽이 정상이에요. 한도는 매일 자정(한국시간)에 다시 차요."
         )
 
-        # 한도를 다 썼고 아직 연장을 안 썼으면 여기서도 바로 살 수 있게 해요.
-        if wagered >= limit and not extended:
+        # 한도를 다 썼으면 여기서도 바로 늘릴 수 있게 해요.
+        if wagered >= limit:
             view = ExtendLimitView(interaction.user.id)
             view.message = await interaction.followup.send(
                 embed=embed, view=view, ephemeral=True, wait=True

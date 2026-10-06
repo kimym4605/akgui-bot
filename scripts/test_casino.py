@@ -10,8 +10,8 @@
   4) 블랙잭 규칙(A 처리·버스트·무승부 반환·블랙잭 배당)이 정확한지
   5) 베팅 한도: 1회 최대·하루 총액이 지켜지고 동시 요청에도 안 뚫리는지
   6) 한도 조회가 실패하면 **막는 쪽**으로 기운다 (열어주면 한도가 무의미해져요)
-  7) 🔓 한도 연장권: 하루 1회가 지켜지고, 날짜가 바뀌면 리셋되고, 결제 실패 시
-     공짜 연장이 남지 않는지 (+ `extended` 필드가 없는 옛 문서도 살 수 있는지)
+  7) 🔓 한도 연장권: 5코인마다 +10씩 **여러 번** 늘어나고, 날짜가 바뀌면 리셋되고,
+     결제 실패 시 공짜 연장이 남지 않는지 (+ `extended` 없는 옛 문서도 살 수 있는지)
 """
 import asyncio
 import os
@@ -247,20 +247,21 @@ check("조회 실패 시 한도 소진으로 본다",
       asyncio.run(casino_store.wagered_today(1)) == casino_store.DAILY_LIMIT)
 casino_store._casino = fake
 
-print("7) 🔓 한도 연장권 (하루 1회 · +10코인)")
+print("7) 🔓 한도 연장권 (5코인마다 +10 · 횟수 제한 없음)")
 fake.docs.clear()
-check(f"값 {casino_store.EXTEND_PRICE}코인 · +{casino_store.EXTEND_BONUS}코인 · 하루 {casino_store.EXTEND_MAX_PER_DAY}회",
-      (casino_store.EXTEND_PRICE, casino_store.EXTEND_BONUS, casino_store.EXTEND_MAX_PER_DAY) == (5, 10, 1))
+check(f"값 {casino_store.EXTEND_PRICE}코인 · 한 번에 +{casino_store.EXTEND_BONUS}코인",
+      (casino_store.EXTEND_PRICE, casino_store.EXTEND_BONUS) == (5, 10))
 check("연장 0회 = 한도 20", casino_store.limit_of(0) == 20)
 check("연장 1회 = 한도 30", casino_store.limit_of(1) == 30)
+check("연장 4회 = 한도 60 (상한이 따로 없다)", casino_store.limit_of(4) == 60)
 check("None도 0으로 본다 (옛 문서)", casino_store.limit_of(None) == 20)
 
 for _ in range(4):
     asyncio.run(casino_store.try_wager(10, 5))
 ok, _ = asyncio.run(casino_store.try_wager(10, 1))
 check("연장 전엔 20에서 막힌다", ok is False)
-ok, limit = asyncio.run(casino_store.extend_limit(10))
-check("연장 성공 → 한도 30", ok is True and limit == 30, f"{ok} {limit}")
+ok, limit, times = asyncio.run(casino_store.extend_limit(10))
+check("연장 성공 → 한도 30 · 1번째", ok is True and limit == 30 and times == 1, f"{ok} {limit} {times}")
 check("state_today가 늘어난 한도를 돌려준다",
       asyncio.run(casino_store.state_today(10)) == (20, 30),
       str(asyncio.run(casino_store.state_today(10))))
@@ -269,13 +270,19 @@ check("연장하면 다시 걸 수 있다", ok is True and total == 25, f"{ok} {
 ok, _ = asyncio.run(casino_store.try_wager(10, 5))
 check("25 + 5 = 30 은 통과 (새 경계값)", ok is True)
 ok, _ = asyncio.run(casino_store.try_wager(10, 1))
-check("30을 넘기면 다시 막힌다 (= 연장도 천장이 있다)", ok is False)
+check("30을 넘기면 다시 막힌다 (늘린 만큼만 열린다)", ok is False)
 
-# 🚨 하루 1회. 이게 뚫리면 지갑이 두꺼운 사람이 한도를 무한히 늘릴 수 있어요.
-ok, limit = asyncio.run(casino_store.extend_limit(10))
-check("두 번째 연장은 거절 (하루 1회)", ok is False and limit == 30, f"{ok} {limit}")
-check("거절돼도 한도가 더 안 늘어난다", fake.docs["10"]["extended"] == 1,
-      str(fake.docs["10"].get("extended")))
+# 5코인을 **낼 때마다** 늘어나요 (2026-10-06 사용자 결정으로 하루 1회 제한을 풀었어요).
+# 🚨 그래서 하루 상한은 사실상 그 사람 지갑이에요. 횟수를 돌려주는 건 안내에 쓰려는 거예요.
+ok, limit, times = asyncio.run(casino_store.extend_limit(10))
+check("두 번째 연장도 된다 → 한도 40 · 2번째", ok is True and limit == 40 and times == 2,
+      f"{ok} {limit} {times}")
+ok, limit, times = asyncio.run(casino_store.extend_limit(10))
+check("세 번째도 된다 → 한도 50 · 3번째", ok is True and limit == 50 and times == 3,
+      f"{ok} {limit} {times}")
+check("extend_count가 안내용 횟수를 돌려준다", asyncio.run(casino_store.extend_count(10)) == 3)
+ok, _ = asyncio.run(casino_store.try_wager(10, 5))
+check("늘린 만큼 실제로 더 걸 수 있다 (30 → 35)", ok is True)
 
 # 코인 차감이 실패했을 때 선점을 되돌리는 경로 (공짜 연장 방지)
 fake.docs.clear()
@@ -290,8 +297,9 @@ check("되돌리면 한도 20 (결제 실패 시 공짜 연장이 안 남는다)
 # ⚠️ `extended` 필드가 **없는** 옛 문서 (연장권 전에 만들어진 기록)
 fake.docs.clear()
 fake.docs["12"] = {"_id": "12", "date": casino_store.today_iso(), "wagered": 20}
-ok, limit = asyncio.run(casino_store.extend_limit(12))
-check("extended 필드가 없는 옛 문서도 연장할 수 있다", ok is True and limit == 30, f"{ok} {limit}")
+ok, limit, times = asyncio.run(casino_store.extend_limit(12))
+check("extended 필드가 없는 옛 문서도 연장할 수 있다", ok is True and limit == 30 and times == 1,
+      f"{ok} {limit} {times}")
 
 # 🚨 날짜가 바뀌면 연장도 함께 리셋돼야 해요 (안 그러면 한도가 영구히 30)
 fake.docs.clear()
