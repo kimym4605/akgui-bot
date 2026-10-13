@@ -11,8 +11,8 @@
   5) 베팅 한도: 1회 최대·하루 총액이 지켜지고 동시 요청에도 안 뚫리는지
   6) 한도 조회가 실패하면 **막는 쪽**으로 기운다 (열어주면 한도가 무의미해져요)
   7) 🔓 한도 연장권: **살수록 값이 오르고**(5→10→15) +10씩 여러 번 늘어나는지,
-     버튼 라벨이 그 값을 따라가는지, 날짜가 바뀌면 리셋되는지, 결제 실패 시 공짜
-     연장이 남지 않는지 (+ `extended` 없는 옛 문서도 살 수 있는지)
+     버튼 라벨이 그 값을 따라가는지, **날짜가 바뀌어도 한도와 값이 통산으로 이어지는지**,
+     결제 실패 시 공짜 연장이 남지 않는지 (+ `extended` 없는 옛 문서도 살 수 있는지)
 """
 import asyncio
 import os
@@ -316,17 +316,35 @@ ok, limit, times = asyncio.run(casino_store.extend_limit(12))
 check("extended 필드가 없는 옛 문서도 연장할 수 있다", ok is True and limit == 30 and times == 1,
       f"{ok} {limit} {times}")
 
-# 🚨 날짜가 바뀌면 연장도 함께 리셋돼야 해요 (안 그러면 한도가 영구히 30)
+# 🚨 날짜가 바뀌어도 **늘린 한도는 남아야** 해요 (2026-10-14 사용자 결정).
+#    `wagered`만 0으로 돌고 `extended`는 통산으로 쌓여요. 어제 50코인(5+10+15+20)을 들여
+#    한도를 60까지 올린 사람이 아침에 20으로 되돌아가던 게 바로 이 테스트가 막는 문제예요.
 fake.docs.clear()
-fake.docs["13"] = {"_id": "13", "date": "2020-01-01", "wagered": 30, "extended": 1}
+fake.docs["13"] = {"_id": "13", "date": "2020-01-01", "wagered": 60, "extended": 4}
+check("어제 산 한도는 걸기 전에도 보인다 (오늘 건 금액은 0)",
+      asyncio.run(casino_store.state_today(13)) == (0, 60),
+      str(asyncio.run(casino_store.state_today(13))))
 ok, total = asyncio.run(casino_store.try_wager(13, 5))
-check("어제 산 연장권은 오늘로 안 넘어온다",
-      ok is True and total == 5 and fake.docs["13"]["extended"] == 0,
+check("어제 산 연장권이 오늘도 살아있다 (건 금액만 0으로)",
+      ok is True and total == 5 and fake.docs["13"]["extended"] == 4,
       f"{ok} {total} extended={fake.docs['13'].get('extended')}")
-for _ in range(3):
+for _ in range(11):
     asyncio.run(casino_store.try_wager(13, 5))
+check("오늘도 60코인까지 걸 수 있다", asyncio.run(casino_store.wagered_today(13)) == 60,
+      str(asyncio.run(casino_store.wagered_today(13))))
 ok, _ = asyncio.run(casino_store.try_wager(13, 1))
-check("그래서 오늘 한도는 다시 20에서 막힌다", ok is False)
+check("60을 넘기면 막힌다 (산 만큼만 열린다)", ok is False)
+
+# 🚨 값도 **통산**으로 올라야 해요. 여기가 풀리면 매일 5코인에 영구 +10이 돼서 제동이
+#    통째로 사라져요(2주면 한도 160코인).
+check("다음 연장은 날짜가 바뀌어도 25코인 (통산 5번째)",
+      casino_store.extend_price(asyncio.run(casino_store.extend_count(13))) == 25,
+      str(casino_store.extend_price(asyncio.run(casino_store.extend_count(13)))))
+ok, limit, times = asyncio.run(casino_store.extend_limit(13))
+check("이어서 연장하면 한도 70 · 통산 5번째", ok is True and limit == 70 and times == 5,
+      f"{ok} {limit} {times}")
+check("통산 지출도 이어서 쌓인다 (5+10+15+20+25 = 75)",
+      casino_store.extend_spent(times) == 75, str(casino_store.extend_spent(times)))
 
 # ⚠️ `cogs.casino`(=EXTEND_NOTE)는 여기서 import하면 안 돼요. `.env`를 읽기 **전**이라
 #    `ADULT_ROLE_ID`가 None으로 캐시돼서 아래 성인 게이트 검사가 통째로 깨져요.

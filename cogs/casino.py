@@ -100,7 +100,7 @@ async def take_bet(interaction: discord.Interaction, amount: int) -> tuple[bool,
         _, limit = await casino_store.state_today(interaction.user.id)
         return False, (
             f"오늘 베팅 한도를 다 썼어요. (하루 **{limit}코인**, 지금까지 {wagered}코인)\n"
-            "-# 한도는 매일 자정(한국시간)에 다시 차요."
+            "-# 건 금액은 매일 자정(한국시간)에 0으로 돌아가요."
         ), True
 
     if not await coin_wallet.spend(interaction.user.id, amount, reason="도박"):
@@ -127,7 +127,7 @@ async def send_bet_error(interaction: discord.Interaction, error: str, limit_rea
     times = await casino_store.extend_count(interaction.user.id)
     view = ExtendLimitView(interaction.user.id, times)
     error += (f"\n-# 🔓 한도를 늘리려면 **{casino_store.extend_price(times)}코인** "
-              "(살수록 5코인씩 비싸져요)")
+              "(한 번 늘리면 계속 유지돼요 · 살수록 5코인씩 비싸져요)")
     view.message = await interaction.followup.send(error, view=view, ephemeral=True, wait=True)
 
 
@@ -135,8 +135,8 @@ class ExtendLimitView(discord.ui.View):
     """🔓 한도 연장권 버튼. 본인에게만 보이는(ephemeral) 거절 메시지에 붙어요.
 
     ⚠️ 이건 **영속 뷰가 아니에요**(`timeout` 있음). 누를 사람이 바로 앞에 있는 상황이라
-    짧게 살아도 되고, 영속으로 만들면 봇 재시작 뒤에 "어제의 거절 메시지"로 오늘 한도를
-    늘릴 수 있게 돼요."""
+    짧게 살아도 되고, 영속으로 만들면 봇 재시작 뒤에 "어제의 거절 메시지"로 막히지도 않은
+    한도를 미리 쌓아둘 수 있게 돼요(2026-10-14부터 한도가 영구로 남으니 더 그래요)."""
 
     def __init__(self, user_id: int, times_so_far: int = 0):
         super().__init__(timeout=EXTEND_VIEW_TIMEOUT)
@@ -193,7 +193,7 @@ class ExtendLimitView(discord.ui.View):
             await casino_store.undo_extend(self.user_id)
             balance = await coin_wallet.get_balance(self.user_id)
             await interaction.followup.send(
-                f"악귀코인이 부족해요. **{times}번째 연장은 {price}코인**인데 지금 "
+                f"악귀코인이 부족해요. **통산 {times}번째 연장은 {price}코인**인데 지금 "
                 f"**{balance}개** 갖고 있어요.\n"
                 "-# 연장은 살수록 5코인씩 비싸져요 · 출석·미션으로 모을 수 있어요.",
                 ephemeral=True,
@@ -203,18 +203,18 @@ class ExtendLimitView(discord.ui.View):
 
         wagered, limit = await casino_store.state_today(self.user_id)
         balance = await coin_wallet.get_balance(self.user_id)
-        log.info("🔓 도박 한도 연장: %s %d코인 → 한도 %d코인 (오늘 %d번째)",
+        log.info("🔓 도박 한도 연장: %s %d코인 → 한도 %d코인 (통산 %d번째)",
                  self.user_id, price, limit, times)
         await interaction.followup.send(
-            f"🔓 오늘 한도를 **{limit}코인**으로 늘렸어요. "
-            f"(지금까지 {wagered}코인 / 남은 한도 **{max(0, limit - wagered)}코인**)\n"
+            f"🔓 하루 한도를 **{limit}코인**으로 늘렸어요. **다음 날에도 그대로예요.**\n"
+            f"(오늘 {wagered}코인 걸었고 / 남은 한도 **{max(0, limit - wagered)}코인**)\n"
             # 🚨 상한이 코드에 없으니 **숫자로 보여주는 게 제동**이에요. 이 두 줄을 빼면
             #    자기도 모르게 지갑을 비우게 돼요.
-            f"오늘 **{times}번째** 연장 · 이번에 **{price}코인** · "
+            f"통산 **{times}번째** 연장 · 이번에 **{price}코인** · "
             f"연장에만 쓴 코인 **{casino_store.extend_spent(times)}개**\n"
             f"남은 악귀코인 **{balance}개** · 다음 연장은 "
             f"**{casino_store.extend_price(times)}코인**이에요\n"
-            "-# 쓴 코인은 돌아오지 않아요. 자정(한국시간)에 한도가 20코인으로 돌아가요.",
+            "-# 쓴 코인은 돌아오지 않아요. 값은 살수록 5코인씩 올라가요.",
             ephemeral=True,
         )
         await self._disable()
@@ -461,7 +461,8 @@ class Casino(commands.Cog):
             description=(
                 f"오늘 건 금액: **{wagered}/{limit}코인** "
                 f"(남은 한도 **{max(0, limit - wagered)}코인**)"
-                + (f"  🔓 {times}번 연장 ({casino_store.extend_spent(times)}코인)" if times else "")
+                + (f"  🔓 통산 {times}번 연장 ({casino_store.extend_spent(times)}코인)"
+                   if times else "")
                 + f"\n내 악귀코인: **{balance}개** · 한 판 {MIN_BET}~{MAX_BET}코인"
             ),
             color=HOUSE_COLOR,
@@ -479,7 +480,8 @@ class Casino(commands.Cog):
             inline=False,
         )
         embed.set_footer(
-            text="오래 하면 잃는 쪽이 정상이에요. 한도는 매일 자정(한국시간)에 다시 차요."
+            text="오래 하면 잃는 쪽이 정상이에요. 건 금액은 매일 자정(한국시간)에 0으로 돌아가고, "
+                 "🔓로 늘린 한도는 다음 날에도 유지돼요."
         )
 
         # 한도를 다 썼으면 여기서도 바로 늘릴 수 있게 해요.

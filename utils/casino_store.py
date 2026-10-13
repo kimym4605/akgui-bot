@@ -9,7 +9,8 @@
 소각량의 진짜 조절판도 배당표가 아니라 이 한도예요. 블랙잭은 잘 치는 사람일수록 환수율이
 올라가서 배당표만으로는 소각량을 못 묶거든요.
 
-날짜가 바뀌면 그냥 새 문서로 덮어써요(기록을 쌓을 이유가 없어요 - 통계는 `coin_log`에 남아요).
+날짜가 바뀌면 **`wagered`만** 0으로 덮어써요(기록을 쌓을 이유가 없어요 - 통계는 `coin_log`에
+남아요). `extended`는 **지우지 않아요** - 아래 "늘린 한도는 다음 날에도 남아요"를 보세요.
 
 ## 🔓 한도 연장권 (2026-10-06)
 
@@ -21,6 +22,20 @@
 **낼 때마다 +10코인씩, 횟수 제한 없이** 늘어나요. 다만 **살수록 값이 올라가요**
 (5 → 10 → 15 → 20 …, `extend_price`). 2026-10-06에 셋 다 사용자 결정으로 정했어요:
 하루 1회 → 고정가 반복 → **가격 점증 반복** 순으로 바뀌었어요.
+
+## 늘린 한도는 다음 날에도 남아요 (2026-10-14)
+
+처음엔 `extended`를 날짜마다 0으로 되돌렸어요. 그래서 어제 50코인을 들여 한도를 60까지
+올린 사람도 오늘은 20에서 다시 시작했고, "계속 이어서 늘릴 수가 없다"는 말이 나왔어요.
+이제 **`extended`는 통산 횟수**예요 - 산 한도는 영구히 남아요.
+
+🚨 **가격도 반드시 같이 통산 기준이어야 해요.** 한도만 영구로 남기고 값을 매일 5코인부터
+다시 받으면 제동이 통째로 사라져요(매일 5코인에 영구 +10 → 2주면 한도 160코인). 값이
+오르는 것 **자체가** 유일한 제동이라, `extend_price(통산 횟수)`로 묶여 있어야 해요.
+4번 산 사람의 다음 연장은 **다음 날에도** 25코인이에요.
+
+⚠️ 그래서 `_state_sync`는 날짜가 지난 문서에서도 `extended`를 **그대로 돌려줘요**.
+`wagered`만 0으로 봐요. 이 비대칭이 이 파일의 핵심이에요.
 
 🚨 **값이 올라가는 게 제동이에요.** 고정가로 두면 지갑이 두꺼운 사람이 한도를 사실상 무한히
 늘릴 수 있는데, 5씩 비싸지면 **연장비가 베팅할 돈을 먼저 잡아먹어요**(98코인 → 5번 연장에
@@ -60,32 +75,42 @@ def _uid(user_id) -> str:
 
 
 def limit_of(extended: int) -> int:
-    """연장 횟수에 맞는 그 사람의 오늘 한도."""
+    """**통산** 연장 횟수에 맞는 그 사람의 하루 한도. 한 번 올리면 다음 날에도 그대로예요."""
     return DAILY_LIMIT + EXTEND_BONUS * max(0, int(extended or 0))
 
 
 def extend_price(already: int) -> int:
-    """**다음** 연장 값. 이미 `already`번 샀으면 그 다음은 얼마인지.
+    """**다음** 연장 값. **통산** `already`번 샀으면 그 다음은 얼마인지.
 
     5 → 10 → 15 → 20 … 으로 **살수록 비싸져요**(2026-10-06 사용자 결정). 고정가로 두면
     지갑이 두꺼운 사람이 한도를 사실상 무한히 늘릴 수 있는데, 값이 올라가면 그 자체가
     제동이 돼요. 98코인을 가진 사람도 5+10+15+20+25=75코인을 쓰면 **걸 돈이 23코인**밖에
-    안 남아요."""
+    안 남아요.
+
+    🚨 `already`는 **통산** 횟수예요(2026-10-14). 날짜로 끊어서 매일 5코인부터 다시 받으면,
+    한도가 영구히 남는 만큼 제동이 완전히 풀려요."""
     return EXTEND_BASE_PRICE * (max(0, int(already or 0)) + 1)
 
 
 def extend_spent(times: int) -> int:
-    """오늘 연장에만 쓴 코인 합계 (5+10+15+… = 5·n(n+1)/2)."""
+    """연장에만 쓴 **통산** 코인 합계 (5+10+15+… = 5·n(n+1)/2)."""
     n = max(0, int(times or 0))
     return EXTEND_BASE_PRICE * n * (n + 1) // 2
 
 
 def _state_sync(user_id) -> tuple[int, int]:
-    """(오늘 누적 베팅액, 오늘 연장 횟수). 날짜가 지난 문서는 0으로 봐요."""
+    """(오늘 누적 베팅액, **통산** 연장 횟수).
+
+    ⚠️ 날짜가 지난 문서는 `wagered`만 0으로 보고, `extended`는 **그대로 살려요**. 연장권으로
+    산 한도는 영구히 남고 값도 통산으로 올라가야 하니까요(2026-10-14). 둘을 같이 0으로
+    되돌리면 "어제 50코인 들여 올린 한도가 아침에 사라지는" 문제로 돌아가요."""
     doc = _casino.find_one({"_id": _uid(user_id)}, {"date": 1, "wagered": 1, "extended": 1})
-    if not doc or doc.get("date") != today_iso():
+    if not doc:
         return 0, 0
-    return int(doc.get("wagered") or 0), int(doc.get("extended") or 0)
+    extended = int(doc.get("extended") or 0)
+    if doc.get("date") != today_iso():
+        return 0, extended
+    return int(doc.get("wagered") or 0), extended
 
 
 def _wagered_sync(user_id) -> int:
@@ -112,11 +137,12 @@ def _try_wager_sync(user_id, amount: int) -> tuple[bool, int]:
         return True, _wagered_sync(user_id)
 
     # ② 오늘 문서가 없거나 날짜가 지난 경우 → 새로 시작
-    # 🚨 `extended`를 0으로 **반드시 같이** 되돌려요. 안 그러면 어제 산 연장권이 오늘도 살아서
-    #    한도가 영구히 30코인이 돼요.
+    # 🚨 `extended`는 **건드리지 않아요**(2026-10-14). 산 한도는 영구히 남아요. 예전엔 여기서
+    #    0으로 되돌려서, 어제 50코인 들여 올린 한도가 자정에 사라졌어요. 값도 통산 기준으로
+    #    계속 오르니(`extend_price`) 영구로 남겨도 무한히 늘리지는 못해요.
     res = _casino.update_one(
         {"_id": uid, "date": {"$ne": today}},
-        {"$set": {"date": today, "wagered": amount, "extended": 0}},
+        {"$set": {"date": today, "wagered": amount}},
     )
     if res.modified_count == 1:
         return True, amount
@@ -134,14 +160,17 @@ def _try_wager_sync(user_id, amount: int) -> tuple[bool, int]:
 
 
 def _extend_sync(user_id) -> tuple[bool, int, int]:
-    """한도를 늘려 **자리를 먼저 잡아요**. (성공, 늘어난 뒤의 한도, 오늘 몇 번째인지).
+    """한도를 늘려 **자리를 먼저 잡아요**. (성공, 늘어난 뒤의 한도, **통산** 몇 번째인지).
 
     🚨 코인을 빼기 **전에** 이걸 불러요. 코인 차감이 실패하면 `_undo_extend_sync`로 되돌려서
     공짜 연장이 안 남게 해요.
     횟수 제한은 없어요(5코인 낼 때마다 +10). 그래서 **몇 번째인지를 돌려줘요** - 호출부가
     그 숫자와 누적 지출을 보여줘야 사는 사람이 자기가 얼마를 쓰고 있는지 알 수 있어요.
     오늘 문서가 없으면(= 오늘 아직 한 판도 안 걸었으면) 실패해요. 연장권은 한도에 막힌
-    자리에서만 파니까 그 상황은 안 생겨요."""
+    자리에서만 파니까 그 상황은 안 생겨요.
+
+    ⚠️ 날짜 조건은 **그대로 둬요**. 한도는 영구로 남지만, 연장은 "오늘 걸다가 막힌 사람"만
+    사는 거예요. 날짜 조건을 풀면 한 판도 안 한 사람이 미리 한도를 쌓아둘 수 있어요."""
     uid, today = _uid(user_id), today_iso()
     res = _casino.update_one({"_id": uid, "date": today}, {"$inc": {"extended": 1}})
     _, extended = _state_sync(user_id)
@@ -168,7 +197,7 @@ async def wagered_today(user_id) -> int:
 
 
 async def state_today(user_id) -> tuple[int, int]:
-    """(오늘 누적 베팅액, 오늘 한도). 조회가 실패하면 **한도를 다 쓴 것처럼** 봐요."""
+    """(오늘 누적 베팅액, 그 사람의 한도). 조회가 실패하면 **한도를 다 쓴 것처럼** 봐요."""
     try:
         wagered, extended = await asyncio.to_thread(_state_sync, user_id)
         return wagered, limit_of(extended)
@@ -178,12 +207,15 @@ async def state_today(user_id) -> tuple[int, int]:
 
 
 async def extend_limit(user_id) -> tuple[bool, int, int]:
-    """한도 연장 자리를 선점해요. (성공, 늘어난 뒤의 한도, 오늘 몇 번째). 차감 **전에** 부르세요."""
+    """한도 연장 자리를 선점해요. (성공, 늘어난 뒤의 한도, 통산 몇 번째). 차감 **전에** 부르세요."""
     return await asyncio.to_thread(_extend_sync, user_id)
 
 
 async def extend_count(user_id) -> int:
-    """오늘 몇 번 늘렸는지. 조회가 실패하면 0으로 봐요(안내용 숫자라 막을 이유가 없어요)."""
+    """통산 몇 번 늘렸는지. 조회가 실패하면 0으로 봐요(안내용 숫자라 막을 이유가 없어요).
+
+    ⚠️ 실패 시 0이면 값을 **싸게** 보여줘요(5코인). 안내용이라 막을 이유는 없지만, 실제
+    결제는 선점 결과로 다시 계산하니(`extend_limit` → `times`) 돈이 어긋나진 않아요."""
     try:
         return (await asyncio.to_thread(_state_sync, user_id))[1]
     except Exception:  # noqa: BLE001
