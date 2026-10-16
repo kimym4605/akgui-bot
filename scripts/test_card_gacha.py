@@ -64,13 +64,19 @@ for _ in range(N):
     dist[drawn[0]["grade"]] += 1
 
 total_w = sum(GRADE_WEIGHTS.values())
+
+# 🚨 합이 100이어야 **적은 가중치가 곧 퍼센트**예요. random.choices가 알아서 정규화해서
+#    합이 96.5여도 조용히 돌아가는데, 그러면 "에픽 5"라고 적어두고 실제로는 5.18%가 나가요
+#    (`/카드확률`이 공개하는 값과 어긋나요 - 뽑기에서 이건 분쟁거리예요).
+check("가중치 합이 정확히 100", abs(total_w - 100) < 1e-9, f"합={total_w}")
+
 for grade, weight in GRADE_WEIGHTS.items():
     expected = weight / total_w * 100
     actual = dist[grade] / N * 100
-    # 1.5%짜리도 10만 장이면 표준오차가 0.04%p라 0.5%p 여유는 충분히 넉넉해요.
+    # 0.5%짜리도 10만 장이면 표준오차가 0.02%p라 0.3%p 여유는 충분히 넉넉해요.
     check(
         f"{grade} {expected:.1f}% 기대",
-        abs(actual - expected) < 0.5,
+        abs(actual - expected) < 0.3,
         f"실측 {actual:.2f}%",
     )
 
