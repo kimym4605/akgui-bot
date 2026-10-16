@@ -62,26 +62,28 @@ def _rod_sync(user_id) -> tuple[int, bool]:
 
 
 def _buy_rod_sync(user_id, durability: int) -> bool:
-    """낚시대를 지급해요. 오늘 이미 샀으면 False(아무것도 안 바꿔요).
+    """낚시대를 지급해요. 언제나 성공해요(2026-10-17 4차부터 **하루 제한 없음**).
 
-    🚨 **코인 차감은 호출자가** 해요. 여기서 False가 나오면 차감하면 안 되고, 차감이
-    실패하면 `_refund_rod_sync`로 되돌려야 해요.
-    ⚠️ 날짜 조건을 필터에 넣어 **한 번의 update로** 확인과 지급을 함께 해요.
-    ⚠️ 남은 내구도는 **덮어써요**(`$set`). 쌓이게 하면 며칠 모아서 하루에 몰아 쓰는
-       길이 열려서 '하루 10번' 제한이 무의미해져요."""
-    uid, today = _uid(user_id), today_iso()
-    res = _fish.update_one(
-        {"_id": uid, "rod_date": {"$ne": today}},
-        {"$set": {"rod": durability, "rod_date": today}},
+    🚨 **코인 차감은 호출자가** 해요. 차감이 실패하면 `_refund_rod_sync`로 되돌려야 해요.
+
+    ⚠️ 내구도는 **더해요**(`$inc`). 예전엔 `$set`으로 덮어썼는데, 그건 "하루 1개"라
+       덮어쓸 일이 없어서였어요. 제한을 푼 지금 덮어쓰면 **남은 횟수가 날아가요**
+       (5번 남은 상태에서 사면 15가 아니라 10이 돼요).
+    ⚠️ `rod_date`는 더 이상 제한에 안 쓰지만, 마지막으로 산 날을 남겨두면 나중에
+       제한을 되살릴 때나 이상 패턴을 볼 때 쓸모가 있어서 계속 기록해요."""
+    _fish.update_one(
+        {"_id": _uid(user_id)},
+        {"$inc": {"rod": durability}, "$set": {"rod_date": today_iso()}},
         upsert=True,
     )
-    return res.modified_count == 1 or res.upserted_id is not None
+    return True
 
 
-def _refund_rod_sync(user_id) -> None:
-    """지급을 되돌려요(코인 차감 실패 시). 오늘 산 기록도 같이 지워 다시 살 수 있게 해요."""
-    _fish.update_one({"_id": _uid(user_id)},
-                     {"$set": {"rod": 0}, "$unset": {"rod_date": ""}})
+def _refund_rod_sync(user_id, durability: int) -> None:
+    """지급을 되돌려요(코인 차감 실패 시).
+
+    ⚠️ **방금 준 만큼만** 빼요. 0으로 밀어버리면 원래 들고 있던 내구도까지 날아가요."""
+    _fish.update_one({"_id": _uid(user_id)}, {"$inc": {"rod": -durability}})
 
 
 def _use_rod_sync(user_id) -> int | None:
@@ -216,9 +218,9 @@ async def buy_rod(user_id, durability: int) -> bool:
     return await asyncio.to_thread(_buy_rod_sync, user_id, durability)
 
 
-async def refund_rod(user_id) -> None:
-    """지급을 되돌려요(차감 실패 시 반드시)."""
-    await asyncio.to_thread(_refund_rod_sync, user_id)
+async def refund_rod(user_id, durability: int) -> None:
+    """지급을 되돌려요(차감 실패 시 반드시). **방금 준 만큼만** 빼요."""
+    await asyncio.to_thread(_refund_rod_sync, user_id, durability)
 
 
 async def use_rod(user_id) -> int | None:

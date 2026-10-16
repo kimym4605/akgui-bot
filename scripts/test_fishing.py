@@ -71,27 +71,35 @@ check("기댓값 계산식과 실측이 일치", abs(measured - formula) < 0.05,
       f"계산 {formula:.3f} vs 실측 {measured:.3f} 코인/회")
 
 # ==================================================================
-print("\n[4] 🚨 발행량 — 낚시대가 상한을 건다")
+print("\n[4] 🚨 발행량 — 순이익 ≈ 0이 상한을 대신해요")
 day_gross = measured * ROD_DURABILITY
 net = day_gross - ROD_PRICE
 print(f"  1회 평균 {measured:.2f}코인 · 낚시대 {ROD_PRICE}코인에 {ROD_DURABILITY}회")
-print(f"  하루 총수입 {day_gross:.1f} − 낚시대 {ROD_PRICE} = 순발행 {net:+.1f}코인/일")
+print(f"  낚시대 1개: 수입 {day_gross:.1f} − 값 {ROD_PRICE} = 순이익 {net:+.2f}코인")
+print(f"  시간당 5개를 써도 {net * 5:+.1f}코인 (무제한이지만 안전)")
 print("  -# 참고: 2026-10-17 서버 전체 일일 발행 27~52코인, 출석은 1인 3~5코인")
 
-# 🚨 1차 설계와의 핵심 차이. 전엔 상한이 없어서 하루 189코인도 가능했어요.
-check("하루 던지기 횟수에 상한이 있다",
-      ROD_DURABILITY * ROD_PER_DAY == 10, f"{ROD_DURABILITY * ROD_PER_DAY}회")
-check("🚨 순발행이 출석(3~5코인)을 압도하지 않는다 (25코인 이하)",
-      net <= 25, f"{net:.1f}코인")
-check("그래도 낚시할 이유는 있다 (순발행 > 0)", net > 0, f"{net:.1f}코인")
+# 🚨 **이게 지금 유일한 발행 안전장치예요.**
+#
+# 하루 구매 제한을 풀었으니(2026-10-17 4차) 상한은 "시간"뿐이에요. 1개당 순이익이
+# 양수로 커지면 **시간만 쓰면 무한 발행**이 돼요. 제한이 있던 시절엔 +8.8이어도
+# 하루 10회로 막혀 있었지만 지금은 아니에요.
+check("🚨 낚시대 1개당 순이익이 0 근처다 (무제한이라 필수)",
+      -0.5 <= net <= 1.0,
+      f"{net:+.2f}코인 — 양수로 키우려면 하루 제한을 되살려야 해요")
+check("그래도 아주 조금은 남는다 (0이면 절반이 손해라 아무도 안 해요)",
+      net > 0, f"{net:+.2f}코인")
+check("시간당(5개)으로도 안전하다",
+      (net) * 5 <= 5, f"시간당 {net * 5:+.1f}코인")
 check("낚시대값이 하루 총수입보다 싸다 (아니면 아무도 안 사요)",
       ROD_PRICE < day_gross, f"{ROD_PRICE} vs {day_gross:.1f}")
 
 # 🐋 전설이 너무 자주 뜨면 '전설'이라는 말이 무색해져요(꽝을 없애니 22%까지 올랐었어요).
 lw = GRADES["전설"]["weight"] / sum(g["weight"] for g in GRADES.values())
 day_legend = (1 - (1 - lw) ** ROD_DURABILITY) * 100
-print(f"  🐋 전설: 1회 {lw * 100:.2f}% → 하루 {day_legend:.0f}% 확률")
-check("전설이 하루 10% 이하로 뜬다 (희소성)", day_legend <= 10, f"{day_legend:.0f}%")
+print(f"  🐋 전설: 1회 {lw * 100:.2f}% → 낚시대 1개당 {day_legend:.1f}%")
+check("전설이 낚시대 1개당 2% 이하로 뜬다 (희소성)", day_legend <= 2,
+      f"{day_legend:.2f}%")
 
 # ==================================================================
 print("\n[5][6][7][8] 어항")
@@ -312,49 +320,45 @@ check("🚨 한 마리씩 팔아도 한 번에 판 것과 같다",
 check("0.5코인 10마리 = 5코인", bulk == 5, f"{bulk}코인")
 
 # ==================================================================
-print("\n[8b] 🎣 낚시대 — 하루 1개 · 내구도 10")
+print("\n[8b] 🎣 낚시대 — 무제한 구매 · 내구도 누적")
 # ------------------------------------------------------------------
 # 이게 발행 상한의 **유일한** 장치라, 여기 뚫리면 1차 설계의 무제한 발행으로 돌아가요.
 R = "rod-user"
 fake.docs.pop(R, None)
 
 left, bought = run(fishing_store.rod_state(R))
-check("처음엔 낚시대가 없다", left == 0 and bought is False)
+check("처음엔 낚시대가 없다", left == 0)
 check("낚시대 없이 쓰면 None", run(fishing_store.use_rod(R)) is None)
 
 check("낚시대를 산다", run(fishing_store.buy_rod(R, ROD_DURABILITY)) is True)
-left, bought = run(fishing_store.rod_state(R))
-check(f"내구도 {ROD_DURABILITY}로 시작", left == ROD_DURABILITY, str(left))
-check("오늘 샀다고 기록된다", bought is True)
-
-# 🚨 하루 1개 — 이게 뚫리면 하루 상한이 사라져요.
-check("🚨 같은 날 두 번째는 못 산다",
-      run(fishing_store.buy_rod(R, ROD_DURABILITY)) is False)
-check("두 번째 시도가 내구도를 덮어쓰지 않는다",
+check(f"내구도 {ROD_DURABILITY}로 시작",
       run(fishing_store.rod_state(R))[0] == ROD_DURABILITY)
 
+# 🚨 **하루 제한이 없어요**(2026-10-17 4차). 대신 1개당 순이익이 0 근처라 안전해요.
+check("🚨 같은 날 또 살 수 있다 (제한 해제)",
+      run(fishing_store.buy_rod(R, ROD_DURABILITY)) is True)
+
+# 🚨 내구도가 **쌓여야** 해요. 덮어쓰면 남은 횟수가 날아가요.
+check("🚨 내구도가 덮어쓰이지 않고 쌓인다",
+      run(fishing_store.rod_state(R))[0] == ROD_DURABILITY * 2,
+      f"{run(fishing_store.rod_state(R))[0]}회 (기대 {ROD_DURABILITY * 2})")
+
 # 내구도 소진
-rem = [run(fishing_store.use_rod(R)) for _ in range(ROD_DURABILITY)]
-check(f"{ROD_DURABILITY}번 쓰면 0이 된다", rem[-1] == 0, str(rem))
-check("순서대로 줄어든다", rem == list(range(ROD_DURABILITY - 1, -1, -1)), str(rem))
+rem = [run(fishing_store.use_rod(R)) for _ in range(ROD_DURABILITY * 2)]
+check("전부 쓰면 0이 된다", rem[-1] == 0, str(rem[-3:]))
+check("한 번에 1씩 줄어든다",
+      all(a - b == 1 for a, b in zip(rem, rem[1:])), str(rem[:4]))
 check("🚨 다 쓰면 더 못 쓴다 (음수로 안 내려감)",
       run(fishing_store.use_rod(R)) is None)
-check("부서진 뒤에도 그날은 못 산다",
-      run(fishing_store.buy_rod(R, ROD_DURABILITY)) is False)
-
-# 날짜가 바뀌면 다시 살 수 있어야 해요.
-fake.docs[R]["rod_date"] = "2000-01-01"
-check("날짜가 바뀌면 다시 살 수 있다",
-      run(fishing_store.buy_rod(R, ROD_DURABILITY)) is True)
-check("새 낚시대는 내구도가 가득", run(fishing_store.rod_state(R))[0] == ROD_DURABILITY)
 
 # 🚨 코인 차감 실패 시 되돌리기 — 안 되면 공짜 낚시대가 돼요.
-run(fishing_store.refund_rod(R))
-left, bought = run(fishing_store.rod_state(R))
-check("환불하면 내구도가 0", left == 0, str(left))
-check("🚨 환불하면 그날 다시 살 수 있다 (안 그러면 코인도 낚시대도 없어요)",
-      bought is False)
-check("실제로 다시 사진다", run(fishing_store.buy_rod(R, ROD_DURABILITY)) is True)
+run(fishing_store.buy_rod(R, ROD_DURABILITY))      # 10
+run(fishing_store.use_rod(R))                      # 9 (쓰던 중)
+run(fishing_store.buy_rod(R, ROD_DURABILITY))      # 19 (하나 더 삼)
+run(fishing_store.refund_rod(R, ROD_DURABILITY))   # 차감 실패 -> 방금 산 것만 취소
+check("🚨 환불은 **방금 준 만큼만** 뺀다 (쓰던 낚시대가 안 날아감)",
+      run(fishing_store.rod_state(R))[0] == 9,
+      f"{run(fishing_store.rod_state(R))[0]}회 (기대 9)")
 
 # ==================================================================
 print("\n[9] 어종표 정합성")
