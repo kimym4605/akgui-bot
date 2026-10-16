@@ -47,6 +47,7 @@ except ImportError:  # pragma: no cover
 from utils.profile_card import _RENDER_LOCK, _font  # noqa: E402
 
 CARD_DIR = Path(__file__).resolve().parent.parent / "assets" / "cards"
+THUMB_DIR = CARD_DIR / "thumbs"      # 도감 그리드용 미리 구운 150x225 (_load_thumb 참고)
 
 # 카드 한 장을 그릴 칸 크기. 원본이 대략 2:3이라 거기에 맞춰요.
 SLOT_W, SLOT_H = 300, 450
@@ -184,3 +185,147 @@ async def render_pull(drawn: list[dict]) -> bytes | None:
         except Exception:
             log.exception("뽑기 결과 렌더링 실패 (%s)", [d.get("key") for d in drawn])
             return None
+
+
+# ==================================================================
+# 📖 도감 - 한 등급을 통째로 펼쳐 보여줘요
+#
+# `/도감`이 글자 목록만 주던 때는 **정작 모은 카드를 볼 수가 없었어요.** 수집 기능인데
+# 수집물을 못 보는 셈이라, 등급별로 전부 펼친 그리드를 그려요.
+#
+# 안 가진 카드는 **어두운 자물쇠 칸**으로 둬요. 아트를 어둡게 깔아주는 방법도 있지만
+# 이 카드들은 전면 일러스트라 어둡게 깔면 그냥 사실상 다 보여요 - 처음 뽑았을 때의
+# 재미를 미리 써버려요. 대신 **몇 장 중 몇 장**인지를 윗줄에 크게 보여줘요.
+# ==================================================================
+GRID_THUMB_W, GRID_THUMB_H = 150, 225
+GRID_GAP = 12
+GRID_PAD = 24
+GRID_HEADER_H = 54
+GRID_CAPTION_H = 24          # 썸네일 아래 이름 한 줄
+
+LOCK_BG = (30, 33, 48)
+LOCK_EDGE = (56, 61, 86)
+LOCK_MARK = (88, 94, 120)
+
+
+def _load_thumb(key: str):
+    """도감 칸에 넣을 썸네일. 못 열면 None(호출부가 빈 칸으로 그려요).
+
+    ⚡ `assets/cards/thumbs/`에 **미리 구워둔 150x225**를 먼저 봐요
+    (`scripts/build_card_assets.py`). 없을 때만 768px 원본을 열어 줄여요.
+
+    왜 미리 굽나: 에픽 30장짜리 도감을 그릴 때 매번 원본을 줄이면 윈도우 개발기에서도
+    3.6초가 걸렸어요. 그동안 `_RENDER_LOCK`을 붙잡고 있어서 **다른 사람 뽑기까지 밀려요.**
+    썸네일을 쓰면 열어서 붙이기만 하면 돼요.
+    """
+    thumb = THUMB_DIR / f"{key}.webp"
+    path = thumb if thumb.is_file() else CARD_DIR / f"{key}.webp"
+    if not path.is_file():
+        return None
+    try:
+        with Image.open(path) as opened:
+            src = opened.convert("RGBA")
+            if src.width <= GRID_THUMB_W and src.height <= GRID_THUMB_H:
+                return src.copy()      # 이미 알맞은 크기 - 줄일 필요 없어요
+            ratio = min(GRID_THUMB_W / src.width, GRID_THUMB_H / src.height)
+            return src.resize((max(1, int(src.width * ratio)),
+                               max(1, int(src.height * ratio))), Image.LANCZOS)
+    except Exception:  # noqa: BLE001
+        log.warning("도감 썸네일 실패: %s", path.name, exc_info=True)
+        return None
+
+
+def _grid_columns(n: int) -> int:
+    """칸 수에 맞는 열 수. 13장(레전드)을 6열로 두면 마지막 줄이 1칸만 남아 허전해요."""
+    return 5 if n <= 15 else 6
+
+
+def _render_grid(grade: str, cards: list[dict], counts: dict[str, int]) -> bytes:
+    """등급 하나를 전부 펼친 도감 페이지. **동기 함수**라 to_thread로 부르세요."""
+    n = len(cards)
+    cols = _grid_columns(n)
+    rows = -(-n // cols)
+    cell_h = GRID_THUMB_H + GRID_CAPTION_H
+
+    width = GRID_PAD * 2 + cols * GRID_THUMB_W + (cols - 1) * GRID_GAP
+    height = GRID_PAD * 2 + GRID_HEADER_H + rows * cell_h + (rows - 1) * GRID_GAP
+
+    canvas = _vertical_gradient((width, height), BG_TOP, BG_BOTTOM)
+    draw = ImageDraw.Draw(canvas)
+    color = _rgb(GRADE_COLOR.get(grade, 0x969696))
+
+    owned = sum(1 for c in cards if counts.get(c["key"]))
+    draw.text((GRID_PAD, GRID_PAD), grade, font=_font("bold", 34), fill=color)
+    tally = f"{owned} / {n}"
+    tally_font = _font("bold", 30)
+    draw.text((width - GRID_PAD - draw.textlength(tally, font=tally_font), GRID_PAD + 4),
+              tally, font=tally_font, fill=color)
+
+    name_font = _font("regular", 17)
+    count_font = _font("bold", 17)
+    lock_font = _font("bold", 46)
+
+    for i, card in enumerate(cards):
+        cx = GRID_PAD + (i % cols) * (GRID_THUMB_W + GRID_GAP)
+        cy = GRID_PAD + GRID_HEADER_H + (i // cols) * (cell_h + GRID_GAP)
+        have = counts.get(card["key"], 0)
+        box = (cx, cy, cx + GRID_THUMB_W, cy + GRID_THUMB_H)
+
+        if not have:
+            # 아직 없는 카드 - 이름도 가려요(처음 뽑는 재미를 남겨둬요).
+            draw.rounded_rectangle(box, radius=8, fill=LOCK_BG, outline=LOCK_EDGE, width=2)
+            qm = "?"
+            draw.text((cx + (GRID_THUMB_W - draw.textlength(qm, font=lock_font)) / 2,
+                       cy + GRID_THUMB_H / 2 - 34), qm, font=lock_font, fill=LOCK_MARK)
+            continue
+
+        art = _load_thumb(card["key"])
+
+        if art is not None:
+            ax = cx + (GRID_THUMB_W - art.width) // 2
+            ay = cy + (GRID_THUMB_H - art.height) // 2
+            canvas.paste(art, (ax, ay), art)
+            draw.rectangle((ax - 2, ay - 2, ax + art.width + 1, ay + art.height + 1),
+                           outline=color, width=2)
+        else:
+            draw.rounded_rectangle(box, radius=8, fill=LOCK_BG, outline=color, width=2)
+
+        # 중복 장수 배지 (일반·레어만 2장 이상이 돼요)
+        if have > 1:
+            tag = f"×{have}"
+            tw = draw.textlength(tag, font=count_font)
+            bx, by = cx + GRID_THUMB_W - tw - 16, cy + 6
+            draw.rounded_rectangle((bx, by, bx + tw + 10, by + 22), radius=5, fill=color)
+            draw.text((bx + 5, by + 2), tag, font=count_font, fill=(10, 12, 20))
+
+        name = card["name"]
+        while name and draw.textlength(name, font=name_font) > GRID_THUMB_W - 4:
+            name = name[:-1]
+        draw.text((cx + (GRID_THUMB_W - draw.textlength(name, font=name_font)) / 2,
+                   cy + GRID_THUMB_H + 4), name, font=name_font, fill=color)
+
+    buffer = io.BytesIO()
+    canvas.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()
+
+
+async def render_grid(grade: str, cards: list[dict], counts: dict[str, int]) -> bytes | None:
+    """등급 도감 페이지 PNG. 실패하면 None(호출한 쪽이 글자 목록으로 물러나요)."""
+    if not PILLOW_AVAILABLE or not cards:
+        return None
+    async with _RENDER_LOCK:
+        try:
+            return await asyncio.to_thread(_render_grid, grade, cards, counts)
+        except Exception:
+            log.exception("도감 그리드 렌더링 실패 (grade=%s)", grade)
+            return None
+
+
+def card_file_path(key: str):
+    """한 장 크게 보기용 원본 경로. 없으면 None. (stat 한 번이라 동기로 둬요)
+
+    ⚠️ 크게 볼 때는 **다시 그리지 않고 원본 WebP를 그대로 올려요.** 이미 긴 변 768px로
+    줄여둔 파일이라 더 손댈 이유가 없고, 256MB 머신에서 Pillow를 한 번 덜 돌리는 게 좋아요.
+    """
+    path = CARD_DIR / f"{key}.webp"
+    return path if path.is_file() else None

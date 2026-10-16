@@ -48,12 +48,25 @@ from PIL import Image, ImageOps
 SRC = Path(r"C:\Users\user\Desktop\악귀카드수정본")
 ROOT = Path(__file__).resolve().parent.parent
 OUT_IMG = ROOT / "assets" / "cards"
+OUT_THUMB = OUT_IMG / "thumbs"
 OUT_PY = ROOT / "utils" / "card_data.py"
 
 # 긴 변 기준. 디스코드가 임베드 이미지를 보여주는 크기(최대 ~600px 폭)를 생각하면
 # 768이면 고화질로 충분하고, 더 키워도 화면에선 차이가 안 보여요.
 MAX_LONG_SIDE = 768
 WEBP_QUALITY = 82
+
+# 📖 도감 그리드용 썸네일.
+#
+# 왜 미리 만드나: `/도감`은 한 등급(최대 30장)을 한 장에 펼쳐요. 그때마다 768px 원본을
+# 30번 열어 줄이면 **윈도우 개발기에서도 3.6초**가 걸렸어요 - 256MB 공유 CPU인 Fly에선
+# 더 느리고, 그동안 렌더 세마포어를 붙잡고 있어서 다른 사람 뽑기까지 밀려요.
+# 150x225로 미리 구워두면 열어서 붙이기만 하면 돼요(83장 다 합쳐 1~2MB).
+#
+# ⚠️ `utils/card_render.py`의 `GRID_THUMB_W/H`와 맞춰야 해요. 더 작게 구우면 그리드에서
+#    늘려 그리느라 흐려지고, 더 크면 다시 줄이느라 느려져요.
+THUMB_SIZE = (150, 225)
+THUMB_QUALITY = 80
 
 # 등급 -> (키 접두어, 표시 순서). 접두어는 파일명이 되니 ASCII여야 해요.
 GRADES = {
@@ -85,9 +98,12 @@ def main() -> int:
         print(f"⚠️  등급 접두어가 없어 건너뜀 ({len(skipped)}장): {', '.join(skipped)}")
 
     OUT_IMG.mkdir(parents=True, exist_ok=True)
+    OUT_THUMB.mkdir(parents=True, exist_ok=True)
     # 이전 실행의 잔재를 지워요. 아트가 줄었을 때 옛 파일이 남아 레지스트리에 없는
     # 유령 카드 이미지가 되는 걸 막아요.
     for old in OUT_IMG.glob("*.webp"):
+        old.unlink()
+    for old in OUT_THUMB.glob("*.webp"):
         old.unlink()
 
     registry: dict[str, list[dict]] = {}
@@ -106,6 +122,10 @@ def main() -> int:
                 # contain = 비율 유지하며 박스 안에 맞춤 (잘림·왜곡 없음)
                 im = ImageOps.contain(im, (MAX_LONG_SIDE, MAX_LONG_SIDE), Image.LANCZOS)
                 im.save(dest, "WEBP", quality=WEBP_QUALITY, method=6)
+                # 📖 도감 그리드용 썸네일도 같이 구워요 (이유는 THUMB_SIZE 주석 참고).
+                # 이미 줄인 im에서 또 줄이는 거라 원본을 다시 여는 것보다 빨라요.
+                ImageOps.contain(im, THUMB_SIZE, Image.LANCZOS).save(
+                    OUT_THUMB / f"{key}.webp", "WEBP", quality=THUMB_QUALITY, method=6)
 
             total_src += path.stat().st_size
             total_out += dest.stat().st_size
@@ -119,7 +139,9 @@ def main() -> int:
     print(f"\n✅ {sum(len(v) for v in registry.values())}장 변환")
     print(f"   {total_src / 1024 / 1024:.1f}MB → {total_out / 1024 / 1024:.1f}MB "
           f"({total_out / total_src * 100:.1f}%)")
+    thumb_bytes = sum(f.stat().st_size for f in OUT_THUMB.glob("*.webp"))
     print(f"   이미지: {OUT_IMG.relative_to(ROOT)}")
+    print(f"   썸네일: {OUT_THUMB.relative_to(ROOT)} ({thumb_bytes / 1024:.0f}KB)")
     print(f"   레지스트리: {OUT_PY.relative_to(ROOT)}")
     return 0
 

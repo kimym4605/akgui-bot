@@ -358,6 +358,62 @@ else:
     print("  (Pillow 없음 - 렌더 검사 건너뜀)")
 
 # ==================================================================
+print("\n[13] 도감 그리드")
+# ------------------------------------------------------------------
+if card_render.PILLOW_AVAILABLE:
+    import time  # noqa: E402
+
+    # 썸네일이 83장 전부 있어야 도감이 빨라요. 하나라도 빠지면 그 칸만 768px 원본을
+    # 열어 줄이는데, 30장이면 그 차이가 초 단위로 벌어져요.
+    thumbs = list(card_render.THUMB_DIR.glob("*.webp"))
+    check(f"썸네일 {TOTAL}장 전부 존재", len(thumbs) == TOTAL,
+          f"{len(thumbs)}개 (없으면 scripts/build_card_assets.py 재실행)")
+    if thumbs:
+        tmb = sum(p.stat().st_size for p in thumbs) / 1024
+        check("썸네일 전체 3MB 이하", tmb < 3072, f"{tmb:.0f}KB")
+
+    big_grade = max(CARDS, key=lambda g: len(CARDS[g]))     # 에픽 30장 = 최악
+    half = {c["key"]: 1 for c in CARDS[big_grade][::2]}
+    t0 = time.time()
+    png = card_render._render_grid(big_grade, CARDS[big_grade], half)
+    elapsed = time.time() - t0
+    # 🚨 Fly는 256MB·공유 CPU라 개발기보다 느려요. 여기서 1초를 넘으면 거기선 몇 초가 돼요.
+    #    (썸네일을 미리 굽기 전엔 3.6초였어요)
+    check(f"{big_grade} {len(CARDS[big_grade])}장 그리드가 1초 안에",
+          elapsed < 1.0, f"{elapsed:.2f}초")
+
+    im = Image.open(BytesIO(png)).convert("RGB")
+    check("그리드 폭이 디스코드에 무난한 크기", im.width <= 1200, f"{im.width}px")
+    check("그리드 용량 8MB 이하 (디스코드 첨부 한도)",
+          len(png) < 8 * 1024 * 1024, f"{len(png)//1024}KB")
+
+    # 안 가진 칸이 실제로 '잠김' 색으로 칠해져 있는지 - 보유/미보유가 구분돼야 도감이에요.
+    px = im.load()
+    cols = card_render._grid_columns(len(CARDS[big_grade]))
+    def cell_probe(i):
+        """칸 안쪽 왼쪽 위를 찍어요.
+
+        ⚠️ **정중앙을 찍으면 안 돼요** - 잠긴 칸은 거기에 `?` 글자가 있어서 배경(어두운색)이
+        아니라 글자 색(밝은 회색)이 잡혀요. 처음에 그래서 이 검사가 틀리게 실패했어요."""
+        cx = card_render.GRID_PAD + (i % cols) * (card_render.GRID_THUMB_W + card_render.GRID_GAP)
+        cy = (card_render.GRID_PAD + card_render.GRID_HEADER_H
+              + (i // cols) * (card_render.GRID_THUMB_H + card_render.GRID_CAPTION_H
+                               + card_render.GRID_GAP))
+        return cx + 22, cy + 22
+    # 0번은 보유(짝수 인덱스), 1번은 미보유
+    owned_px = px[cell_probe(0)]
+    locked_px = px[cell_probe(1)]
+    check("보유 칸과 미보유 칸이 다르게 그려진다", owned_px != locked_px,
+          f"보유{owned_px} vs 잠김{locked_px}")
+    check("미보유 칸은 어둡다", sum(locked_px) < 180, f"{locked_px}")
+
+    # 전부 미보유여도 터지지 않아야 해요(처음 쓰는 사람).
+    empty_png = card_render._render_grid(big_grade, CARDS[big_grade], {})
+    check("도감이 비어도 그려진다", len(empty_png) > 0)
+else:
+    print("  (Pillow 없음 - 건너뜀)")
+
+# ==================================================================
 print("\n[참고] 경제 시뮬레이션 (확정된 수치로 실제 기대값)")
 # ------------------------------------------------------------------
 # 사용자가 고른 수치: 10코인에 3장, 천장 30장.

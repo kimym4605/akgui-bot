@@ -53,7 +53,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils import card_render, card_store, coin_wallet
-from utils.card_data import CARDS
+from utils.card_data import BY_KEY, CARDS
 from utils.card_store import (
     CARDS_PER_PULL,
     GRADE_COLOR,
@@ -240,6 +240,191 @@ def build_gacha_view(user_id: int) -> discord.ui.View:
     return GachaView(user_id)
 
 
+# ============================================================
+# 📖 도감 화면
+#
+# 처음엔 글자 목록만 보여줬는데, **수집 기능인데 정작 모은 카드를 볼 수가 없었어요.**
+# 그래서 등급을 고르면 그 등급을 통째로 펼친 그림을 띄우고, 거기서 한 장을 골라
+# 크게 볼 수 있게 했어요.
+#
+# ⚠️ 여기 버튼은 뽑기 버튼과 달리 **DynamicItem이 아니에요.** 도감은 ephemeral(본인에게만
+# 보이는) 메시지라 어차피 봇이 재시작되면 되살릴 대상 자체가 없어요. 시간이 지나 꺼지면
+# `/도감`을 다시 부르면 돼요. (공개 메시지에 남는 뽑기 버튼은 반드시 DynamicItem이어야
+# 해요 - cogs/attendance.py 주석 참고)
+# ============================================================
+_VIEW_TIMEOUT = 300
+
+# 디스코드 드롭다운은 선택지가 **25개**까지예요. 에픽은 30종이라 전부 모으면 넘쳐요.
+_SELECT_MAX = 25
+
+
+def _overview_embed(summary: dict, since_legend: int, counts: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title="🎴 내 악귀카드 도감",
+        description=f"**{summary['owned']}/{summary['total']}종** 보유 · 총 {summary['cards']}장",
+        color=0xFFC850,
+    )
+    for grade in GRADE_ORDER:
+        g = summary["per_grade"][grade]
+        # 진행바 10칸. 숫자만 있으면 등급 간 비교가 안 와닿아요.
+        filled = round(g["owned"] / g["total"] * 10) if g["total"] else 0
+        bar = "█" * filled + "░" * (10 - filled)
+        note = " · 중복 쌓임" if grade in card_store.DUPE_OK else " · 중복 없음"
+        embed.add_field(
+            name=f"{GRADE_EMOJI[grade]} {grade} — {g['owned']}/{g['total']}",
+            value=f"`{bar}`{note}",
+            inline=False,
+        )
+    if card_store._exhausted("레전드", counts):
+        embed.set_footer(text="🟡 레전드를 전부 모으셨어요! · 아래 버튼으로 카드를 펼쳐봐요")
+    else:
+        left = max(0, PITY_DRAWS - since_legend)
+        embed.set_footer(text=f"🟡 레전드 확정까지 {left}장 · 아래 버튼으로 카드를 펼쳐봐요")
+    return embed
+
+
+class GradeButton(discord.ui.Button):
+    """등급 하나를 펼쳐 보는 버튼."""
+
+    def __init__(self, grade: str, owned: int, total: int):
+        super().__init__(
+            label=f"{grade} {owned}/{total}",
+            emoji=GRADE_EMOJI[grade],
+            style=discord.ButtonStyle.secondary,
+        )
+        self.grade = grade
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.view.show_grade(interaction, self.grade)  # type: ignore[attr-defined]
+
+
+class BackButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="전체 진행도", emoji="📖", style=discord.ButtonStyle.primary)
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.view.show_overview(interaction)  # type: ignore[attr-defined]
+
+
+class CardSelect(discord.ui.Select):
+    """가진 카드 중 하나를 골라 크게 봐요. (안 가진 카드는 목록에 없어요)"""
+
+    def __init__(self, grade: str, cards: list[dict], counts: dict):
+        owned = [c for c in cards if counts.get(c["key"])]
+        options = [
+            discord.SelectOption(
+                label=c["name"][:100],
+                value=c["key"],
+                description=(f"{counts[c['key']]}장 보유"
+                             if counts.get(c["key"], 0) > 1 else None),
+                emoji=GRADE_EMOJI[grade],
+            )
+            for c in owned[:_SELECT_MAX]
+        ]
+        extra = len(owned) - len(options)
+        placeholder = "카드를 골라 크게 보기"
+        if extra > 0:
+            placeholder = f"카드를 골라 크게 보기 (앞 {_SELECT_MAX}종만)"
+        super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.view.show_card(interaction, self.values[0])  # type: ignore[attr-defined]
+
+
+class CollectionView(discord.ui.View):
+    def __init__(self, user_id: int, counts: dict, since_legend: int):
+        super().__init__(timeout=_VIEW_TIMEOUT)
+        self.user_id = user_id
+        self.counts = counts
+        self.since_legend = since_legend
+        self.summary = card_store.summarize(counts)
+        self._build_overview()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # ephemeral이라 남이 누를 일은 거의 없지만, 혹시 모를 경우를 막아둬요.
+        return interaction.user.id == self.user_id
+
+    # ---- 화면 구성 ----
+    def _build_overview(self):
+        self.clear_items()
+        for grade in GRADE_ORDER:
+            g = self.summary["per_grade"][grade]
+            self.add_item(GradeButton(grade, g["owned"], g["total"]))
+
+    def _build_grade(self, grade: str):
+        self.clear_items()
+        self.add_item(BackButton())
+        if any(self.counts.get(c["key"]) for c in CARDS[grade]):
+            self.add_item(CardSelect(grade, CARDS[grade], self.counts))
+
+    # ---- 화면 전환 ----
+    async def show_overview(self, interaction: discord.Interaction):
+        self._build_overview()
+        await interaction.response.edit_message(
+            embed=_overview_embed(self.summary, self.since_legend, self.counts),
+            attachments=[],          # 그림을 떼어내요 (안 하면 이전 카드가 남아요)
+            view=self,
+        )
+
+    async def show_grade(self, interaction: discord.Interaction, grade: str):
+        # 썸네일을 미리 구워둬서 보통 0.1초 안에 끝나지만, 세마포어 대기가 걸릴 수 있어서
+        # defer는 해둬요(3초를 넘기면 디스코드가 "응답하지 않았습니다"로 끊어요).
+        await interaction.response.defer()
+        self._build_grade(grade)
+        embed, file = await _grade_payload(grade, self.counts, self.summary)
+        await interaction.edit_original_response(
+            embed=embed, attachments=[file] if file else [], view=self
+        )
+
+    async def show_card(self, interaction: discord.Interaction, key: str):
+        await interaction.response.defer()
+        grade, name = BY_KEY[key]
+        path = card_render.card_file_path(key)
+        have = self.counts.get(key, 0)
+
+        embed = discord.Embed(
+            title=f"{GRADE_EMOJI[grade]} {name}",
+            description=f"**{grade}**" + (f" · {have}장 보유" if have > 1 else ""),
+            color=GRADE_COLOR[grade],
+        )
+        files = []
+        if path is not None:
+            files = [discord.File(path, filename=f"{key}.webp")]
+            embed.set_image(url=f"attachment://{key}.webp")
+        else:
+            embed.description += "\n-# 이미지를 찾지 못했어요."
+        embed.set_footer(text="아래에서 다른 카드를 고르거나 📖 로 돌아갈 수 있어요")
+        await interaction.edit_original_response(embed=embed, attachments=files, view=self)
+
+
+async def _grade_payload(grade: str, counts: dict, summary: dict):
+    """등급 도감 페이지의 (임베드, 파일). 그림이 실패하면 글자 목록으로 물러나요."""
+    g = summary["per_grade"][grade]
+    embed = discord.Embed(
+        title=f"{GRADE_EMOJI[grade]} {grade} — {g['owned']}/{g['total']}",
+        color=GRADE_COLOR[grade],
+    )
+    png = await card_render.render_grid(grade, CARDS[grade], counts)
+    if png is not None:
+        embed.set_image(url=f"attachment://dex_{grade}.png")
+        embed.set_footer(text="🔒 ? 는 아직 없는 카드예요 · 아래에서 골라 크게 볼 수 있어요")
+        return embed, discord.File(io.BytesIO(png), filename=f"dex_{grade}.png")
+
+    # Pillow가 없거나 렌더가 실패한 경우 - 기능이 통째로 죽는 것보단 글자가 나아요.
+    rows = []
+    for card in CARDS[grade]:
+        n = counts.get(card["key"], 0)
+        if not n:
+            rows.append(f"🔒 ||{card['name']}||")
+        elif grade in card_store.DUPE_OK and n > 1:
+            rows.append(f"✅ **{card['name']}** ×{n}")
+        else:
+            rows.append(f"✅ **{card['name']}**")
+    embed.description = "\n".join(rows)
+    embed.set_footer(text="🔒 는 아직 없는 카드예요 (이름은 가려뒀어요)")
+    return embed, None
+
+
 class CardGacha(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -254,64 +439,36 @@ class CardGacha(commands.Cog):
         await interaction.response.defer()
         await do_pull(interaction)
 
-    @app_commands.command(name="도감", description="내가 모은 악귀카드를 봐요.")
+    @app_commands.command(name="도감", description="내가 모은 악귀카드를 펼쳐 봐요.")
     @restrict_to_channel("card", "CARD_CHANNEL_ID")
-    @app_commands.describe(등급="이 등급의 카드 목록만 자세히 봐요 (안 고르면 전체 진행도)")
+    @app_commands.describe(등급="바로 이 등급을 펼쳐요 (안 고르면 전체 진행도부터)")
     @app_commands.choices(등급=[
         app_commands.Choice(name=f"{GRADE_EMOJI[g]} {g}", value=g) for g in GRADE_ORDER
     ])
     async def collection(
         self, interaction: discord.Interaction, 등급: app_commands.Choice[str] | None = None
     ):
+        # 본인 도감이라 ephemeral이에요. 채널이 남의 도감으로 덮이지 않아요.
         await interaction.response.defer(ephemeral=True)
         state = await card_store.get_collection(interaction.user.id)
         counts = state["counts"]
-        summary = card_store.summarize(counts)
+
+        view = CollectionView(interaction.user.id, counts, state["since_legend"])
 
         if 등급 is None:
-            embed = discord.Embed(
-                title="🎴 내 악귀카드 도감",
-                description=f"**{summary['owned']}/{summary['total']}종** 보유 · 총 {summary['cards']}장",
-                color=0xFFC850,
+            await interaction.followup.send(
+                embed=_overview_embed(view.summary, state["since_legend"], counts),
+                view=view, ephemeral=True,
             )
-            for grade in GRADE_ORDER:
-                g = summary["per_grade"][grade]
-                # 진행바 10칸. 숫자만 있으면 등급 간 비교가 안 와닿아요.
-                filled = round(g["owned"] / g["total"] * 10) if g["total"] else 0
-                bar = "█" * filled + "░" * (10 - filled)
-                note = " · 중복 쌓임" if grade in card_store.DUPE_OK else " · 중복 없음"
-                embed.add_field(
-                    name=f"{GRADE_EMOJI[grade]} {grade} — {g['owned']}/{g['total']}",
-                    value=f"`{bar}`{note}",
-                    inline=False,
-                )
-            left = max(0, PITY_DRAWS - state["since_legend"])
-            embed.set_footer(
-                text=f"🟡 레전드 확정까지 {left}장 · /도감 등급: 으로 카드 목록을 볼 수 있어요"
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
         grade = 등급.value
-        rows = []
-        for card in CARDS[grade]:
-            n = counts.get(card["key"], 0)
-            if not n:
-                rows.append(f"🔒 ||{card['name']}||")
-            elif grade in card_store.DUPE_OK and n > 1:
-                rows.append(f"✅ **{card['name']}** ×{n}")
-            else:
-                rows.append(f"✅ **{card['name']}**")
-
-        g = summary["per_grade"][grade]
-        embed = discord.Embed(
-            title=f"{GRADE_EMOJI[grade]} {grade} — {g['owned']}/{g['total']}",
-            # 한 줄에 다 넣으면 25필드 한도에 걸려요. 설명 하나에 몰아넣어요.
-            description="\n".join(rows),
-            color=GRADE_COLOR[grade],
-        )
-        embed.set_footer(text="🔒 는 아직 없는 카드예요 (이름은 가려뒀어요)")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        view._build_grade(grade)
+        embed, file = await _grade_payload(grade, counts, view.summary)
+        # ⚠️ `file=None`을 그대로 넘기면 안 돼요(discord.py 기본값이 MISSING이라
+        #    None을 "파일이 있다"로 봐요). 붙일 게 있을 때만 kwargs에 넣어요.
+        extra = {"file": file} if file else {}
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True, **extra)
 
     @app_commands.command(name="카드확률", description="악귀카드 뽑기의 확률과 천장을 공개해요.")
     @restrict_to_channel("card", "CARD_CHANNEL_ID")
