@@ -15,8 +15,10 @@ os.environ["BIRTHDAY_DB_NAME"] = "agwi_profile_test"
 import discord
 from discord.ext import commands
 
-TARGET_COGS = ["attendance", "achievement", "team", "rank", "betting", "mission", "coin"]
-NEW_COMMANDS = {"프로필", "업적", "내전전적", "주간랭킹", "내전시즌", "팀짜기", "팀보기"}
+TARGET_COGS = ["attendance", "achievement", "team", "rank", "betting", "mission", "coin",
+               "card_gacha"]
+NEW_COMMANDS = {"프로필", "업적", "내전전적", "주간랭킹", "내전시즌", "팀짜기", "팀보기",
+                "카드뽑기", "도감", "카드확률"}
 
 failed = []
 

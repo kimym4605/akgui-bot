@@ -53,6 +53,14 @@ REDIST_ADD = ("베팅정산",)
 # 나갔다가 일부만 돌아와요. 차액(하우스 몫)만 소각이에요.
 GAMBLE_SPEND = ("도박",)
 GAMBLE_ADD = ("도박 당첨", "도박 환불", "도박 버그 보상")
+# 🚨 되돌린 거래예요. 소각도 발행도 **아니에요** - 아예 없던 일로 쳐야 해요.
+#
+# 🎴 카드 뽑기는 저장이 밀리거나(동시 실행) 도중에 터지면 코인을 되돌려줘요. 그 환불은
+# kind가 `add`라서 그냥 두면 **출석·미션과 같은 "발행"으로 세어져** 발행량이 부풀어요.
+# (`카드뽑기` spend 10 + `카드뽑기:환불` add 10 → 소각 10·발행 10으로 잡히는데 실제로는
+#  아무 일도 안 일어났어요.) 그래서 둘 다 빼요.
+# 환불은 `burn`으로 잡힌 같은 금액의 spend를 상쇄해요 -> net_burn에서 빼요.
+REFUND_ADD = ("카드뽑기:환불",)
 
 
 def kst_of(oid):
@@ -71,6 +79,10 @@ def classify(entry):
             return "gamble_back"
         if note.startswith(REDIST_ADD):
             return "redist"
+        # ⚠️ 환불은 반드시 `issue`보다 **먼저** 걸러요. 안 그러면 되돌린 코인이
+        #    출석·미션과 같은 발행으로 세어져 발행량이 부풀어요.
+        if note.startswith(REFUND_ADD):
+            return "refund"
         return "issue"
     if note.startswith(GAMBLE_SPEND):
         return "gamble_bet"
@@ -102,7 +114,9 @@ def rows_of(cls, rows=None):
 
 
 issued = total("issue")
-burned = total("burn")
+# 환불된 만큼은 실제로 안 사라졌어요(같은 금액의 spend가 burn으로 잡혀 있어요).
+refunded = total("refund")
+burned = total("burn") - refunded
 bet, back = total("gamble_bet"), total("gamble_back")
 house = bet - back                      # 도박에서 실제로 사라진 코인
 net_burn = burned + house
@@ -129,10 +143,10 @@ for note, count in Counter(l["note"] for l in spend).most_common():
            "gamble_bet": f"  (환급 {back} 제외하면 실소각 {house})"}.get(cls, "")
     print(f"    {note:16s} {count:3d}건 / {amount:4d}코인 / {users:2d}명{tag}")
 
-print("\n  소비처가 실제로 쓰이는지 (2026-10-05~06에 만든 것들):")
+print("\n  소비처가 실제로 쓰이는지:")
 for key, label in [("미션리롤", "🎲 미션 리롤권"), ("출석보호권", "🧊 출석 보호권"),
                    ("카드테마", "🎨 카드 테마"), ("칭호구매", "🏷️ 칭호"), ("도박", "🎰 도박"),
-                   ("한도연장", "🔓 도박 한도 연장권")]:
+                   ("한도연장", "🔓 도박 한도 연장권"), ("카드뽑기", "🎴 카드 뽑기")]:
     rows = [l for l in spend if (l["note"] or "").startswith(key)]
     users = len({l.get("from") for l in rows})
     flag = "" if rows else "   ← 0건. 구매력 문제인지 발견 문제인지 [3]과 함께 보세요"
@@ -151,8 +165,10 @@ print(f"  {'날짜':12s}{'발행':>6s}{'소각':>6s}{'도박순소각':>11s}{'�
 for day in sorted(daily):
     r = daily[day]
     gh = r["gamble_bet"] - r["gamble_back"]
-    net = r["issue"] - r["burn"] - gh
-    print(f"  {day}  {r['issue']:6d}{r['burn']:6d}{gh:11d}{net:+8d}  {bar(max(net, 0), 2)}")
+    # 환불된 뽑기는 소각에서 빼요(위 [1]과 같은 이유 — 아예 없던 일이에요).
+    day_burn = r["burn"] - r["refund"]
+    net = r["issue"] - day_burn - gh
+    print(f"  {day}  {r['issue']:6d}{day_burn:6d}{gh:11d}{net:+8d}  {bar(max(net, 0), 2)}")
 
 # ── 3. 지갑 분포 ────────────────────────────────────────────────────
 balances = []

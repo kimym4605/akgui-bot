@@ -268,7 +268,28 @@ class Attendance(commands.Cog):
         )
         embed.set_thumbnail(url="attachment://coin.png")
         coin_file = discord.File(COIN_IMAGE_PATH, filename="coin.png")
-        await interaction.followup.send(embed=embed, file=coin_file)
+
+        # 🎴 받은 코인을 **바로 쓸 수 있는 버튼**을 같이 붙여요.
+        #
+        # 왜 여기인가: `/악귀상점`의 3종(리롤권·보호권·테마)은 출시 후 열흘간 실사용이
+        # 0건이었어요. 구매력은 충분했고(12코인 이상 21명), 문제는 **상점에 진열만 해둔 것**
+        # 이었어요. 반대로 🎰 도박 한도 연장권은 "막힌 그 자리"에서 팔려서 16건이 나갔어요.
+        # 코인이 손에 들어오는 순간이 쓸 자리라서, 뽑기는 처음부터 여기에 달아요.
+        # -> [[project_akgui_shop_coin_sinks]] · [[project_akgui_card_gacha]]
+        #
+        # ⚠️ 버튼은 DynamicItem이라 봇이 재시작돼도 살아있어요(cogs/card_gacha.py 주석).
+        # ⚠️ `view=None`을 그대로 넘기면 안 돼요. discord.py는 기본값이 `MISSING`이라
+        #    None을 "뷰가 있다"로 보고 `to_components()`를 불러서 터져요. 그래서 붙일 게
+        #    있을 때만 kwargs에 넣어요.
+        extra = {}
+        try:
+            from cogs.card_gacha import build_gacha_view
+            extra["view"] = build_gacha_view(interaction.user.id)
+        except Exception:  # noqa: BLE001
+            # 뽑기 cog가 없거나 로드에 실패해도 **출석 자체는 되어야** 해요.
+            log.warning("뽑기 버튼을 붙이지 못했어요 - 출석은 그대로 진행해요", exc_info=True)
+
+        await interaction.followup.send(embed=embed, file=coin_file, **extra)
 
     @app_commands.command(name="프로필", description="내 악귀 프로필 카드를 봐요. (내전 전적 · 악귀력 · 업적 · 칭호)")
     # ⚠️ 채널 그룹이 "attendance"(=#포켓몬)가 아니라 "profile"이에요.
@@ -303,6 +324,7 @@ class Attendance(commands.Cog):
         app_commands.Choice(name="칭호 상점 (/칭호구매, /칭호, /칭호해제)", value="title"),
         app_commands.Choice(name="미션 (/미션)", value="mission"),
         app_commands.Choice(name="도박 (/도박 슬롯·하이로우·블랙잭)", value="casino"),
+        app_commands.Choice(name="악귀카드 (/카드뽑기, /도감, /카드확률)", value="card"),
         app_commands.Choice(name="즉석생성형 통화방 명령어 (/방만들기 등)", value="room"),
         app_commands.Choice(name="전적 조회 명령어 (/전적)", value="tier_lookup"),
         app_commands.Choice(name="발로란트 개인 상점 (/오상)", value="valorant_shop"),
