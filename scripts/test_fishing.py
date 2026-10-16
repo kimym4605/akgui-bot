@@ -26,7 +26,9 @@ os.environ.setdefault("MONGODB_URI", "mongodb://127.0.0.1:27017")
 os.environ["MONGODB_DB_NAME"] = "agwi_fish_test"
 
 from utils import fish_data, fishing_store  # noqa: E402
-from utils.fish_data import BY_KEY, FISH, GRADES, MISS_RATE, price_of  # noqa: E402
+from utils.fish_data import (  # noqa: E402
+    BY_KEY, FISH, GRADES, ROD_DURABILITY, ROD_PER_DAY, ROD_PRICE, price_of,
+)
 
 failures = []
 
@@ -44,10 +46,13 @@ print("\n[1][2][3] 확률과 기댓값")
 rng = Random(20261017)
 N = 200_000
 results = [fishing.roll_catch(rng) for _ in range(N)]
-miss = sum(1 for r in results if r is None)
-actual_miss = miss / N * 100
-check(f"꽝 {MISS_RATE}% 기대", abs(actual_miss - MISS_RATE) < 0.5,
-      f"실측 {actual_miss:.2f}%")
+
+# 🚨 **꽝이 없어야 해요**(2026-10-17 2차). 타이밍만 맞히면 반드시 물고기가 나와요.
+#    1차의 꽝 60%는 1회당 수익만 낮출 뿐 **총 발행량을 못 막아서**, 낚시대
+#    (하루 1개 · 내구도 10)로 상한을 거는 구조로 바꿨어요.
+check("꽝이 없다 — 챔질에 성공하면 반드시 잡힌다",
+      all(r is not None for r in results),
+      f"None {sum(1 for r in results if r is None)}개")
 
 hits = [r for r in results if r]
 dist = Counter(BY_KEY[k][0] for k in hits)
@@ -65,14 +70,27 @@ check("기댓값 계산식과 실측이 일치", abs(measured - formula) < 0.05,
       f"계산 {formula:.3f} vs 실측 {measured:.3f} 코인/회")
 
 # ==================================================================
-print("\n[4] 🚨 발행량 — 하루에 얼마가 생기나")
-print(f"  1회 평균 {measured:.2f}코인")
-for casts, label in [(20, "느긋하게"), (50, "열심히"), (200, "작정하고")]:
-    print(f"  {label:8s} 하루 {casts:3d}번 → 약 {measured * casts:6.0f}코인")
-print(f"  -# 참고: 2026-10-17 서버 전체 일일 발행이 27~52코인이었어요")
-# 느긋한 플레이가 하루 출석(3~5코인)의 10배를 넘으면 출석이 무의미해져요.
-check("느긋한 플레이(20회)가 하루 40코인을 안 넘는다",
-      measured * 20 <= 40, f"{measured * 20:.0f}코인")
+print("\n[4] 🚨 발행량 — 낚시대가 상한을 건다")
+day_gross = measured * ROD_DURABILITY
+net = day_gross - ROD_PRICE
+print(f"  1회 평균 {measured:.2f}코인 · 낚시대 {ROD_PRICE}코인에 {ROD_DURABILITY}회")
+print(f"  하루 총수입 {day_gross:.1f} − 낚시대 {ROD_PRICE} = 순발행 {net:+.1f}코인/일")
+print("  -# 참고: 2026-10-17 서버 전체 일일 발행 27~52코인, 출석은 1인 3~5코인")
+
+# 🚨 1차 설계와의 핵심 차이. 전엔 상한이 없어서 하루 189코인도 가능했어요.
+check("하루 던지기 횟수에 상한이 있다",
+      ROD_DURABILITY * ROD_PER_DAY == 10, f"{ROD_DURABILITY * ROD_PER_DAY}회")
+check("🚨 순발행이 출석(3~5코인)을 압도하지 않는다 (25코인 이하)",
+      net <= 25, f"{net:.1f}코인")
+check("그래도 낚시할 이유는 있다 (순발행 > 0)", net > 0, f"{net:.1f}코인")
+check("낚시대값이 하루 총수입보다 싸다 (아니면 아무도 안 사요)",
+      ROD_PRICE < day_gross, f"{ROD_PRICE} vs {day_gross:.1f}")
+
+# 🐋 전설이 너무 자주 뜨면 '전설'이라는 말이 무색해져요(꽝을 없애니 22%까지 올랐었어요).
+lw = GRADES["전설"]["weight"] / sum(g["weight"] for g in GRADES.values())
+day_legend = (1 - (1 - lw) ** ROD_DURABILITY) * 100
+print(f"  🐋 전설: 1회 {lw * 100:.2f}% → 하루 {day_legend:.0f}% 확률")
+check("전설이 하루 10% 이하로 뜬다 (희소성)", day_legend <= 10, f"{day_legend:.0f}%")
 
 # ==================================================================
 print("\n[5][6][7][8] 어항")
@@ -87,13 +105,42 @@ class FakeFish:
         d = self.docs.get(flt["_id"])
         return dict(d) if d else None
 
+    def _matches(self, doc, flt):
+        """`$ne` / `$gte` / `$exists` 만 흉내내요 (낚시대·어항이 쓰는 전부)."""
+        for key, want in flt.items():
+            if key == "_id":
+                continue
+            got = doc.get(key)
+            if isinstance(want, dict):
+                if "$ne" in want and got == want["$ne"]:
+                    return False
+                if "$gte" in want and not (isinstance(got, int) and got >= want["$gte"]):
+                    return False
+                if "$exists" in want and (key in doc) != want["$exists"]:
+                    return False
+            elif got != want:
+                return False
+        return True
+
     def update_one(self, flt, update, upsert=False):
+        class Res:
+            def __init__(self, m=0, u=None):
+                self.modified_count, self.upserted_id = m, u
+
         uid = flt["_id"]
         doc = self.docs.get(uid)
         if doc is None:
             if not upsert:
-                return
+                return Res()
             doc = self.docs[uid] = {"_id": uid}
+            upserted = uid
+        else:
+            # ⚠️ 조건부 필터(`$ne` 등)를 **반드시** 봐야 해요. 안 보면 "하루 1개" 같은
+            #    제약이 테스트에서만 통과하고 실제로는 안 걸리는 걸 못 잡아요.
+            if not self._matches(doc, flt):
+                return Res()
+            upserted = None
+
         for field, delta in (update.get("$inc") or {}).items():
             if "." in field:
                 parent, child = field.split(".", 1)
@@ -103,6 +150,9 @@ class FakeFish:
                 doc[field] = doc.get(field, 0) + delta
         for field, value in (update.get("$set") or {}).items():
             doc[field] = value
+        for field in (update.get("$unset") or {}):
+            doc.pop(field, None)
+        return Res(m=0 if upserted else 1, u=upserted)
 
     def find_one_and_update(self, flt, update, return_document=None):
         if self.before_sell is not None:
@@ -110,11 +160,16 @@ class FakeFish:
             cb()
         uid = flt["_id"]
         doc = self.docs.get(uid)
-        before = dict(doc) if doc else None
-        if doc is not None:
-            for field, value in (update.get("$set") or {}).items():
-                doc[field] = value
-        return before
+        if doc is None or not self._matches(doc, flt):
+            return None
+        before = dict(doc)
+        for field, value in (update.get("$set") or {}).items():
+            doc[field] = value
+        for field, delta in (update.get("$inc") or {}).items():
+            doc[field] = doc.get(field, 0) + delta
+        # pymongo는 BEFORE/AFTER를 고를 수 있어요. 기본(None)은 BEFORE예요.
+        from pymongo import ReturnDocument as _RD
+        return dict(doc) if return_document == _RD.AFTER else before
 
     def find(self, flt, projection=None):
         class C:
@@ -194,6 +249,51 @@ check("실패하면 어항이 되돌아온다",
 fake.docs["888"] = {"_id": "888", "tank": {}}
 tank2, coins2 = run(fishing_store.sell_all("888"))
 check("빈 어항은 0코인", coins2 == 0 and not tank2)
+
+# ==================================================================
+print("\n[8b] 🎣 낚시대 — 하루 1개 · 내구도 10")
+# ------------------------------------------------------------------
+# 이게 발행 상한의 **유일한** 장치라, 여기 뚫리면 1차 설계의 무제한 발행으로 돌아가요.
+R = "rod-user"
+fake.docs.pop(R, None)
+
+left, bought = run(fishing_store.rod_state(R))
+check("처음엔 낚시대가 없다", left == 0 and bought is False)
+check("낚시대 없이 쓰면 None", run(fishing_store.use_rod(R)) is None)
+
+check("낚시대를 산다", run(fishing_store.buy_rod(R, ROD_DURABILITY)) is True)
+left, bought = run(fishing_store.rod_state(R))
+check(f"내구도 {ROD_DURABILITY}로 시작", left == ROD_DURABILITY, str(left))
+check("오늘 샀다고 기록된다", bought is True)
+
+# 🚨 하루 1개 — 이게 뚫리면 하루 상한이 사라져요.
+check("🚨 같은 날 두 번째는 못 산다",
+      run(fishing_store.buy_rod(R, ROD_DURABILITY)) is False)
+check("두 번째 시도가 내구도를 덮어쓰지 않는다",
+      run(fishing_store.rod_state(R))[0] == ROD_DURABILITY)
+
+# 내구도 소진
+rem = [run(fishing_store.use_rod(R)) for _ in range(ROD_DURABILITY)]
+check(f"{ROD_DURABILITY}번 쓰면 0이 된다", rem[-1] == 0, str(rem))
+check("순서대로 줄어든다", rem == list(range(ROD_DURABILITY - 1, -1, -1)), str(rem))
+check("🚨 다 쓰면 더 못 쓴다 (음수로 안 내려감)",
+      run(fishing_store.use_rod(R)) is None)
+check("부서진 뒤에도 그날은 못 산다",
+      run(fishing_store.buy_rod(R, ROD_DURABILITY)) is False)
+
+# 날짜가 바뀌면 다시 살 수 있어야 해요.
+fake.docs[R]["rod_date"] = "2000-01-01"
+check("날짜가 바뀌면 다시 살 수 있다",
+      run(fishing_store.buy_rod(R, ROD_DURABILITY)) is True)
+check("새 낚시대는 내구도가 가득", run(fishing_store.rod_state(R))[0] == ROD_DURABILITY)
+
+# 🚨 코인 차감 실패 시 되돌리기 — 안 되면 공짜 낚시대가 돼요.
+run(fishing_store.refund_rod(R))
+left, bought = run(fishing_store.rod_state(R))
+check("환불하면 내구도가 0", left == 0, str(left))
+check("🚨 환불하면 그날 다시 살 수 있다 (안 그러면 코인도 낚시대도 없어요)",
+      bought is False)
+check("실제로 다시 사진다", run(fishing_store.buy_rod(R, ROD_DURABILITY)) is True)
 
 # ==================================================================
 print("\n[9] 어종표 정합성")

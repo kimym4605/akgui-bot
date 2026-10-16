@@ -27,6 +27,7 @@ from discord.ext import commands
 from utils import attend_service, coin_wallet, cosmetic_store, inventory_store, mission_store, riot_account_store
 from utils.inventory_store import PROTECT_MAX, PROTECT_PRICE
 from utils.mission_store import MISSIONS, REROLL_LIMIT_PER_DAY, REROLL_PRICE
+from utils.fish_data import ROD_DURABILITY, ROD_PRICE
 from utils.profile_card import THEME_PRICE, THEMES
 from utils.title_store import TITLE_DAYS, TITLE_PLANS
 
@@ -49,6 +50,15 @@ def _shop_embed(balance: int, rerolls_left: int, owned: list[str], selected: str
         title="🪙 악귀상점",
         description=f"내 악귀코인: **{balance}개**\n`/출석` · `/미션` · `/업적`으로 모아요.",
         color=0xFFC850,
+    )
+    embed.add_field(
+        name=f"🎣 낚시대 — {ROD_PRICE}코인 (하루 1개)",
+        value=(
+            f"**{ROD_DURABILITY}번** 던질 수 있어요. 다 쓰면 부서져요.\n"
+            "　└ 낚시는 낚시대가 있어야 해요 · 꽝 없이 **반드시 물고기가 나와요**\n"
+            "　└ 잡은 건 `/어항`에 쌓였다가 `/물고기판매`로 한 번에 팔려요"
+        ),
+        inline=False,
     )
     embed.add_field(
         name=f"🎲 미션 리롤권 — {REROLL_PRICE}코인",
@@ -236,6 +246,22 @@ class ShopView(discord.ui.View):
             await self.message.edit(view=self)
         except Exception:  # noqa: BLE001
             pass
+
+    @discord.ui.button(label="낚시대 사기", emoji="🎣", style=discord.ButtonStyle.success)
+    async def buy_rod(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """🎣 낚시대 - 이 상점의 **첫 소모품**이에요.
+
+        리롤권·보호권·테마는 12일째 0건인데, 그건 전부 '있으면 좋은' 물건이라서예요.
+        낚시대는 **없으면 낚시를 아예 못 해요** - 매일 사야 하는 필수품이라 이 상점이
+        실제로 쓰이는 첫 계기가 될 거예요.
+
+        ⚠️ 구매 로직은 `cogs/fishing.py`의 `purchase_rod` 하나뿐이에요. 여기서 복사해
+        두면 한쪽만 고치는 사고가 나요(지급→차감→실패 시 환불 순서가 핵심이에요)."""
+        await interaction.response.defer(ephemeral=True)
+        from cogs.fishing import purchase_rod
+
+        _, msg = await purchase_rod(interaction.user.id)
+        await interaction.followup.send(msg, ephemeral=True)
 
     @discord.ui.button(label="미션 리롤", emoji="🎲", style=discord.ButtonStyle.primary)
     async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):

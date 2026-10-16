@@ -1,20 +1,30 @@
 """🎣 낚시 - 찌를 던져 물고기를 낚고, 어항에 모았다가 팔아 코인을 벌어요.
 
-## 🚨 이건 코인을 **만들어내는** 기능이에요
+## 🚨 코인을 만들어내지만, **스스로 소각을 품어요** (2026-10-17 2차 설계)
 
-뽑기·상점이 태우는 쪽이면 낚시는 찍어내는 쪽이에요. 숫자는 전부 `utils/fish_data.py`에
-모아뒀고, 왜 그 값인지도 거기 적혀 있어요. **하루 상한이 없으니**(사용자 결정) 과열되면
-`fish_data.MISS_RATE`를 먼저 올리세요.
+낚시하려면 `/악귀상점`에서 **낚시대**를 사야 해요. 하루 1개만 살 수 있고 **내구도 10회**라
+한 사람이 하루에 던질 수 있는 횟수가 **10번으로 딱 정해져요.**
+
+    순발행 = (10회 x 1회 기댓값 2.02) - 낚시대값 10 = 약 **+10코인/일**
+
+1차 설계는 "상한 없음 + 꽝 60%"였는데, **꽝 확률은 1회당 수익만 낮출 뿐 총 발행량을
+못 막아요**(작정하면 하루 189코인). 그러면 출석 3~5코인이 통째로 무의미해져요.
+이제 상한이 구조로 박혀 있고, **발행 조절 손잡이는 `fish_data.ROD_PRICE` 하나**예요.
 
 ## 찌타임 미니게임
 
-1. `/낚시` -> "찌를 던졌어요" + **🎣 챔질 버튼**
+1. `/낚시` -> 내구도 1 소모 + "찌를 던졌어요" + **🎣 챔질 버튼**
 2. 2~8초 뒤 메시지가 "🐟 입질이 왔어요!"로 바뀌어요
 3. 그때부터 **2.5초 안에** 버튼을 눌러야 잡혀요
 
-- 입질 전에 누르면 **성급** (꽝)
-- 늦게 누르면 **놓침** (꽝)
-- 제때 누르면 확률표대로 등급이 정해져요
+- 입질 전에 누르면 **성급** (놓침)
+- 늦게 누르면 **놓침**
+- 제때 누르면 **반드시** 물고기가 나와요 (꽝 없음)
+
+⚠️ **타이밍을 놓쳐도 내구도는 줄어요**(사용자 결정). 안 그러면 낚시대 하나가 "물고기
+10마리 확정"이 돼서 미니게임이 장식이 돼요.
+🚨 **내구도는 던지기 전에 깎아요.** 끝나고 깎으면 미니게임 도중에 `/낚시`를 여러 번 쳐서
+내구도 1개로 여러 판을 돌릴 수 있어요.
 
 ⚠️ 버튼은 처음부터 **눌리는 상태**로 둬요. 비활성으로 두면 디스코드가 클릭 자체를
 막아서 "성급하게 눌렀다"를 잡아낼 수가 없어요 - 미니게임의 절반이 사라져요.
@@ -54,13 +64,18 @@ from discord.ext import commands
 
 from utils import coin_wallet, fish_data, fishing_store
 from utils.channel_check import restrict_to_channel
-from utils.fish_data import BY_KEY, FISH, GRADE_ORDER, GRADES, JUNK, MISS_RATE
+from utils.fish_data import (
+    BY_KEY, FISH, GRADE_ORDER, GRADES, ROD_DURABILITY, ROD_PER_DAY, ROD_PRICE,
+)
 
 log = logging.getLogger(__name__)
 
 CHANNEL_GROUP = "fishing"
 CHANNEL_ENV = "FISHING_CHANNEL_ID"
 COIN_LOG_NOTE = "낚시판매"
+# 🚨 소각(낚시대)과 발행(판매)을 **다른 note로** 갈라요. 같으면 리포트에서
+#    순발행을 계산할 수 없어요. 둘 다 "낚시"로 시작하지만 kind가 달라요.
+ROD_NOTE = "낚시대"
 
 BITE_MIN, BITE_MAX = 2.0, 8.0      # 입질까지 기다리는 시간
 BITE_WINDOW = 2.5                  # 입질 후 챔질 제한시간
@@ -70,18 +85,76 @@ MISS_COLOR = 0x6B7280
 _GRADE_KEYS = {g: [f["key"] for f in rows] for g, rows in FISH.items()}
 
 
-def roll_catch(rng: random.Random | None = None) -> str | None:
-    """한 번 챔질했을 때 뭐가 잡히나. None이면 꽝이에요.
+def roll_catch(rng: random.Random | None = None) -> str:
+    """한 번 챔질에 **성공했을 때** 뭐가 잡히나.
 
-    ⚠️ 꽝은 **챔질에 성공했는데도** 나올 수 있어요(미끼만 뜯긴 경우).
-    타이밍을 맞추는 것과 물고기가 무는 건 별개라 둘 다 통과해야 잡혀요."""
+    ⚠️ **꽝이 없어요**(2026-10-17 2차 설계). 타이밍만 맞히면 반드시 물고기가 나와요.
+    1차엔 꽝 60%로 발행을 조절했는데, 꽝 확률은 1회당 수익만 낮출 뿐 **총 발행량을
+    못 막아요**. 이제는 낚시대(하루 1개·내구도 10)가 상한을 걸고, 발행 조절은
+    `fish_data.ROD_PRICE`가 해요.
+
+    못 잡는 경우는 이제 **타이밍 실패뿐**이고, 그건 내 실수지 운이 아니에요."""
     rng = rng or random
-    if rng.uniform(0, 100) < MISS_RATE:
-        return None
     grades = list(GRADES)
     weights = [GRADES[g]["weight"] for g in grades]
     grade = rng.choices(grades, weights=weights, k=1)[0]
     return rng.choice(_GRADE_KEYS[grade])
+
+
+async def purchase_rod(user_id) -> tuple[bool, str]:
+    """낚시대 한 개를 사요. (성공, 안내문). `/악귀상점`과 🎣 버튼이 **같이** 써요.
+
+    🚨 **지급을 먼저, 차감을 나중에** 해요. 반대로 하면 차감 뒤 지급이 실패했을 때
+    코인만 사라져요. 차감이 실패하면 `refund_rod`로 되돌려서 공짜 낚시대를 막아요.
+    (🎲 도박 한도 연장권과 같은 순서예요.)"""
+    if not await fishing_store.buy_rod(user_id, ROD_DURABILITY):
+        left, _ = await fishing_store.rod_state(user_id)
+        return False, (
+            f"오늘은 이미 낚시대를 샀어요. (하루 **{ROD_PER_DAY}개**까지)\n"
+            + (f"-# 지금 낚시대에 **{left}번** 남아있어요." if left
+               else "-# 내일 다시 살 수 있어요.")
+        )
+
+    if not await coin_wallet.spend(user_id, ROD_PRICE, reason=ROD_NOTE):
+        await fishing_store.refund_rod(user_id)
+        balance = await coin_wallet.get_balance(user_id)
+        return False, (
+            f"악귀코인이 부족해요. 낚시대는 **{ROD_PRICE}코인**인데 "
+            f"지금 **{balance}개** 있어요.\n"
+            "-# `/출석` · `/미션` · `/업적`으로 모을 수 있어요."
+        )
+
+    balance = await coin_wallet.get_balance(user_id)
+    log.info("🎣 낚시대 구매: %s %d코인", user_id, ROD_PRICE)
+    return True, (
+        f"🎣 낚시대를 샀어요! **{ROD_DURABILITY}번** 던질 수 있어요.\n"
+        f"남은 악귀코인 **{balance}개** · `/낚시` 로 시작해보세요"
+    )
+
+
+class BuyRodView(discord.ui.View):
+    """🎣 낚시대 구매 버튼.
+
+    🚨 `/악귀상점`에만 두면 안 팔려요 - 리롤권·보호권·테마가 **12일째 0건**이에요
+    (구매력이 아니라 발견이 문제였어요). 그래서 **낚시대가 없어서 막힌 바로 그 자리**에
+    버튼을 띄워요. 🔓 도박 한도 연장권이 같은 이유로 그렇게 해서 잘 팔려요."""
+
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+    @discord.ui.button(label="낚시대 사기", emoji="🎣", style=discord.ButtonStyle.success)
+    async def buy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        button.disabled = True
+        ok, msg = await purchase_rod(interaction.user.id)
+        try:
+            await interaction.edit_original_response(content=msg, view=None)
+        except discord.HTTPException:
+            await interaction.followup.send(msg, ephemeral=True)
 
 
 class FishingView(discord.ui.View):
@@ -97,6 +170,7 @@ class FishingView(discord.ui.View):
         self.done = asyncio.Event()
         self.result: str | None = None        # "early" | "late" | "ok"
         self.caught: str | None = None
+        self.rod_left = 0                     # 이번 캐스트 뒤 남은 내구도
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.user_id:
@@ -132,10 +206,29 @@ class Fishing(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="낚시", description="찌를 던져 물고기를 낚아요. 입질이 오면 바로 챔질!")
+    @app_commands.command(name="낚시", description="찌를 던져 물고기를 낚아요. (낚시대가 필요해요)")
     @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
     async def fish(self, interaction: discord.Interaction):
+        # 🚨 **내구도를 먼저 깎고** 시작해요. 던지고 나서 깎으면, 미니게임 도중에
+        #    여러 번 `/낚시`를 쳐서 내구도 1개로 여러 판을 돌릴 수 있어요.
+        left = await fishing_store.use_rod(interaction.user.id)
+        if left is None:
+            _, bought_today = await fishing_store.rod_state(interaction.user.id)
+            if bought_today:
+                msg = (f"🎣 낚시대가 부서졌어요. (하루 **{ROD_PER_DAY}개**까지만 살 수 있어요)\n"
+                       "-# 내일 다시 사서 던질 수 있어요.")
+                view = None
+            else:
+                msg = (f"🎣 낚시대가 없어요. **{ROD_PRICE}코인**으로 하나 사면 "
+                       f"**{ROD_DURABILITY}번** 던질 수 있어요.")
+                # 🚨 상점에 진열만 해두면 안 팔려요(리롤권·보호권·테마가 12일째 0건).
+                #    **막힌 바로 이 자리**에서 바로 살 수 있게 버튼을 붙여요.
+                view = BuyRodView(interaction.user.id)
+            await interaction.response.send_message(msg, view=view, ephemeral=True)
+            return
+
         view = FishingView(interaction.user.id)
+        view.rod_left = left
         embed = discord.Embed(
             title="🎣 찌를 던졌어요",
             description="찌를 지켜보세요... **입질이 오면 바로 챔질!**",
@@ -189,14 +282,24 @@ class Fishing(commands.Cog):
                 color=g["color"],
             )
         else:
+            # ⚠️ 이제 **못 잡는 경우는 타이밍 실패뿐**이에요(꽝 제거, 2026-10-17 2차).
+            #    운이 아니라 내 실수라서, 사유를 분명히 알려줘요.
             reason = {
                 "early": "너무 일찍 챘어요. 미끼만 날아갔네요.",
                 "late": "늦었어요. 물고기가 도망갔어요.",
-            }.get(view.result, f"**{random.choice(JUNK)}** 이(가) 걸려 올라왔어요.")
-            embed = discord.Embed(title="🗑️ 꽝", description=reason, color=MISS_COLOR)
+            }.get(view.result, "놓쳤어요.")
+            embed = discord.Embed(
+                title="💨 놓쳤어요",
+                description=reason + "\n-# 낚시대 내구도는 그대로 1 줄어요.",
+                color=MISS_COLOR)
 
         embed.add_field(name="어항", value=f"**{total}마리**", inline=True)
-        embed.set_footer(text="/어항 으로 확인하고 /물고기판매 로 한 번에 팔아요")
+        embed.add_field(name="🎣 낚시대",
+                        value=(f"**{view.rod_left}번** 남음" if view.rod_left
+                               else "**부서졌어요**"), inline=True)
+        embed.set_footer(
+            text=("/어항 으로 확인하고 /물고기판매 로 한 번에 팔아요" if view.rod_left
+                  else f"내일 {ROD_PRICE}코인으로 새 낚시대를 살 수 있어요"))
         try:
             await interaction.edit_original_response(embed=embed, view=None)
         except discord.HTTPException:
@@ -226,8 +329,19 @@ class Fishing(commands.Cog):
             embed.add_field(name="마리 수", value=f"**{sum(tank.values())}마리**", inline=True)
             embed.add_field(name="팔면", value=f"**{value}코인**", inline=True)
 
+        # 🎣 낚시대 상태를 제일 먼저 보여줘요 - "오늘 몇 번 더 던질 수 있나"가
+        #    낚시에서 제일 궁금한 정보예요.
+        left, bought_today = await fishing_store.rod_state(interaction.user.id)
+        if left:
+            rod = f"**{left}/{ROD_DURABILITY}번** 남음"
+        elif bought_today:
+            rod = "**부서졌어요** (내일 다시)"
+        else:
+            rod = f"없어요 ({ROD_PRICE}코인)"
+        embed.add_field(name="🎣 낚시대", value=rod, inline=True)
+
         hit = f"{data['caught']}/{data['casts']}" if data["casts"] else "0/0"
-        embed.add_field(name="성공률", value=f"{hit}", inline=True)
+        embed.add_field(name="챔질 성공률", value=f"{hit}", inline=True)
         if data.get("best"):
             bg, bn = BY_KEY.get(data["best"]["key"], ("?", "?"))
             embed.add_field(name="최고 기록",

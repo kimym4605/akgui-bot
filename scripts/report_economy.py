@@ -168,7 +168,7 @@ for note, count in Counter(
     amount = sum(l["amount"] for l in rows)
     users = len({l.get("to") for l in rows})       # ⚠️ add는 to가 유저예요
     share = amount / max(issued, 1) * 100
-    flag = "   ← 🎣 상한이 없어요. 커지면 MISS_RATE부터 올리세요" if note == "낚시판매" else ""
+    flag = "   ← 🎣 낚시대값(소각)을 빼면 순발행이에요. 줄이려면 ROD_PRICE를 올리세요" if note == "낚시판매" else ""
     print(f"    {note:16s} {count:4d}건 / {amount:5d}코인 / {users:2d}명 "
           f"({share:4.1f}%){flag}")
 
@@ -176,7 +176,7 @@ print("\n  소비처가 실제로 쓰이는지:")
 for key, label in [("미션리롤", "🎲 미션 리롤권"), ("출석보호권", "🧊 출석 보호권"),
                    ("카드테마", "🎨 카드 테마"), ("칭호구매", "🏷️ 칭호"), ("도박", "🎰 도박"),
                    ("한도연장", "🔓 하루 한도 연장"), ("베팅한도연장", "🎲 1회 한도 연장"),
-                   ("카드뽑기", "🎴 카드 뽑기")]:
+                   ("카드뽑기", "🎴 카드 뽑기"), ("낚시대", "🎣 낚시대")]:
     rows = [l for l in spend if (l["note"] or "").startswith(key)]
     users = len({l.get("from") for l in rows})
     flag = "" if rows else "   ← 0건. 구매력 문제인지 발견 문제인지 [3]과 함께 보세요"

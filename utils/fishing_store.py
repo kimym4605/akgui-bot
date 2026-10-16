@@ -23,6 +23,7 @@
 """
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from pymongo import ReturnDocument
 
@@ -36,6 +37,63 @@ _fish = _db["fish"]
 
 def _uid(user_id) -> str:
     return str(user_id)
+
+
+# ------------------------------------------------------------------
+# 🎣 낚시대 (2026-10-17 2차 설계)
+#
+# 문서에 `rod`(남은 내구도)와 `rod_date`(마지막으로 산 날짜)를 둬요.
+# 하루 1개 제한은 `rod_date`로, 10회 제한은 `rod`로 걸려요.
+#
+# 🚨 **둘 다 조건부 update 한 번으로** 처리해요. "읽고 → 확인하고 → 쓰기"로 하면 빠르게
+#    두 번 누를 때 하루에 두 개를 사거나 내구도가 음수가 돼요.
+# ------------------------------------------------------------------
+KST = timezone(timedelta(hours=9))
+
+
+def today_iso() -> str:
+    return datetime.now(KST).date().isoformat()
+
+
+def _rod_sync(user_id) -> tuple[int, bool]:
+    """(남은 내구도, 오늘 이미 샀는지)."""
+    doc = _fish.find_one({"_id": _uid(user_id)}, {"rod": 1, "rod_date": 1}) or {}
+    return int(doc.get("rod", 0) or 0), doc.get("rod_date") == today_iso()
+
+
+def _buy_rod_sync(user_id, durability: int) -> bool:
+    """낚시대를 지급해요. 오늘 이미 샀으면 False(아무것도 안 바꿔요).
+
+    🚨 **코인 차감은 호출자가** 해요. 여기서 False가 나오면 차감하면 안 되고, 차감이
+    실패하면 `_refund_rod_sync`로 되돌려야 해요.
+    ⚠️ 날짜 조건을 필터에 넣어 **한 번의 update로** 확인과 지급을 함께 해요.
+    ⚠️ 남은 내구도는 **덮어써요**(`$set`). 쌓이게 하면 며칠 모아서 하루에 몰아 쓰는
+       길이 열려서 '하루 10번' 제한이 무의미해져요."""
+    uid, today = _uid(user_id), today_iso()
+    res = _fish.update_one(
+        {"_id": uid, "rod_date": {"$ne": today}},
+        {"$set": {"rod": durability, "rod_date": today}},
+        upsert=True,
+    )
+    return res.modified_count == 1 or res.upserted_id is not None
+
+
+def _refund_rod_sync(user_id) -> None:
+    """지급을 되돌려요(코인 차감 실패 시). 오늘 산 기록도 같이 지워 다시 살 수 있게 해요."""
+    _fish.update_one({"_id": _uid(user_id)},
+                     {"$set": {"rod": 0}, "$unset": {"rod_date": ""}})
+
+
+def _use_rod_sync(user_id) -> int | None:
+    """내구도를 1 깎고 **남은 수**를 돌려줘요. 낚시대가 없으면 None.
+
+    ⚠️ 조건부 차감(`$gte: 1`)이라 동시에 여러 번 눌러도 음수가 안 돼요."""
+    doc = _fish.find_one_and_update(
+        {"_id": _uid(user_id), "rod": {"$gte": 1}},
+        {"$inc": {"rod": -1}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return None if doc is None else int(doc.get("rod", 0) or 0)
 
 
 def _get_sync(user_id) -> dict:
@@ -106,6 +164,26 @@ def _leaderboard_sync(limit: int) -> list[tuple[str, int]]:
 # ------------------------------------------------------------------
 # 공개 API (async) - 동기 pymongo를 그대로 부르면 이벤트 루프가 멈춰요
 # ------------------------------------------------------------------
+async def rod_state(user_id) -> tuple[int, bool]:
+    """(남은 내구도, 오늘 이미 샀는지)."""
+    return await asyncio.to_thread(_rod_sync, user_id)
+
+
+async def buy_rod(user_id, durability: int) -> bool:
+    """낚시대 지급. 오늘 이미 샀으면 False. **코인 차감 전에** 부르세요."""
+    return await asyncio.to_thread(_buy_rod_sync, user_id, durability)
+
+
+async def refund_rod(user_id) -> None:
+    """지급을 되돌려요(차감 실패 시 반드시)."""
+    await asyncio.to_thread(_refund_rod_sync, user_id)
+
+
+async def use_rod(user_id) -> int | None:
+    """내구도 1 소모. 남은 수를 돌려주고, 낚시대가 없으면 None."""
+    return await asyncio.to_thread(_use_rod_sync, user_id)
+
+
 async def get(user_id) -> dict:
     return await asyncio.to_thread(_get_sync, user_id)
 
