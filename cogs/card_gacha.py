@@ -25,7 +25,7 @@
 
 | 항목 | 값 |
 |---|---|
-| 가격 | 10코인에 **3장** |
+| 가격 | 10코인에 **3장** (연속뽑기 최대 10회 = 100코인·30장, 할인 없음) |
 | 확률 | 일반 64.5 / 레어 30 / 에픽 5 / 레전드 0.5 (2026-10-17 조정) |
 | 천장 | 레전드 없이 30장이면 **그 장은 레전드 확정** (= 최악 10뽑기·100코인) |
 | 중복 | 일반·레어는 쌓이고, 에픽·레전드는 **가진 걸 풀에서 제외** |
@@ -123,18 +123,33 @@ def _result_embed(
 ) -> discord.Embed:
     best = _rarest(drawn)
     new_count = sum(1 for d in drawn if d["is_new"])
+    pulls = max(1, len(drawn) // CARDS_PER_PULL)
 
-    lines = []
-    for d in drawn:
+    def line(d):
         mark = " 🆕" if d["is_new"] else ""
         pity = " ⭐천장" if d["pity"] else ""
-        lines.append(f"{GRADE_EMOJI[d['grade']]} **{d['grade']}** · {d['name']}{mark}{pity}")
+        return f"{GRADE_EMOJI[d['grade']]} **{d['grade']}** · {d['name']}{mark}{pity}"
 
-    embed = discord.Embed(
-        title=f"{GRADE_EMOJI[best]} 카드 {len(drawn)}장을 뽑았어요!",
-        description="\n".join(lines),
-        color=GRADE_COLOR[best],
-    )
+    # ⚠️ 장수가 많으면 **전부 나열하지 않아요.** 10연이면 30줄이 돼서 임베드가 화면을
+    #    가득 채우고, 정작 중요한 에픽·레전드가 일반 카드 사이에 묻혀요.
+    #    그림에는 어차피 전부 보이니, 글로는 **상위 등급만** 짚어줘요.
+    if len(drawn) <= CARDS_PER_PULL * 3:
+        description = "\n".join(line(d) for d in drawn)
+    else:
+        tally = " · ".join(
+            f"{GRADE_EMOJI[g]} {g} **{sum(1 for d in drawn if d['grade'] == g)}**"
+            for g in GRADE_ORDER if any(d["grade"] == g for d in drawn)
+        )
+        highlight = [line(d) for d in drawn if d["grade"] not in card_store.DUPE_OK]
+        description = tally
+        if highlight:
+            description += "\n\n" + "\n".join(highlight[:10])
+            if len(highlight) > 10:
+                description += f"\n-# 외 {len(highlight) - 10}장"
+
+    title = (f"{GRADE_EMOJI[best]} 카드 {len(drawn)}장을 뽑았어요!" if pulls == 1
+             else f"{GRADE_EMOJI[best]} {pulls}연속! 카드 {len(drawn)}장을 뽑았어요")
+    embed = discord.Embed(title=title, description=description, color=GRADE_COLOR[best])
     embed.add_field(
         name="도감",
         value=f"**{summary['owned']}/{summary['total']}종** (총 {summary['cards']}장)",
@@ -158,27 +173,36 @@ def _result_embed(
     return embed
 
 
-async def do_pull(interaction: discord.Interaction, *, ephemeral: bool = False):
-    """뽑기 1회. `/카드뽑기`와 🎴 버튼이 같이 써요.
+async def do_pull(interaction: discord.Interaction, *, pulls: int = 1,
+                  ephemeral: bool = False):
+    """뽑기 `pulls`회(= `pulls * CARDS_PER_PULL`장). `/카드뽑기`와 🎴 버튼이 같이 써요.
 
-    ⚠️ 부르기 전에 `defer()`가 끝나 있어야 해요."""
+    ⚠️ 부르기 전에 `defer()`가 끝나 있어야 해요.
+    ⚠️ 코인은 **한 번에 전액** 차감해요. 1회씩 나눠 차감하면 중간에 실패했을 때 몇 회분을
+       돌려줘야 하는지가 복잡해지고, 부분 성공이라는 애매한 상태가 생겨요."""
     user_id = interaction.user.id
+    pulls = max(1, min(int(pulls), card_store.MAX_PULLS))
+    cost = PULL_PRICE * pulls
+    note = COIN_LOG_NOTE if pulls == 1 else f"{COIN_LOG_NOTE}x{pulls}"
 
     # 1) 코인 먼저 차감. 조건부 update라 잔액이 모자라면 아무것도 안 바뀌어요.
-    if not await coin_wallet.spend(user_id, PULL_PRICE, reason=COIN_LOG_NOTE):
+    if not await coin_wallet.spend(user_id, cost, reason=note):
         balance = await coin_wallet.get_balance(user_id)
+        can = balance // PULL_PRICE
+        hint = (f"\n-# 지금 잔액으로는 **{can}연속**까지 돌릴 수 있어요."
+                if can else "\n-# `/출석` · `/미션` · `/업적`으로 모을 수 있어요.")
         await interaction.followup.send(
-            f"악귀코인이 모자라요. 1뽑기에 **{PULL_PRICE}코인**인데 지금 **{balance}개** 있어요.\n"
-            "-# `/출석` · `/미션` · `/업적`으로 모을 수 있어요.",
+            f"악귀코인이 모자라요. **{pulls}연속**은 **{cost}코인**인데 "
+            f"지금 **{balance}개** 있어요.{hint}",
             ephemeral=True,
         )
         return
 
     # 2) 뽑기. 실패하면 반드시 환불해요.
     try:
-        drawn = await card_store.pull(user_id)
+        drawn = await card_store.pull(user_id, CARDS_PER_PULL * pulls)
     except Exception:
-        await coin_wallet.add(user_id, PULL_PRICE, reason=f"{COIN_LOG_NOTE}:환불")
+        await coin_wallet.add(user_id, cost, reason=f"{COIN_LOG_NOTE}:환불")
         log.exception("카드 뽑기 실패 - 코인을 되돌렸어요 (user=%s)", user_id)
         await interaction.followup.send(
             "뽑기 도중 문제가 생겨서 **코인을 돌려드렸어요.** 잠시 후 다시 시도해주세요.",
@@ -187,7 +211,7 @@ async def do_pull(interaction: discord.Interaction, *, ephemeral: bool = False):
         return
 
     if drawn is None:
-        await coin_wallet.add(user_id, PULL_PRICE, reason=f"{COIN_LOG_NOTE}:환불")
+        await coin_wallet.add(user_id, cost, reason=f"{COIN_LOG_NOTE}:환불")
         await interaction.followup.send(
             "방금 다른 뽑기가 먼저 처리됐어요. **코인은 돌려드렸으니** 다시 눌러주세요.",
             ephemeral=True,
@@ -196,7 +220,7 @@ async def do_pull(interaction: discord.Interaction, *, ephemeral: bool = False):
 
     if not drawn:
         # 일반·레어가 중복을 허용하는 한 실제로는 안 나오는 경로예요(방어용).
-        await coin_wallet.add(user_id, PULL_PRICE, reason=f"{COIN_LOG_NOTE}:환불")
+        await coin_wallet.add(user_id, cost, reason=f"{COIN_LOG_NOTE}:환불")
         await interaction.followup.send(
             "🎉 도감을 전부 모으셨어요! 더 드릴 카드가 없어서 **코인은 돌려드렸어요.**",
             ephemeral=True,
@@ -232,23 +256,38 @@ async def do_pull(interaction: discord.Interaction, *, ephemeral: bool = False):
 # custom_id에 누구 것인지 박아두고 눌린 순간 정규식으로 되살려요.
 # ============================================================
 class GachaButton(
+    # 🚨 뒤쪽 `:횟수`는 **반드시 선택(optional)이어야** 해요.
+    #
+    # 연속뽑기를 넣으면서 custom_id에 횟수를 붙였는데, 패턴을 `gacha:pull:<횟수>:<유저>`로
+    # 바꿨다면 **이미 디스코드에 떠 있는 옛 버튼**(`gacha:pull:<유저>`)이 패턴에 안 맞아
+    # 눌러도 아무 반응이 없게 돼요 - 로그조차 안 남아요(2026-09-29에 프로필 카드 버튼이
+    # 정확히 이렇게 죽었어요). 옛 형식도 계속 맞게 두고, 없으면 1회로 봐요.
     discord.ui.DynamicItem[discord.ui.Button],
-    template=r"gacha:pull:(?P<user_id>\d+)",
+    template=r"gacha:pull:(?P<user_id>\d+)(?::(?P<pulls>\d+))?",
 ):
-    def __init__(self, user_id: int):
+    def __init__(self, user_id: int, pulls: int = 1):
+        pulls = max(1, min(int(pulls), card_store.MAX_PULLS))
+        cost = PULL_PRICE * pulls
+        label = f"카드 뽑기 ({cost}코인)" if pulls == 1 else f"{pulls}연속 ({cost}코인)"
         super().__init__(
             discord.ui.Button(
-                label=f"카드 뽑기 ({PULL_PRICE}코인)",
+                label=label,
                 emoji="🎴",
-                style=discord.ButtonStyle.primary,
-                custom_id=f"gacha:pull:{user_id}",
+                style=discord.ButtonStyle.primary if pulls == 1
+                else discord.ButtonStyle.success,
+                # 1회는 **옛 형식 그대로** 둬요. 새 형식으로 바꾸면 기존에 떠 있는
+                # 버튼과 모양이 갈려서 섞이고, 굳이 바꿀 이유도 없어요.
+                custom_id=(f"gacha:pull:{user_id}" if pulls == 1
+                           else f"gacha:pull:{user_id}:{pulls}"),
             )
         )
         self.user_id = user_id
+        self.pulls = pulls
 
     @classmethod
     async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match):
-        return cls(int(match["user_id"]))
+        # 옛 버튼은 `pulls` 그룹이 아예 없어요(None) -> 1회로 봐요.
+        return cls(int(match["user_id"]), int(match["pulls"] or 1))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """남의 출석/뽑기 메시지로 내 코인을 쓰게 되면 헷갈려요. 주인만 눌러요."""
@@ -260,19 +299,26 @@ class GachaButton(
         return False
 
     async def callback(self, interaction: discord.Interaction):
-        log.info("🎴 카드 뽑기 버튼: user=%s", interaction.user.id)
+        log.info("🎴 카드 뽑기 버튼: user=%s pulls=%s", interaction.user.id, self.pulls)
         # 뽑기방에서 눌렀으면 **공개**, 다른 채널이면 나한테만 (_is_card_channel 주석 참고).
         public = _is_card_channel(interaction)
         await interaction.response.defer(ephemeral=not public)
-        await do_pull(interaction, ephemeral=not public)
+        await do_pull(interaction, pulls=self.pulls, ephemeral=not public)
+
+
+# 결과 아래에 달아줄 연속뽑기 버튼. 지갑 실측(2026-10-17)에서 30코인 이상이 8명,
+# 50코인 이상이 4명이라 5연이 "모아서 지르는" 자리로 맞아요. 10연(100코인)은 아직
+# 아무도 못 사서 버튼으로는 안 달고 `/카드뽑기 횟수:10`으로만 열어둬요.
+QUICK_PULLS = 5
 
 
 class GachaView(discord.ui.View):
-    """뽑기 버튼 하나짜리 화면. `timeout=None`이라 시간이 지나도 안 죽어요."""
+    """뽑기 버튼 화면. `timeout=None`이라 시간이 지나도 안 죽어요."""
 
     def __init__(self, user_id: int):
         super().__init__(timeout=None)
         self.add_item(GachaButton(user_id))
+        self.add_item(GachaButton(user_id, QUICK_PULLS))
 
 
 def build_gacha_view(user_id: int) -> discord.ui.View:
@@ -471,13 +517,20 @@ class CardGacha(commands.Cog):
 
     @app_commands.command(
         name="카드뽑기",
-        description=f"악귀코인 {PULL_PRICE}개로 악귀카드 {CARDS_PER_PULL}장을 뽑아요.",
+        description=f"악귀코인 {PULL_PRICE}개로 악귀카드 {CARDS_PER_PULL}장을 뽑아요. (연속뽑기 가능)",
     )
     @restrict_to_channel("card", "CARD_CHANNEL_ID")
-    async def pull_cards(self, interaction: discord.Interaction):
+    @app_commands.describe(
+        횟수=f"연속으로 몇 번 뽑을지 (1~{card_store.MAX_PULLS}, 안 적으면 1회)"
+    )
+    async def pull_cards(
+        self,
+        interaction: discord.Interaction,
+        횟수: app_commands.Range[int, 1, card_store.MAX_PULLS] = 1,
+    ):
         # DB 왕복 + 이미지 합성이라 3초를 넘겨요.
         await interaction.response.defer()
-        await do_pull(interaction)
+        await do_pull(interaction, pulls=횟수)
 
     @app_commands.command(name="도감", description="내가 모은 악귀카드를 펼쳐 봐요.")
     @restrict_to_channel("card", "CARD_CHANNEL_ID")
@@ -528,7 +581,10 @@ class CardGacha(commands.Cog):
         )
         embed.add_field(
             name="가격",
-            value=f"**{PULL_PRICE}코인**에 **{CARDS_PER_PULL}장** (장당 {PULL_PRICE/CARDS_PER_PULL:.1f}코인)",
+            value=(f"**{PULL_PRICE}코인**에 **{CARDS_PER_PULL}장** "
+                   f"(장당 {PULL_PRICE/CARDS_PER_PULL:.1f}코인)\n"
+                   f"　└ `/카드뽑기 횟수:N` 으로 **최대 {card_store.MAX_PULLS}연속**까지 "
+                   f"한 번에 돌릴 수 있어요 (할인은 없어요)"),
             inline=False,
         )
         embed.add_field(
@@ -536,7 +592,9 @@ class CardGacha(commands.Cog):
             value=(
                 f"레전드 없이 **{PITY_DRAWS}장**을 뽑으면 그 장은 **레전드 확정**이에요.\n"
                 f"　└ 최악의 경우라도 **{-(-PITY_DRAWS // CARDS_PER_PULL)}뽑기"
-                f"({-(-PITY_DRAWS // CARDS_PER_PULL) * PULL_PRICE}코인)** 안에 레전드가 나와요"
+                f"({-(-PITY_DRAWS // CARDS_PER_PULL) * PULL_PRICE}코인)** 안에 레전드가 나와요\n"
+                f"　└ 그래서 **{card_store.MAX_PULLS}연속({card_store.MAX_PULLS * PULL_PRICE}코인)"
+                f"에는 레전드가 반드시 한 장** 들어있어요"
             ),
             inline=False,
         )

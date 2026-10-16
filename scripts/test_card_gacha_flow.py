@@ -272,6 +272,78 @@ check("뽑기방이어도 환불 안내는 본인에게만",
       inter.followup.sent[0]["ephemeral"] is True)
 
 # ==================================================================
+print("\n[10] 연속뽑기")
+# ------------------------------------------------------------------
+import re  # noqa: E402
+
+from utils.card_store import CARDS_PER_PULL, MAX_PULLS  # noqa: E402
+
+# --- 비용과 장수 ---
+wallet, inter = setup(balance=100)
+run(gacha.do_pull(inter, pulls=5))
+check("5연속은 50코인", wallet.balance == 50, f"잔액 {wallet.balance}")
+spend = [l for l in wallet.log if l[0] == "spend"][0]
+check("한 번에 전액 차감", spend[1] == 50, str(spend))
+check("소비 로그에 횟수가 남는다", spend[2] == "카드뽑기x5", spend[2])
+check("리포트가 여전히 '카드뽑기'로 집계", spend[2].startswith("카드뽑기"))
+
+# --- 상한 ---
+wallet, inter = setup(balance=1000)
+run(gacha.do_pull(inter, pulls=99))
+check(f"{MAX_PULLS}연속을 넘지 않는다",
+      wallet.balance == 1000 - 10 * MAX_PULLS, f"잔액 {wallet.balance}")
+wallet, inter = setup(balance=1000)
+run(gacha.do_pull(inter, pulls=0))
+check("0회를 넣어도 최소 1회", wallet.balance == 990, f"잔액 {wallet.balance}")
+
+# --- 잔액 부족이면 한 푼도 안 나간다 ---
+wallet, inter = setup(balance=30)
+run(gacha.do_pull(inter, pulls=5))
+check("5연속을 못 사면 차감이 없다", wallet.balance == 30, f"잔액 {wallet.balance}")
+check("몇 연속까지 가능한지 알려준다", "3연속" in (inter.followup.sent[0]["content"] or ""),
+      inter.followup.sent[0]["content"])
+
+# --- 실패하면 전액 환불 (부분 환불이면 코인이 증발해요) ---
+wallet, inter = setup(balance=100, pull_result="none")
+run(gacha.do_pull(inter, pulls=5))
+check("5연속 실패 시 50코인 전액 환불", wallet.balance == 100, f"잔액 {wallet.balance}")
+refund = [l for l in wallet.log if l[0] == "add"][0]
+check("환불액이 1회분이 아니라 전액", refund[1] == 50, str(refund))
+
+# --- 🚨 옛 버튼이 죽지 않아야 해요 ---
+# custom_id 패턴을 바꾸면 **이미 디스코드에 떠 있는 버튼**이 정규식에 안 맞아 무반응이 돼요
+# (2026-09-29에 프로필 카드 버튼이 정확히 이렇게 죽었어요). 옛 형식도 계속 맞아야 해요.
+# ⚠️ **discord.py가 실제로 쓰는 컴파일된 정규식**을 읽어야 해요. 여기에 직접 패턴을
+#    적어두면 cog 쪽 template을 고쳐도 테스트는 통과해버려서 검증이 무의미해져요
+#    (처음에 폴백 패턴을 넣었다가 그 상태였어요).
+pattern = gacha.GachaButton.__discord_ui_compiled_template__
+check("실제 컴파일된 템플릿을 읽었다", hasattr(pattern, "fullmatch"), str(type(pattern)))
+old = pattern.fullmatch("gacha:pull:12345")
+check("옛 custom_id가 여전히 매치된다", old is not None)
+if old:
+    check("옛 버튼은 1회로 해석", int(old["pulls"] or 1) == 1)
+new = pattern.fullmatch("gacha:pull:12345:5")
+check("새 custom_id도 매치된다", new is not None)
+if new:
+    check("새 버튼은 횟수를 읽는다", int(new["pulls"]) == 5 and new["user_id"] == "12345")
+
+# 버튼 두 개가 실제로 1회·5회로 만들어지는지
+view = gacha.GachaView(FakeUser.id)
+pulls_on_view = sorted(i.pulls for i in view.children if isinstance(i, gacha.GachaButton))
+check("뷰에 1회·5회 버튼이 있다", pulls_on_view == [1, gacha.QUICK_PULLS],
+      str(pulls_on_view))
+ids = [i.item.custom_id for i in view.children if isinstance(i, gacha.GachaButton)]
+check("두 버튼의 custom_id가 다르다", len(set(ids)) == 2, str(ids))
+
+# --- 5연 버튼을 실제로 눌러보기 ---
+os.environ["CARD_CHANNEL_ID"] = str(CARD_CH)
+wallet, _ = setup(balance=100)
+inter = FakeInteraction(channel_id=CARD_CH)
+run(gacha.GachaButton(FakeUser.id, 5).callback(inter))
+check("5연 버튼이 50코인을 쓴다", wallet.balance == 50, f"잔액 {wallet.balance}")
+check("5연 결과도 뽑기방에선 공개", inter.followup.sent[0]["ephemeral"] is False)
+
+# ==================================================================
 print("\n" + "=" * 60)
 if failures:
     print(f"❌ 실패 {len(failures)}건")

@@ -1,4 +1,4 @@
-"""🎴 뽑기 결과 이미지 - 나온 카드 3장을 PNG 한 장으로 합쳐요.
+"""🎴 뽑기 결과 이미지 - 나온 카드를 PNG 한 장으로 합쳐요 (연속뽑기면 최대 30장).
 
 ## 왜 합성인가
 
@@ -102,72 +102,105 @@ def _fit_in_slot(card: "Image.Image") -> "Image.Image":
     )
 
 
+def _pull_layout(n: int) -> tuple[int, int, int, bool]:
+    """뽑은 장수에 맞는 (열 수, 칸 너비, 칸 높이, 썸네일 사용).
+
+    ## 왜 장수에 따라 다른가
+
+    처음엔 **무조건 한 줄**이었어요(1뽑기 = 3장이라 그걸로 충분했거든요). 그런데 연속뽑기가
+    생기면서 10연 = 30장이 되자 가로로 9000px짜리 띠가 나왔어요 - 디스코드에서 알아볼 수가
+    없어요.
+
+    - **3장 이하**: 큰 카드(300x450)를 한 줄에. 1뽑기의 '펼쳐지는' 맛이 여기서 나와요.
+    - **그보다 많으면**: 미리 구워둔 썸네일로 격자. 열 수는 디스코드 임베드 폭(~550px로
+      축소돼 보여요)을 생각해서 정해요 - 6장을 6열로 깔면 한 장이 90px밖에 안 돼요.
+    """
+    if n <= 3:
+        return n, SLOT_W, SLOT_H, False
+    cols = 3 if n <= 9 else (5 if n <= 15 else 6)
+    return cols, GRID_THUMB_W, GRID_THUMB_H, True
+
+
 def _render(drawn: list[dict]) -> bytes:
     """실제 그리기. **동기 함수**라 반드시 to_thread로 불러야 해요."""
     n = len(drawn)
-    width = PAD * 2 + SLOT_W * n + GAP * (n - 1)
-    height = PAD * 2 + SLOT_H + LABEL_H
+    cols, slot_w, slot_h, use_thumb = _pull_layout(n)
+    rows = -(-n // cols)
+    label_h = LABEL_H if not use_thumb else 54
+    cell_h = slot_h + label_h
+
+    width = PAD * 2 + slot_w * cols + GAP * (cols - 1)
+    height = PAD * 2 + cell_h * rows + GAP * (rows - 1)
 
     canvas = _vertical_gradient((width, height), BG_TOP, BG_BOTTOM)
     draw = ImageDraw.Draw(canvas)
 
-    name_font = _font("bold", 26)
-    grade_font = _font("regular", 20)
-    new_font = _font("bold", 18)
+    big = not use_thumb
+    name_font = _font("bold", 26 if big else 17)
+    grade_font = _font("regular", 20 if big else 15)
+    new_font = _font("bold", 18 if big else 14)
 
     for i, card in enumerate(drawn):
-        slot_x = PAD + i * (SLOT_W + GAP)
+        slot_x = PAD + (i % cols) * (slot_w + GAP)
+        slot_y = PAD + (i // cols) * (cell_h + GAP)
         # ⚠️ 반드시 _rgb를 거쳐야 해요. 정수를 그대로 넘기면 R/B가 뒤바뀌어요(_rgb 주석).
         color = _rgb(GRADE_COLOR.get(card["grade"], 0x969696))
 
-        path = CARD_DIR / f"{card['key']}.webp"
-        art = None
-        if path.is_file():
-            try:
-                with Image.open(path) as opened:
-                    art = _fit_in_slot(opened.convert("RGBA"))
-            except Exception:  # noqa: BLE001
-                # 이미지 한 장이 깨져도 나머지 2장은 보여줘야 해요.
-                log.warning("카드 이미지를 못 열었어요: %s", path.name, exc_info=True)
+        # 3장 이하면 원본에서 크게, 많으면 미리 구운 썸네일로 (_pull_layout 주석)
+        if use_thumb:
+            art = _load_thumb(card["key"])
+        else:
+            art = None
+            path = CARD_DIR / f"{card['key']}.webp"
+            if path.is_file():
+                try:
+                    with Image.open(path) as opened:
+                        art = _fit_in_slot(opened.convert("RGBA"))
+                except Exception:  # noqa: BLE001
+                    # 이미지 한 장이 깨져도 나머지는 보여줘야 해요.
+                    log.warning("카드 이미지를 못 열었어요: %s", path.name, exc_info=True)
 
         if art is not None:
             # 칸 안에서 가운데 정렬
-            ax = slot_x + (SLOT_W - art.width) // 2
-            ay = PAD + (SLOT_H - art.height) // 2
+            ax = slot_x + (slot_w - art.width) // 2
+            ay = slot_y + (slot_h - art.height) // 2
             canvas.paste(art, (ax, ay), art)
             box = (ax - 4, ay - 4, ax + art.width + 3, ay + art.height + 3)
         else:
             # 이미지가 없으면 빈 칸이라도 등급 테두리로 그려요(뽑기 자체는 성립하게).
-            box = (slot_x, PAD, slot_x + SLOT_W, PAD + SLOT_H)
+            box = (slot_x, slot_y, slot_x + slot_w, slot_y + slot_h)
             draw.text(
-                (slot_x + SLOT_W // 2 - 40, PAD + SLOT_H // 2),
+                (slot_x + 10, slot_y + slot_h // 2),
                 "이미지 없음", font=grade_font, fill=TEXT_SUB,
             )
 
         # 등급 테두리. 레전드일수록 두껍게 해서 멀리서도 티가 나게 해요.
-        thickness = 6 if card["grade"] == "레전드" else 4 if card["grade"] == "에픽" else 3
-        draw.rectangle(box, outline=color, width=thickness)
+        thick = (6 if card["grade"] == "레전드" else 4 if card["grade"] == "에픽" else 3)
+        if use_thumb:
+            thick = max(2, thick - 1)      # 칸이 작으면 두꺼운 테두리가 그림을 덮어요
+        draw.rectangle(box, outline=color, width=thick)
 
         # 아래쪽 라벨 (등급 -> 이름 순서. 등급이 먼저 눈에 들어와야 해요)
-        label_y = PAD + SLOT_H + 10
+        label_y = slot_y + slot_h + (10 if big else 4)
         draw.text((slot_x, label_y), card["grade"], font=grade_font, fill=color)
 
         name = card["name"]
-        # 칸보다 긴 이름은 잘라요(세 칸 폭이 고정이라 넘치면 옆 카드와 겹쳐요).
-        while name and draw.textlength(name, font=name_font) > SLOT_W - 8:
+        # 칸보다 긴 이름은 잘라요(칸 폭이 고정이라 넘치면 옆 카드와 겹쳐요).
+        while name and draw.textlength(name, font=name_font) > slot_w - 8:
             name = name[:-1]
         # 이름도 **등급 색**으로 칠해요(2026-10-17). 전에는 전부 흰색이라 등급이 테두리와
         # 작은 라벨에만 드러났는데, 제일 크게 보이는 글자가 색을 입으니 한눈에 구분돼요.
-        draw.text((slot_x, label_y + 26), name, font=name_font, fill=color)
+        draw.text((slot_x, label_y + (26 if big else 18)), name, font=name_font, fill=color)
 
         # NEW 배지 - 처음 얻은 카드에만. 중복은 아무 표시도 안 해요.
         if card["is_new"]:
             tw = draw.textlength("NEW", font=new_font)
+            bh = 26 if big else 20
             bx, by = box[0] + 6, box[1] + 6
             draw.rounded_rectangle(
-                (bx, by, bx + tw + 16, by + 26), radius=6, fill=NEW_BG
+                (bx, by, bx + tw + 16, by + bh), radius=6, fill=NEW_BG
             )
-            draw.text((bx + 8, by + 3), "NEW", font=new_font, fill=NEW_TEXT)
+            draw.text((bx + 8, by + (3 if big else 2)), "NEW", font=new_font, fill=NEW_TEXT)
 
     buffer = io.BytesIO()
     canvas.save(buffer, format="PNG", optimize=True)
