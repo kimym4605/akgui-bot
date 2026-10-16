@@ -98,6 +98,15 @@ def _use_rod_sync(user_id) -> int | None:
     return None if doc is None else int(doc.get("rod", 0) or 0)
 
 
+def _give_back_rod_sync(user_id) -> None:
+    """내구도 1을 돌려줘요 (챔질을 놓쳤을 때).
+
+    ⚠️ `_refund_rod_sync`와 다른 함수예요. 이쪽은 **1회분**만 돌려주고, 저쪽은
+    구매가 실패했을 때 **방금 준 한 세트**를 통째로 뺄 때 써요. 헷갈려서 섞어 쓰면
+    내구도가 10씩 왔다 갔다 해요."""
+    _fish.update_one({"_id": _uid(user_id)}, {"$inc": {"rod": 1}}, upsert=True)
+
+
 def _normalize_tank(raw: dict) -> dict[str, list[int]]:
     """어항을 **{어종: [치수, ...]}** 로 통일해요.
 
@@ -221,6 +230,11 @@ async def buy_rod(user_id, durability: int) -> bool:
 async def refund_rod(user_id, durability: int) -> None:
     """지급을 되돌려요(차감 실패 시 반드시). **방금 준 만큼만** 빼요."""
     await asyncio.to_thread(_refund_rod_sync, user_id, durability)
+
+
+async def give_back_rod(user_id) -> None:
+    """놓쳤을 때 내구도 1을 돌려줘요."""
+    await asyncio.to_thread(_give_back_rod_sync, user_id)
 
 
 async def use_rod(user_id) -> int | None:

@@ -31,12 +31,16 @@
 2. 2~8초 뒤 메시지가 "🐟 입질이 왔어요!"로 바뀌어요
 3. 그때부터 **2.5초 안에** 버튼을 눌러야 잡혀요
 
-- 입질 전에 누르면 **성급** (놓침)
-- 늦게 누르면 **놓침**
+- 입질 전에 누르면 **성급** (놓침 → 횟수 돌려줌)
+- 늦게 누르면 **놓침** (횟수 돌려줌)
 - 제때 누르면 **반드시** 물고기가 나와요 (꽝 없음)
 
-⚠️ **타이밍을 놓쳐도 내구도는 줄어요**(사용자 결정). 안 그러면 낚시대 하나가 "물고기
-10마리 확정"이 돼서 미니게임이 장식이 돼요.
+🚨 **제한시간 시계는 메시지를 보낸 뒤에 시작해요.** 전엔 보내기 전에 찍어서, 유저가
+"입질!"을 보기도 전에 2.5초가 흐르기 시작했어요(왕복 지연 100~300ms를 통째로 손해).
+
+⭐ **놓치면 횟수를 돌려줘요**(2026-10-17). 처음엔 소모시켰는데, 디스코드 왕복 지연 탓에
+실력과 무관하게 놓치는 경우가 있어서 그 몫까지 물릴 수는 없어요. 덕분에 낚시대 1개가
+**항상 10마리**를 줘서 순이익이 실력과 무관하게 +0.21로 고정돼요.
 🚨 **내구도는 던지기 전에 깎아요.** 끝나고 깎으면 미니게임 도중에 `/낚시`를 여러 번 쳐서
 내구도 1개로 여러 판을 돌릴 수 있어요.
 
@@ -262,8 +266,6 @@ class Fishing(commands.Cog):
             pass
 
         if not view.done.is_set():
-            # 입질! 여기서부터 BITE_WINDOW 안에 눌러야 해요.
-            view.bite_at = time.monotonic()
             bite = discord.Embed(
                 title="🐟 입질이 왔어요!",
                 description="**지금 챔질하세요!**",
@@ -273,6 +275,17 @@ class Fishing(commands.Cog):
                 await interaction.edit_original_response(embed=bite, view=view)
             except discord.HTTPException:
                 log.info("입질 표시 실패 (메시지가 사라졌을 수 있어요)")
+
+            # 🚨 제한시간 시계는 **메시지를 보낸 뒤에** 시작해요.
+            #
+            # 전에는 `edit_original_response` **앞**에서 찍었는데, 그 호출이 디스코드까지
+            # 다녀오는 데 100~300ms가 걸려요. 즉 유저가 "입질!"을 보기도 전에 제한시간이
+            # 흐르기 시작해서, 체감 2.5초가 실제로는 2초 남짓이었어요. 못 잡는 게
+            # 실력이 아니라 **지연 때문**이었던 거예요(2026-10-17 사용자 신고).
+            #
+            # ⚠️ 돌아오는 길(클릭 -> 봇)은 여전히 포함돼요. 그건 클라이언트 시각을
+            #    받을 수 없어서 어쩔 수 없고, 대신 창을 넉넉히 잡아 상쇄해요.
+            view.bite_at = time.monotonic()
             try:
                 await asyncio.wait_for(view.done.wait(), timeout=BITE_WINDOW + 1.0)
             except asyncio.TimeoutError:
@@ -285,6 +298,24 @@ class Fishing(commands.Cog):
     async def _finish(self, interaction: discord.Interaction, view: FishingView):
         key = view.caught if view.result == "ok" else None
         size = view.size if key else None
+
+        # 🚨 **놓치면 내구도를 돌려줘요** (2026-10-17 사용자 결정).
+        #
+        # 전엔 놓쳐도 1 소모였어요("미니게임이 장식이 되지 않게"). 그런데 디스코드
+        # 왕복 지연 때문에 **실력과 무관하게 놓치는 경우**가 있어서, 그 몫까지
+        # 유저가 물게 되는 건 맞지 않아요.
+        #
+        # ⭐ 경제적으로도 이쪽이 더 깔끔해요. 낚시대 1개가 **항상 10마리**를 주니
+        #    순이익이 실력과 무관하게 +0.21로 고정돼요. 전엔 못 하는 사람만 손해를
+        #    봤는데, 무제한 구매 구조에서 그건 "못하면 벌칙"이 돼요.
+        #
+        # ⚠️ 그래도 **던지기 전 선차감**은 그대로예요. 돌려주는 건 결과가 난 뒤라,
+        #    미니게임 도중에 `/낚시`를 여러 번 쳐서 한 개로 여러 판을 돌리는 건 여전히
+        #    막혀요(동시에 여러 판을 열면 그만큼 선차감되니까요).
+        if key is None:
+            await fishing_store.give_back_rod(interaction.user.id)
+            view.rod_left += 1
+
         await fishing_store.record_cast(interaction.user.id, key, size)
         state = await fishing_store.get(interaction.user.id)
         total = sum(len(v) for v in state["tank"].values())
@@ -311,7 +342,7 @@ class Fishing(commands.Cog):
             }.get(view.result, "놓쳤어요.")
             embed = discord.Embed(
                 title="💨 놓쳤어요",
-                description=reason + "\n-# 낚시대 내구도는 그대로 1 줄어요.",
+                description=reason + "\n-# 🎣 **횟수는 돌려드렸어요.** 다시 던져보세요!",
                 color=MISS_COLOR)
 
         embed.add_field(name="어항", value=f"**{total}마리**", inline=True)

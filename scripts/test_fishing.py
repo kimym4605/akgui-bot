@@ -361,6 +361,39 @@ check("🚨 환불은 **방금 준 만큼만** 뺀다 (쓰던 낚시대가 안 �
       f"{run(fishing_store.rod_state(R))[0]}회 (기대 9)")
 
 # ==================================================================
+print("\n[8c] 🎣 놓치면 횟수를 돌려준다 + 제한시간 시계")
+# ------------------------------------------------------------------
+# 🚨 2026-10-17 사용자 신고: "챔질 실패가 생각보다 많다". 원인이 둘이었어요.
+#   1) 제한시간 시계를 **메시지 보내기 전**에 찍어서, 유저가 '입질!'을 보기도 전에
+#      2.5초가 흐르기 시작했어요(디스코드 왕복 100~300ms를 통째로 손해).
+#   2) 그렇게 놓친 것까지 내구도를 먹었어요.
+M = "miss-user"
+fake.docs.pop(M, None)
+run(fishing_store.buy_rod(M, ROD_DURABILITY))
+run(fishing_store.use_rod(M))                       # 던짐 -> 9
+check("던지면 내구도가 준다", run(fishing_store.rod_state(M))[0] == ROD_DURABILITY - 1)
+run(fishing_store.give_back_rod(M))                 # 놓침 -> 환불
+check("🚨 놓치면 횟수가 돌아온다",
+      run(fishing_store.rod_state(M))[0] == ROD_DURABILITY,
+      f"{run(fishing_store.rod_state(M))[0]}회")
+
+# ⚠️ 1회 환불(give_back_rod)과 한 세트 취소(refund_rod)를 섞어 쓰면 10씩 어긋나요.
+run(fishing_store.give_back_rod(M))
+check("give_back_rod는 **1만** 돌려준다",
+      run(fishing_store.rod_state(M))[0] == ROD_DURABILITY + 1,
+      f"{run(fishing_store.rod_state(M))[0]}회")
+
+# 🚨 시계는 **메시지를 보낸 뒤**에 시작해야 해요. 소스 순서를 직접 확인해요 -
+#    되돌려놓으면 유저가 보기도 전에 시간이 흘러서 '실력 아닌 지연'으로 놓쳐요.
+from pathlib import Path as _Path  # noqa: E402
+
+_src = _Path(os.path.join(BOT_DIR, "cogs/fishing.py")).read_text(encoding="utf-8")
+_edit = _src.index("await interaction.edit_original_response(embed=bite")
+_clock = _src.index("view.bite_at = time.monotonic()")
+check("🚨 제한시간 시계가 입질 메시지 **이후**에 시작한다", _clock > _edit,
+      "시계가 먼저면 왕복 지연만큼 유저가 손해를 봐요")
+
+# ==================================================================
 print("\n[9] 어종표 정합성")
 keys = [f["key"] for rows in FISH.values() for f in rows]
 check("어종 key가 겹치지 않는다", len(keys) == len(set(keys)), f"{len(keys)}종")
