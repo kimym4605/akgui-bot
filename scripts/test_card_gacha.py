@@ -426,13 +426,17 @@ else:
 print("\n[참고] 경제 시뮬레이션 (확정된 수치로 실제 기대값)")
 # ------------------------------------------------------------------
 # 사용자가 고른 수치: 10코인에 3장, 천장 30장.
+# ⚠️ **레전드 완주에서 루프를 끊으면 안 돼요.** 처음엔 그렇게 짰다가 에픽 완주 수치가
+#    레전드와 똑같이 찍혔어요 - 에픽은 아직 완주 전인데 '루프가 끝난 시점'을 적고 있었거든요.
+#    둘 다 끝날 때까지(또는 상한까지) 돌리고, 못 끝내면 **미달성이라고 밝혀요.**
 rng = Random(2026)
-TRIALS = 200
+TRIALS = 60
+CAP = 3_000        # 뽑기 횟수 상한
 to_first_legend, to_epic_done, to_legend_done = [], [], []
 for _ in range(TRIALS):
     counts, since, pulls = {}, 0, 0
     first_legend = epic_done = legend_done = None
-    while legend_done is None and pulls < 4_000:
+    while (epic_done is None or legend_done is None) and pulls < CAP:
         drawn, since = draw_cards(counts, since, n=CARDS_PER_PULL, rng=rng)
         pulls += 1
         for d in drawn:
@@ -441,22 +445,30 @@ for _ in range(TRIALS):
                 first_legend = pulls
         if epic_done is None and all(counts.get(k) for k in all_keys("에픽")):
             epic_done = pulls
-        if all(counts.get(k) for k in all_keys("레전드")):
+        if legend_done is None and all(counts.get(k) for k in all_keys("레전드")):
             legend_done = pulls
     to_first_legend.append(first_legend or pulls)
-    to_epic_done.append(epic_done or pulls)
-    to_legend_done.append(legend_done or pulls)
+    to_epic_done.append(epic_done)       # None = 상한 안에 못 모음
+    to_legend_done.append(legend_done)
 
 
 def avg(xs):
     return sum(xs) / len(xs)
 
 
+def report(label, xs):
+    done = [x for x in xs if x is not None]
+    if not done:
+        return f"  {label} {CAP}뽑기 안에 아무도 못 모음"
+    tail = "" if len(done) == len(xs) else f"  ({len(done)}/{len(xs)}회만 달성)"
+    return (f"  {label} 평균 {avg(done):6.1f}뽑기 = {avg(done)*PULL_PRICE:7.0f}코인{tail}")
+
+
 print(f"  1뽑기 = {PULL_PRICE}코인 / {CARDS_PER_PULL}장 (장당 {PULL_PRICE/CARDS_PER_PULL:.2f}코인)")
 print(f"  첫 레전드까지      평균 {avg(to_first_legend):6.1f}뽑기 = {avg(to_first_legend)*PULL_PRICE:7.0f}코인"
       f"  (최악 {max(to_first_legend)}뽑기)")
-print(f"  에픽 30종 완주     평균 {avg(to_epic_done):6.1f}뽑기 = {avg(to_epic_done)*PULL_PRICE:7.0f}코인")
-print(f"  레전드 13종 완주   평균 {avg(to_legend_done):6.1f}뽑기 = {avg(to_legend_done)*PULL_PRICE:7.0f}코인")
+print(report("에픽 30종 완주  ", to_epic_done))
+print(report("레전드 13종 완주", to_legend_done))
 # 천장이 PITY_DRAWS장째를 보장하니, 최악은 그 장이 들어있는 뽑기까지예요.
 worst_pulls = -(-PITY_DRAWS // CARDS_PER_PULL)   # 올림 나눗셈
 check(
