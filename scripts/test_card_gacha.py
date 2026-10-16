@@ -340,19 +340,28 @@ if card_render.PILLOW_AVAILABLE:
     im = Image.open(BytesIO(png)).convert("RGB")
     px = im.load()
 
+    # ⚠️ 좌표를 손으로 적어두면 안 돼요. 연속뽑기를 넣으면서 `_render`가 한 줄에서
+    #    격자로 바뀌자 이 검사가 IndexError로 터졌어요. **레이아웃을 `_pull_layout`에서
+    #    그대로 받아** 계산해요 - 레이아웃이 또 바뀌어도 같이 따라가요.
+    cols, slot_w, slot_h, use_thumb = card_render._pull_layout(len(sample))
+    label_h = card_render.LABEL_H if not use_thumb else 54
+    cell_h = slot_h + label_h
+
     for i, card in enumerate(sample):
         want_hex = GRADE_COLOR[card["grade"]]
         want = card_render._rgb(want_hex)
         # 이 칸의 등급 라벨이 그려진 줄에서 그 색 픽셀을 찾아요.
-        x0 = card_render.PAD + i * (card_render.SLOT_W + card_render.GAP)
-        y = card_render.PAD + card_render.SLOT_H + 10 + 8   # 라벨 글자 높이 안쪽
-        hits = sum(1 for x in range(x0, x0 + card_render.SLOT_W) if px[x, y] == want)
+        x0 = card_render.PAD + (i % cols) * (slot_w + card_render.GAP)
+        y0 = card_render.PAD + (i // cols) * (cell_h + card_render.GAP)
+        y = y0 + slot_h + (10 if not use_thumb else 4) + 8   # 라벨 글자 높이 안쪽
+        xs = range(x0, min(x0 + slot_w, im.width))
+        hits = sum(1 for x in xs if px[x, y] == want)
         check(f"{card['grade']} 라벨이 실제로 그 색", hits > 0, f"{want} 픽셀 {hits}개")
 
         # 🚨 R/B가 뒤바뀐 색이 찍혀 있으면 즉시 잡아요(이게 실제로 났던 증상이에요).
         swapped = (want[2], want[1], want[0])
         if swapped != want:   # 하양·회색은 뒤바꿔도 같아서 검사 못 해요
-            bad = sum(1 for x in range(x0, x0 + card_render.SLOT_W) if px[x, y] == swapped)
+            bad = sum(1 for x in xs if px[x, y] == swapped)
             check(f"{card['grade']} R/B가 안 뒤바뀜", bad == 0, f"뒤바뀐 색 {bad}개")
 else:
     print("  (Pillow 없음 - 렌더 검사 건너뜀)")
