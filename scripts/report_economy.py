@@ -157,6 +157,21 @@ for note, count in Counter(l["note"] for l in spend).most_common():
            "gamble_bet": f"  (환급 {back} 제외하면 실소각 {house})"}.get(cls, "")
     print(f"    {note:16s} {count:3d}건 / {amount:4d}코인 / {users:2d}명{tag}")
 
+# 🚨 발행이 어디서 오는지. 🎣 낚시는 **하루 상한이 없어서**(2026-10-17 설계) 여기가
+#    빠르게 커질 수 있어요. 출석·미션을 합친 것보다 커지면 과열 신호고, 그때 제일 먼저
+#    만질 손잡이는 `utils/fish_data.MISS_RATE`예요.
+print("\n  발행이 어디서 오는지 (add 기준):")
+_issue = [l for l in logs if l["cls"] == "issue"]
+for note, count in Counter(
+        (l["note"] or "기타").split(":")[0] for l in _issue).most_common():
+    rows = [l for l in _issue if (l["note"] or "기타").split(":")[0] == note]
+    amount = sum(l["amount"] for l in rows)
+    users = len({l.get("to") for l in rows})       # ⚠️ add는 to가 유저예요
+    share = amount / max(issued, 1) * 100
+    flag = "   ← 🎣 상한이 없어요. 커지면 MISS_RATE부터 올리세요" if note == "낚시판매" else ""
+    print(f"    {note:16s} {count:4d}건 / {amount:5d}코인 / {users:2d}명 "
+          f"({share:4.1f}%){flag}")
+
 print("\n  소비처가 실제로 쓰이는지:")
 for key, label in [("미션리롤", "🎲 미션 리롤권"), ("출석보호권", "🧊 출석 보호권"),
                    ("카드테마", "🎨 카드 테마"), ("칭호구매", "🏷️ 칭호"), ("도박", "🎰 도박"),
