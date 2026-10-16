@@ -227,6 +227,44 @@ check("낚시판매가 '발행'으로 분류된다", got == "issue", f"-> {got}"
 check("note가 도박/카드뽑기와 안 겹친다",
       not fishing.COIN_LOG_NOTE.startswith(("도박", "카드뽑기", "내전베팅")))
 
+# ==================================================================
+print("\n[11] 🚨 낚시는 본인에게만 보여야 한다")
+# ------------------------------------------------------------------
+# 한 채널에서 여러 명이 동시에 던지면 찌가 뒤섞여요(어느 게 내 건지 모르고, 남의
+# "입질!"을 보고 눌러버려요). 이건 **실수로 되돌리기 쉬운 설정**이라 코드로 못 박아요.
+#
+# ⚠️ 줄 단위 grep으로는 못 잡아요 - `ephemeral=True`가 다음 줄에 있는 호출이 많아요.
+#    AST로 호출 인자를 직접 봐요.
+import ast as _ast  # noqa: E402
+
+_src = Path(os.path.join(BOT_DIR, "cogs/fishing.py")).read_text(encoding="utf-8")
+_tree = _ast.parse(_src)
+
+PUBLIC_OK = {"leaderboard"}        # 순위표는 같이 보는 게 맞아요
+leaks = []
+for _cls in [n for n in _tree.body if isinstance(n, _ast.ClassDef)]:
+    for _fn in [n for n in _cls.body
+                if isinstance(n, (_ast.AsyncFunctionDef, _ast.FunctionDef))]:
+        for _call in _ast.walk(_fn):
+            if not isinstance(_call, _ast.Call):
+                continue
+            _name = getattr(_call.func, "attr", "")
+            if _name not in ("send_message", "send", "defer"):
+                continue
+            # 컴포넌트 상호작용의 defer는 메시지를 안 만들어요(deferred_message_update).
+            if _name == "defer" and _fn.name == "strike":
+                continue
+            if _fn.name in PUBLIC_OK:
+                continue
+            eph = any(k.arg == "ephemeral" and getattr(k.value, "value", None) is True
+                      for k in _call.keywords)
+            if not eph:
+                leaks.append(f"{_cls.name}.{_fn.name} {_name}() line {_call.lineno}")
+
+check("🚨 /낚시·/어항·/물고기판매의 모든 응답이 ephemeral", not leaks,
+      "공개로 남은 곳: " + ", ".join(leaks) if leaks else "")
+check("/낚시왕은 공개 (순위표)", "leaderboard" in PUBLIC_OK)
+
 print("\n" + "=" * 60)
 if failures:
     print(f"❌ 실패 {len(failures)}건")

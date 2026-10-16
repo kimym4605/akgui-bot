@@ -26,6 +26,22 @@
 
 낚을 때마다 코인을 주지 않고 **팔 때 한 번만** 발행해요. `coin_log`에 `낚시판매`가
 한 줄씩 깔끔하게 남아서 낚시가 얼마나 찍어냈는지 정확히 떼어볼 수 있어요.
+
+## 🚨 가시성 - 낚시는 전부 **본인에게만** 보여요
+
+| 명령어 | 보이는 범위 |
+|---|---|
+| `/낚시` `/어항` `/물고기판매` | **본인에게만** (ephemeral) |
+| `/낚시왕` | 공개 (순위표라 같이 보는 게 맞아요) |
+
+왜 비공개인가: 한 채널에서 여러 명이 동시에 던지면 **찌가 뒤섞여요.** 어느 게 내 건지
+모르고, 남의 "입질이 왔어요!"를 보고 눌러버리기도 해요. 🎴 뽑기는 자랑하는 재미 때문에
+뽑기방에서 공개인데, 낚시는 **몇 초짜리 실시간 조작**이라 성격이 정반대예요.
+
+⚠️ `/물고기판매`는 **`defer`부터 ephemeral이어야** 해요. 공개로 defer하면 "생각 중..."
+자리가 채널에 남아서, 결과만 비공개로 보내봐야 흔적이 섞여요.
+⚠️ `strike` 버튼의 `defer()`는 컴포넌트 상호작용이라 **메시지를 만들지 않아요**
+(deferred_message_update). 거기엔 ephemeral이 필요 없어요.
 """
 import asyncio
 import logging
@@ -126,7 +142,9 @@ class Fishing(commands.Cog):
             color=WAIT_COLOR,
         )
         embed.set_footer(text="너무 일찍 누르면 미끼만 날려요")
-        await interaction.response.send_message(embed=embed, view=view)
+        # 🚨 **본인에게만** 보여요. 한 채널에서 여러 명이 동시에 던지면 찌가 뒤섞여서
+        #    어느 게 내 건지 알 수 없고, 남의 '입질!'을 보고 눌러버리기도 해요.
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
         # 입질까지 기다려요. 그 사이에 유저가 누르면 done이 먼저 떨어져요(= 성급).
         wait = random.uniform(BITE_MIN, BITE_MAX)
@@ -182,7 +200,7 @@ class Fishing(commands.Cog):
         try:
             await interaction.edit_original_response(embed=embed, view=None)
         except discord.HTTPException:
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="어항", description="낚아둔 물고기를 봐요.")
     @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
@@ -221,7 +239,9 @@ class Fishing(commands.Cog):
     @app_commands.command(name="물고기판매", description="어항에 든 물고기를 전부 팔아요.")
     @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
     async def sell(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+        # ⚠️ defer부터 ephemeral이어야 해요. 공개로 defer하면 "생각 중..." 자리가
+        #    채널에 남아서, 결과만 비공개로 보내봐야 흔적이 섞여요.
+        await interaction.response.defer(ephemeral=True)
 
         # 🚨 **비우면서 내용을 받아와요**(원자적). 읽고 나서 비우면 그 사이에 낚은
         #    물고기가 증발해요.
@@ -258,7 +278,7 @@ class Fishing(commands.Cog):
         embed.add_field(name="받은 코인", value=f"**+{coins}개**", inline=True)
         embed.add_field(name="보유 악귀코인", value=f"**{balance}개**", inline=True)
         embed.set_footer(text="어항이 비었어요 · /낚시 로 다시 채워보세요")
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="낚시왕", description="누가 제일 많이 벌었는지 봐요.")
     @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
