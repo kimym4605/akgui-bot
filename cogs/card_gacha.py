@@ -30,6 +30,20 @@
 
 ⚠️ `coin_log`의 note를 **`카드뽑기`**로 시작해요. `도박`으로 시작하면 경제 리포트가
 베팅액으로 오인해요(`scripts/report_economy.py`).
+
+## 채널 제한 — `CARD_CHANNEL_ID` 폴백을 왜 쓰나
+
+세 명령어는 `#🎴｜뽑기방`에서만 돼요. 그런데 `/채널설정`이 저장하는 `data/settings.json`은
+**Fly 볼륨 위에 있어서** 배포로 못 넣어요([[project_pokemon_bot_fly_volume_shadowing]]).
+`flyctl sftp`에는 `rm`이 없어 교체도 안 되고(get/put/shell뿐), `ssh console`은 막혀 있어요.
+
+그래서 `restrict_to_channel`이 원래 지원하는 **env 폴백**을 써요 — `/오상`(`VALORANT_SHOP_
+CHANNEL_ID`)·노래방(`KARAOKE_VOICE_CHANNEL_ID`)과 같은 방식이에요. 우선순위는
+`/채널설정` > env > 제한없음이라, 나중에 서버 소유자가 `/채널설정 악귀카드 #채널`로
+언제든 덮어쓸 수 있어요(그때는 재배포가 필요 없어요).
+
+⚠️ env 값은 `.env`가 아니라 **`flyctl secrets set CARD_CHANNEL_ID=...`**로 넣어요
+([[project_pokemon_bot_flyio_secrets_not_env]]).
 """
 import io
 import logging
@@ -234,14 +248,14 @@ class CardGacha(commands.Cog):
         name="카드뽑기",
         description=f"악귀코인 {PULL_PRICE}개로 악귀카드 {CARDS_PER_PULL}장을 뽑아요.",
     )
-    @restrict_to_channel("card")
+    @restrict_to_channel("card", "CARD_CHANNEL_ID")
     async def pull_cards(self, interaction: discord.Interaction):
         # DB 왕복 + 이미지 합성이라 3초를 넘겨요.
         await interaction.response.defer()
         await do_pull(interaction)
 
     @app_commands.command(name="도감", description="내가 모은 악귀카드를 봐요.")
-    @restrict_to_channel("card")
+    @restrict_to_channel("card", "CARD_CHANNEL_ID")
     @app_commands.describe(등급="이 등급의 카드 목록만 자세히 봐요 (안 고르면 전체 진행도)")
     @app_commands.choices(등급=[
         app_commands.Choice(name=f"{GRADE_EMOJI[g]} {g}", value=g) for g in GRADE_ORDER
@@ -300,7 +314,7 @@ class CardGacha(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="카드확률", description="악귀카드 뽑기의 확률과 천장을 공개해요.")
-    @restrict_to_channel("card")
+    @restrict_to_channel("card", "CARD_CHANNEL_ID")
     async def rates(self, interaction: discord.Interaction):
         total_w = sum(GRADE_WEIGHTS.values())
         lines = []
