@@ -65,7 +65,8 @@ from discord.ext import commands
 from utils import coin_wallet, fish_data, fishing_store
 from utils.channel_check import restrict_to_channel
 from utils.fish_data import (
-    BY_KEY, FISH, GRADE_ORDER, GRADES, ROD_DURABILITY, ROD_PER_DAY, ROD_PRICE,
+    BY_KEY, COIN_PIECES, FISH, GRADE_ORDER, GRADES, ROD_DURABILITY, ROD_PER_DAY,
+    ROD_PRICE, pieces_of, roll_size,
 )
 
 log = logging.getLogger(__name__)
@@ -170,6 +171,7 @@ class FishingView(discord.ui.View):
         self.done = asyncio.Event()
         self.result: str | None = None        # "early" | "late" | "ok"
         self.caught: str | None = None
+        self.size: int | None = None          # 📏 잡힌 물고기의 치수(cm)
         self.rod_left = 0                     # 이번 캐스트 뒤 남은 내구도
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -192,6 +194,9 @@ class FishingView(discord.ui.View):
         else:
             self.result = "ok"
             self.caught = roll_catch()
+            # 📏 치수는 잡힌 **그 순간** 정해져요. 나중에 굴리면 같은 물고기가
+            #    볼 때마다 크기가 달라져요.
+            self.size = roll_size(self.caught)
         self.done.set()
         button.disabled = True
         await interaction.response.edit_message(view=self)
@@ -269,16 +274,22 @@ class Fishing(commands.Cog):
 
     async def _finish(self, interaction: discord.Interaction, view: FishingView):
         key = view.caught if view.result == "ok" else None
-        await fishing_store.record_cast(interaction.user.id, key)
-        tank = (await fishing_store.get(interaction.user.id))["tank"]
-        total = sum(tank.values())
+        size = view.size if key else None
+        await fishing_store.record_cast(interaction.user.id, key, size)
+        state = await fishing_store.get(interaction.user.id)
+        total = sum(len(v) for v in state["tank"].values())
 
         if key:
             grade, name = BY_KEY[key]
             g = GRADES[grade]
+            pieces = pieces_of(key, size)
+            lo, hi = fish_data.SIZE_BY_KEY[key]
+            # 📏 같은 어종 안에서 몇 %짜리인지 - "대물급 피라미"의 재미가 여기서 나와요.
+            pct = int((size - lo) / max(1, hi - lo) * 100)
+            tag = " 🏆 **최대급!**" if pct >= 90 else (" ✨ 큼직해요" if pct >= 70 else "")
             embed = discord.Embed(
-                title=f"{g['emoji']} {grade} · {name} 을(를) 낚았어요!",
-                description=f"판매가 **{g['price']}코인**",
+                title=f"{g['emoji']} {grade} · {name} {size}cm{tag}",
+                description=f"판매가 **{pieces / COIN_PIECES:.1f}코인**",
                 color=g["color"],
             )
         else:
@@ -316,18 +327,38 @@ class Fishing(commands.Cog):
         if not tank:
             embed.description = "어항이 비었어요. `/낚시` 로 한 마리 낚아보세요!"
         else:
-            lines, value = [], 0
+            lines = []
             for grade in GRADE_ORDER:
-                rows = [(k, n) for k, n in tank.items() if BY_KEY.get(k, ("", ""))[0] == grade]
+                rows = [(k, s) for k, sizes in tank.items()
+                        if BY_KEY.get(k, ("", ""))[0] == grade for s in sizes]
                 if not rows:
                     continue
                 g = GRADES[grade]
-                part = " · ".join(f"{BY_KEY[k][1]} ×{n}" for k, n in sorted(rows))
-                lines.append(f"{g['emoji']} **{grade}** ({g['price']}코인) — {part}")
-                value += sum(g["price"] * n for _, n in rows)
+                lo_p, hi_p = g["pieces"]
+                # 📏 **큰 놈부터** 보여줘요. 어항을 열었을 때 제일 궁금한 게 최대어예요.
+                rows.sort(key=lambda r: -(r[1] or 0))
+                part = " · ".join(
+                    f"{BY_KEY[k][1]}" + (f" {s}cm" if s is not None else "")
+                    for k, s in rows[:8])
+                if len(rows) > 8:
+                    part += f" 외 {len(rows) - 8}마리"
+                lines.append(
+                    f"{g['emoji']} **{grade}** "
+                    f"({lo_p / COIN_PIECES:.1f}~{hi_p / COIN_PIECES:.1f}코인) — {part}")
             embed.description = "\n".join(lines)
-            embed.add_field(name="마리 수", value=f"**{sum(tank.values())}마리**", inline=True)
-            embed.add_field(name="팔면", value=f"**{value}코인**", inline=True)
+
+            total_n = sum(len(v) for v in tank.values())
+            pieces = data["pieces"] + data["dust"]
+            embed.add_field(name="마리 수", value=f"**{total_n}마리**", inline=True)
+            # ⚠️ 실제 지급은 **내림**이에요(나머지는 다음 판매로 넘어가요). 기대를
+            #    부풀리지 않게 정확한 값과 받을 코인을 같이 보여줘요.
+            embed.add_field(
+                name="팔면",
+                value=(f"**{pieces // COIN_PIECES}코인**"
+                       + (f"\n-# (정확히 {pieces / COIN_PIECES:.1f} · "
+                          f"남는 {pieces % COIN_PIECES / COIN_PIECES:.1f}은 다음에)"
+                          if pieces % COIN_PIECES else "")),
+                inline=True)
 
         # 🎣 낚시대 상태를 제일 먼저 보여줘요 - "오늘 몇 번 더 던질 수 있나"가
         #    낚시에서 제일 궁금한 정보예요.
@@ -379,10 +410,16 @@ class Fishing(commands.Cog):
 
         lines = []
         for grade in GRADE_ORDER:
-            n = sum(v for k, v in tank.items() if BY_KEY.get(k, ("", ""))[0] == grade)
-            if n:
+            rows = [(k, sz) for k, sizes in tank.items()
+                    if BY_KEY.get(k, ("", ""))[0] == grade for sz in sizes]
+            if rows:
                 g = GRADES[grade]
-                lines.append(f"{g['emoji']} **{grade}** {n}마리 — {g['price'] * n}코인")
+                sub = sum(pieces_of(k, sz) for k, sz in rows)
+                big = max((sz for _, sz in rows if sz is not None), default=None)
+                lines.append(
+                    f"{g['emoji']} **{grade}** {len(rows)}마리 — "
+                    f"{sub / COIN_PIECES:.1f}코인"
+                    + (f" (최대 {big}cm)" if big else ""))
 
         embed = discord.Embed(
             title="🪙 물고기를 팔았어요!",
@@ -391,6 +428,11 @@ class Fishing(commands.Cog):
         )
         embed.add_field(name="받은 코인", value=f"**+{coins}개**", inline=True)
         embed.add_field(name="보유 악귀코인", value=f"**{balance}개**", inline=True)
+        # 🚨 남은 조각을 **반드시 알려줘요.** 안 그러면 "3.7코인어치인데 3개만 받았다"가
+        #    떼먹힌 걸로 보여요. 다음 판매에 더해진다는 걸 명시해요.
+        if dust:
+            embed.add_field(name="다음에 더해져요",
+                            value=f"**{dust / COIN_PIECES:.1f}코인**", inline=True)
         embed.set_footer(text="어항이 비었어요 · /낚시 로 다시 채워보세요")
         await interaction.followup.send(embed=embed, ephemeral=True)
 

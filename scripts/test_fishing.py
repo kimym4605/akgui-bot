@@ -27,7 +27,8 @@ os.environ["MONGODB_DB_NAME"] = "agwi_fish_test"
 
 from utils import fish_data, fishing_store  # noqa: E402
 from utils.fish_data import (  # noqa: E402
-    BY_KEY, FISH, GRADES, ROD_DURABILITY, ROD_PER_DAY, ROD_PRICE, price_of,
+    BY_KEY, COIN_PIECES, FISH, GRADES, ROD_DURABILITY, ROD_PER_DAY, ROD_PRICE,
+    SIZE_BY_KEY, pieces_of, roll_size,
 )
 
 failures = []
@@ -63,8 +64,8 @@ for grade, g in GRADES.items():
     check(f"잡혔을 때 {grade} {expected:.1f}%", abs(got - expected) < 1.0,
           f"실측 {got:.2f}%")
 
-coins = sum(price_of(k) for k in hits)
-measured = coins / N
+pieces = sum(pieces_of(k, roll_size(k, rng)) for k in hits)
+measured = pieces / N / COIN_PIECES
 formula = fish_data.expected_coin_per_cast()
 check("기댓값 계산식과 실측이 일치", abs(measured - formula) < 0.05,
       f"계산 {formula:.3f} vs 실측 {measured:.3f} 코인/회")
@@ -152,6 +153,14 @@ class FakeFish:
             doc[field] = value
         for field in (update.get("$unset") or {}):
             doc.pop(field, None)
+        # 📏 치수 시스템은 어항에 `$push`로 담아요(같은 어종도 각자 크기를 가져요).
+        for field, value in (update.get("$push") or {}).items():
+            parent, child = field.split(".", 1)
+            doc.setdefault(parent, {}).setdefault(child, [])
+            if isinstance(value, dict) and "$each" in value:
+                doc[parent][child].extend(value["$each"])
+            else:
+                doc[parent][child].append(value)
         return Res(m=0 if upserted else 1, u=upserted)
 
     def find_one_and_update(self, flt, update, return_document=None):
@@ -194,15 +203,37 @@ def run(c):
     return asyncio.run(c)
 
 
-run(fishing_store.record_cast(U, COMMON))
-run(fishing_store.record_cast(U, COMMON))
-run(fishing_store.record_cast(U, LEGEND))
-run(fishing_store.record_cast(U, None))          # 꽝
+C_LO, C_HI = SIZE_BY_KEY[COMMON]
+run(fishing_store.record_cast(U, COMMON, C_LO))      # 제일 작은 놈
+run(fishing_store.record_cast(U, COMMON, C_HI))      # 제일 큰 놈
+run(fishing_store.record_cast(U, LEGEND, SIZE_BY_KEY[LEGEND][0]))
+run(fishing_store.record_cast(U, None))              # 놓침
 data = run(fishing_store.get(U))
-check("어항에 담긴다", data["tank"] == {COMMON: 2, LEGEND: 1}, str(data["tank"]))
+check("어항에 치수까지 담긴다",
+      data["tank"] == {COMMON: [C_LO, C_HI], LEGEND: [SIZE_BY_KEY[LEGEND][0]]},
+      str(data["tank"]))
 check("던진 횟수가 센다", data["casts"] == 4, str(data["casts"]))
-check("꽝은 잡은 수에 안 들어간다", data["caught"] == 3, str(data["caught"]))
+check("놓친 건 잡은 수에 안 들어간다", data["caught"] == 3, str(data["caught"]))
 check("최고 기록이 전설로 갱신", (data.get("best") or {}).get("key") == LEGEND)
+
+# 📏 같은 어종이라도 **치수에 따라 값이 달라야** 해요 (사용자 요청의 핵심).
+lo_p, hi_p = pieces_of(COMMON, C_LO), pieces_of(COMMON, C_HI)
+check("작은 놈보다 큰 놈이 비싸다", hi_p > lo_p, f"{lo_p} vs {hi_p}조각")
+check("🚨 일반 물고기가 0.5~1.0코인 범위",
+      lo_p == 5 and hi_p == 10, f"{lo_p / 10:.1f}~{hi_p / 10:.1f}코인")
+check("어항 가치가 치수 합과 일치",
+      data["pieces"] == lo_p + hi_p + pieces_of(LEGEND, SIZE_BY_KEY[LEGEND][0]),
+      f"{data['pieces']}조각")
+
+# 🚨 치수 시스템 **이전**에 잡은 물고기(마리수만 있는 옛 형식)도 읽혀야 해요.
+#    11명이 이미 그 형식으로 어항을 갖고 있었어요.
+fake.docs["old"] = {"_id": "old", "tank": {COMMON: 2, LEGEND: 1}}
+legacy = run(fishing_store.get("old"))
+check("🚨 옛 형식(마리수)도 읽힌다",
+      legacy["tank"] == {COMMON: [None, None], LEGEND: [None]}, str(legacy["tank"]))
+check("옛 물고기는 중앙 크기로 값이 매겨진다",
+      legacy["pieces"] == pieces_of(COMMON) * 2 + pieces_of(LEGEND),
+      f"{legacy['pieces']}조각")
 
 # 🚨 판매 도중에 물고기를 더 낚아도 **한 마리도 사라지면 안 돼요.**
 #
@@ -210,45 +241,75 @@ check("최고 기록이 전설로 갱신", (data.get("best") or {}).get("key") =
 #    원자적이라 **읽기와 쓰기 사이가 없어서**, 끼어든 물고기가 같이 팔리든 남든 둘 다
 #    정상이에요. 진짜 불변식은 **판 것 + 남은 것 = 그동안 넣은 것 전부**예요.
 #    (처음엔 "끼어든 건 남아야 한다"고 단언했다가 틀렸어요 - 순서를 잘못 가정한 거예요.)
-added = {COMMON: 3, LEGEND: 1}          # 앞서 2+1, 아래 훅에서 1 더
-fake.before_sell = lambda: run(fishing_store.record_cast(U, COMMON))
-tank, coins = run(fishing_store.sell_all(U))
+before_pieces = run(fishing_store.get(U))["pieces"]
+fake.before_sell = lambda: run(fishing_store.record_cast(U, COMMON, C_LO))
+tank, coins, dust = run(fishing_store.sell_all(U))
 after = run(fishing_store.get(U))
 
-merged = dict(after["tank"])
-for k, n in tank.items():
-    merged[k] = merged.get(k, 0) + n
-check("🚨 판매 중 낚은 물고기가 한 마리도 안 사라진다", merged == added,
-      f"판매 {tank} + 남음 {after['tank']} = {merged} (기대 {added})")
-check("받은 코인이 판매한 내용과 정확히 일치",
-      coins == sum(price_of(k) * n for k, n in tank.items()),
-      f"{coins}코인 vs {tank}")
+sold_pieces = fishing_store.tank_pieces(tank)
+check("🚨 판매 중 낚은 물고기가 한 마리도 안 사라진다",
+      sold_pieces + after["pieces"] + after["dust"] == before_pieces + lo_p,
+      f"판 {sold_pieces} + 남은어항 {after['pieces']} + 잔돈 {after['dust']} "
+      f"vs 넣은 {before_pieces + lo_p}조각")
+check("🚨 지급 코인 + 잔돈 = 판 물고기 값 (한 조각도 안 샌다)",
+      coins * COIN_PIECES + dust == sold_pieces, f"{coins}코인 + {dust}조각 vs {sold_pieces}")
 
 # 역검증: '읽고 나서 비우는' 옛날 방식이면 끼어든 물고기가 증발해요.
 def broken_sell(uid):
+    import copy
+
     doc = fake.find_one({"_id": uid}) or {}
-    snapshot = dict(doc.get("tank") or {})
-    run(fishing_store.record_cast(uid, COMMON))      # 그 사이에 한 마리 더
+    # ⚠️ **깊은 복사**여야 해요. 얕게 뜨면 어항 리스트를 그대로 공유해서, 그 사이에
+    #    append된 물고기가 스냅샷에도 보여요 — 실제 DB는 별개 문서를 돌려주니
+    #    그 상태로는 손실을 재현하지 못해요(처음에 이것 때문에 역검증이 헛돌았어요).
+    snapshot = copy.deepcopy(doc.get("tank") or {})
+    run(fishing_store.record_cast(uid, COMMON, C_LO))   # 그 사이에 한 마리 더
     fake.update_one({"_id": uid}, {"$set": {"tank": {}}})
     return snapshot
 
-fake.docs["999"] = {"_id": "999", "tank": {COMMON: 2}}
+fake.docs["999"] = {"_id": "999", "tank": {COMMON: [C_LO, C_LO]}}
 lost = broken_sell("999")
 left = (fake.find_one({"_id": "999"}) or {}).get("tank") or {}
-check("(역검증) 읽고-비우기 방식이면 실제로 증발한다",
-      sum(lost.values()) + sum(left.values()) < 3,
-      f"판매 {lost} + 남음 {left} — 3마리여야 하는데 모자라요")
+n_lost = sum(len(v) if isinstance(v, list) else v for v in lost.values())
+n_left = sum(len(v) if isinstance(v, list) else v for v in left.values())
+check("(역검증) 읽고-비우기 방식이면 실제로 증발한다", n_lost + n_left < 3,
+      f"판매 {n_lost}마리 + 남음 {n_left}마리 — 3마리여야 하는데 모자라요")
 
 # 판매 실패 -> 어항 복구 (그 사이 낚은 것과 합쳐져야 해요)
-run(fishing_store.restore(U, tank))
+restore_before = run(fishing_store.get(U))["pieces"] + run(fishing_store.get(U))["dust"]
+run(fishing_store.restore(U, tank, dust))
 restored = run(fishing_store.get(U))
-check("실패하면 어항이 되돌아온다",
-      restored["tank"] == {COMMON: 3, LEGEND: 1}, str(restored["tank"]))
+check("실패하면 어항이 되돌아온다 (잔돈까지)",
+      restored["pieces"] + restored["dust"] == restore_before + sold_pieces + dust,
+      f"{restored['pieces']}+{restored['dust']} vs {restore_before + sold_pieces + dust}")
 
 # 빈 어항
 fake.docs["888"] = {"_id": "888", "tank": {}}
-tank2, coins2 = run(fishing_store.sell_all("888"))
-check("빈 어항은 0코인", coins2 == 0 and not tank2)
+tank2, coins2, dust2 = run(fishing_store.sell_all("888"))
+check("빈 어항은 0코인", coins2 == 0 and not tank2 and dust2 == 0)
+
+# ==================================================================
+print("\n[8a] 🚨 잔돈(조각) — 한 마리씩 팔아 이득 보는 구멍이 없어야 해요")
+# ------------------------------------------------------------------
+# 일반 물고기 하나가 0.5코인이에요. 팔 때마다 반올림했다면 **한 마리씩 10번 팔아
+# 10코인**(실제 5코인어치)을 받는 구멍이 생겨요. 나머지를 어항에 남기면 막혀요.
+S = "dust-user"
+fake.docs.pop(S, None)
+one_at_a_time = 0
+for _ in range(10):
+    run(fishing_store.record_cast(S, COMMON, C_LO))     # 0.5코인짜리
+    _, c, _ = run(fishing_store.sell_all(S))
+    one_at_a_time += c
+
+T = "bulk-user"
+fake.docs.pop(T, None)
+for _ in range(10):
+    run(fishing_store.record_cast(T, COMMON, C_LO))
+_, bulk, _ = run(fishing_store.sell_all(T))
+
+check("🚨 한 마리씩 팔아도 한 번에 판 것과 같다",
+      one_at_a_time == bulk, f"한마리씩 {one_at_a_time} vs 한번에 {bulk}코인")
+check("0.5코인 10마리 = 5코인", bulk == 5, f"{bulk}코인")
 
 # ==================================================================
 print("\n[8b] 🎣 낚시대 — 하루 1개 · 내구도 10")
@@ -301,10 +362,10 @@ keys = [f["key"] for rows in FISH.values() for f in rows]
 check("어종 key가 겹치지 않는다", len(keys) == len(set(keys)), f"{len(keys)}종")
 check("모든 등급에 어종이 있다", all(FISH.get(g) for g in GRADES), str(list(GRADES)))
 check("BY_KEY가 전부 매핑된다", len(BY_KEY) == len(keys))
-check("가격이 등급 순서대로 오른다",
-      [GRADES[g]["price"] for g in ("일반", "희귀", "대물", "전설")]
-      == sorted(GRADES[g]["price"] for g in GRADES),
-      str({g: GRADES[g]["price"] for g in GRADES}))
+check("가격 범위가 등급 순서대로 오른다",
+      [GRADES[g]["pieces"] for g in ("일반", "희귀", "대물", "전설")]
+      == sorted(GRADES[g]["pieces"] for g in GRADES),
+      str({g: GRADES[g]["pieces"] for g in GRADES}))
 check("가중치가 등급이 높을수록 작다",
       all(GRADES["일반"]["weight"] > GRADES[g]["weight"]
           for g in ("희귀", "대물", "전설")))
