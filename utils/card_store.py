@@ -347,6 +347,47 @@ async def pull(user_id, n: int = CARDS_PER_PULL) -> list[dict] | None:
     return await asyncio.to_thread(_pull_sync, user_id, n)
 
 
+# ------------------------------------------------------------------
+# 카드 한 장 주고받기 - 🎪 장터(`utils/card_market.py`)가 써요
+# ------------------------------------------------------------------
+def _take_sync(user_id, key: str) -> bool:
+    """카드 1장을 빼요. 안 갖고 있으면 아무것도 안 하고 False.
+
+    ⚠️ **조건부 차감**이에요(`$gte: 1`). 읽고 나서 빼면 같은 카드를 동시에 두 번 내놨을 때
+    장수가 음수가 돼요 - 코인 지갑과 같은 이유예요(`utils/coin_wallet._spend_sync`)."""
+    res = _cards.update_one(
+        {"_id": _uid(user_id), f"counts.{key}": {"$gte": 1}},
+        {"$inc": {f"counts.{key}": -1}},
+    )
+    return res.modified_count == 1
+
+
+def _give_sync(user_id, key: str) -> None:
+    """카드 1장을 줘요. 문서가 없으면 만들어요.
+
+    ⚠️ 에픽·레전드도 **2장 이상 쌓일 수 있어요**(이미 가진 카드를 장터에서 또 사는 경우).
+    뽑기 로직은 장수가 아니라 '있냐 없냐'만 보기 때문에(`_exhausted`·`_pick_card`가
+    truthy 검사) 2장이어도 동작은 같아요. `/도감`은 그대로 ×2로 보여줘요."""
+    _cards.update_one(
+        {"_id": _uid(user_id)}, {"$inc": {f"counts.{key}": 1}}, upsert=True
+    )
+
+
+async def take_card(user_id, key: str) -> bool:
+    """카드 1장 회수. 안 갖고 있으면 False."""
+    return await asyncio.to_thread(_take_sync, user_id, key)
+
+
+async def give_card(user_id, key: str) -> None:
+    """카드 1장 지급."""
+    await asyncio.to_thread(_give_sync, user_id, key)
+
+
+async def owned_keys(user_id) -> dict[str, int]:
+    """지금 가진 카드 {key: 장수}. 장터 등록 자동완성이 써요."""
+    return (await get_collection(user_id))["counts"]
+
+
 def summarize(counts: dict[str, int]) -> dict:
     """도감 진행도. `/도감`이 써요."""
     per_grade = {}

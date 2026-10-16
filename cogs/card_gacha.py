@@ -44,7 +44,13 @@
 
 ## 채널 제한 — `CARD_CHANNEL_ID` 폴백을 왜 쓰나
 
-세 명령어는 `#🎴｜뽑기방`에서만 돼요. 그런데 `/채널설정`이 저장하는 `data/settings.json`은
+`🎴 악귀카드` 카테고리 아래 세 채널로 갈라뒀어요(2026-10-17).
+
+| 채널 | 명령어 | 그룹 / env |
+|---|---|---|
+| `#🎴｜뽑기방` | `/카드뽑기` `/카드확률` | `card` / `CARD_CHANNEL_ID` |
+| `#🎪｜거래장터` | `/장터` `/장터등록` `/내장터` | `card_market` / `CARD_MARKET_CHANNEL_ID` |
+| `#📖｜도감` | `/도감` | `card_dex` / `CARD_DEX_CHANNEL_ID` | 그런데 `/채널설정`이 저장하는 `data/settings.json`은
 **Fly 볼륨 위에 있어서** 배포로 못 넣어요([[project_pokemon_bot_fly_volume_shadowing]]).
 `flyctl sftp`에는 `rm`이 없어 교체도 안 되고(get/put/shell뿐), `ssh console`은 막혀 있어요.
 
@@ -533,7 +539,10 @@ class CardGacha(commands.Cog):
         await do_pull(interaction, pulls=횟수)
 
     @app_commands.command(name="도감", description="내가 모은 악귀카드를 펼쳐 봐요.")
-    @restrict_to_channel("card", "CARD_CHANNEL_ID")
+    # 📖 도감은 전용 채널(`#📖｜도감`)이에요. 뽑기 결과로 채널이 덮이지 않게 갈라뒀어요.
+    # ⚠️ 설정이 없으면 제한이 풀리니, `fallback_group="card"`로 최소한 뽑기방에는
+    #    묶이게 해둬요(그룹을 새로 쪼갤 때 쓰는 안전장치 - channel_check 주석 참고).
+    @restrict_to_channel("card_dex", "CARD_DEX_CHANNEL_ID", fallback_group="card")
     @app_commands.describe(등급="바로 이 등급을 펼쳐요 (안 고르면 전체 진행도부터)")
     @app_commands.choices(등급=[
         app_commands.Choice(name=f"{GRADE_EMOJI[g]} {g}", value=g) for g in GRADE_ORDER

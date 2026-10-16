@@ -74,6 +74,14 @@ def classify(entry):
     ⚠️ `도박 당첨`이 `도박`으로도 시작하니까, **add/spend를 먼저 보고** 판단해요.
     """
     note = entry["note"] or ""
+
+    # 🚨 유저 사이를 오간 코인은 **발행도 소각도 아니에요**(재분배). `/코인보내기`와
+    #    🎪 장터가 여기로 와요. `kind`가 add도 spend도 아니라서, 이 분기가 없으면
+    #    맨 아래 `return "burn"`으로 떨어져 **송금이 통째로 소각으로 집계**돼요.
+    #    (2026-10-17까지 실제로 그 상태였어요 - 송금 기록이 0건이라 안 드러났을 뿐이에요.)
+    if entry["kind"] == "transfer":
+        return "transfer"
+
     if entry["kind"] == "add":
         if note.startswith(GAMBLE_ADD):
             return "gamble_back"
@@ -128,6 +136,12 @@ print(f"  도박       {len(rows_of('gamble_bet')):4d}판 / 베팅 {bet}코인 �
       f"→ **순소각 {house}코인** (실측 하우스몫 {house / max(bet, 1) * 100:.0f}%)")
 print(f"  내전베팅   {len(rows_of('redist')):4d}건 / {total('redist'):5d}코인   "
       "(파리뮤추얼 = 재분배, 총량 불변이라 양쪽에서 제외)")
+# 🎪 장터·개인 송금도 유저끼리 주고받는 거라 총량이 안 바뀌어요.
+_tr = rows_of("transfer")
+_market = [l for l in _tr if (l["note"] or "").startswith("장터")]
+print(f"  송금·장터   {len(_tr):4d}건 / {total('transfer'):5d}코인   "
+      f"(유저 간 이동 = 재분배 · 그중 장터 {len(_market)}건 "
+      f"{sum(l['amount'] for l in _market)}코인)")
 print(f"  ─────────────────────────────────────────")
 print(f"  순소각     {net_burn}코인 / 발행 {issued}코인 → **소각률 {net_burn / max(issued, 1) * 100:.1f}%**")
 print("             ← 20% 아래면 소비처를 더 만들기보다 발행을 줄이는 쪽을 먼저 검토")

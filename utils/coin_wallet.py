@@ -113,8 +113,11 @@ def _log_sync(kind: str, from_id, to_id, amount: int, note: str = ""):
         log.warning("코인 기록 저장 실패 (%s %s→%s %d)", kind, from_id, to_id, amount, exc_info=True)
 
 
-def _transfer_sync(from_id, to_id, amount: int) -> tuple[bool, str]:
-    """돌려주는 두 번째 값은 실패 사유예요: self(자기 자신) / amount(0 이하) / balance(잔액 부족)."""
+def _transfer_sync(from_id, to_id, amount: int, note: str = "") -> tuple[bool, str]:
+    """돌려주는 두 번째 값은 실패 사유예요: self(자기 자신) / amount(0 이하) / balance(잔액 부족).
+
+    `note`는 무엇 때문에 오간 돈인지 적어둬요(예: `장터:e01`). 비워두면 개인 송금
+    (`/코인보내기`)이에요."""
     if amount <= 0:
         return False, "amount"
     if _uid(from_id) == _uid(to_id):
@@ -131,7 +134,7 @@ def _transfer_sync(from_id, to_id, amount: int) -> tuple[bool, str]:
         log.error("송금 실패로 되돌림 (%s→%s %d개)", from_id, to_id, amount, exc_info=True)
         raise
 
-    _log_sync("transfer", from_id, to_id, amount)
+    _log_sync("transfer", from_id, to_id, amount, note)
     return True, "ok"
 
 
@@ -166,6 +169,10 @@ async def spend(user_id, amount: int, *, reason: str = "") -> bool:
     return ok
 
 
-async def transfer(from_id, to_id, amount: int) -> tuple[bool, str]:
-    """유저 간 송금. (성공여부, 실패사유) - 사유는 self/amount/balance 중 하나예요."""
-    return await asyncio.to_thread(_transfer_sync, from_id, to_id, amount)
+async def transfer(from_id, to_id, amount: int, *, note: str = "") -> tuple[bool, str]:
+    """유저 간 송금. (성공여부, 실패사유) - 사유는 self/amount/balance 중 하나예요.
+
+    🚨 송금은 **발행도 소각도 아니에요**(재분배). `coin_log`에 `kind="transfer"`로 남고,
+    `scripts/report_economy.py`가 그걸 보고 발행·소각 양쪽에서 빼요. 새로 돈이 오가는
+    기능을 만들 때 이 함수를 쓰면 집계가 알아서 맞아요."""
+    return await asyncio.to_thread(_transfer_sync, from_id, to_id, amount, note)
