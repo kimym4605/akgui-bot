@@ -197,23 +197,36 @@ class FishingView(discord.ui.View):
 
     @discord.ui.button(label="챔질!", emoji="🎣", style=discord.ButtonStyle.primary)
     async def strike(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.done.is_set():
+        """🚨 **판정만 하고 화면은 안 건드려요.**
+
+        전에는 여기서 `interaction.response.edit_message(view=self)`로 버튼을 끄고
+        있었어요. 그런데 `done.set()` 하는 순간 `fish()`가 깨어나 **같은 메시지를
+        동시에 편집**해서, 둘이 엇갈리면 결과 화면이 덮여 "눌렀는데 아무 반응이 없는"
+        것처럼 보였어요(2026-10-17 유저 신고 - 예외가 안 나서 로그에도 안 남아요).
+
+        이제 화면은 `_finish` 혼자 책임져요. 여기선 `defer()`만 해서 상호작용을
+        받아줬다는 표시만 남겨요(컴포넌트 defer는 메시지를 안 만들어요)."""
+        # ⚠️ 판정을 **먼저**, 응답을 나중에. 응답을 기다리는 사이에 `fish()`가
+        #    "늦음"으로 처리해버리면 제때 누른 게 놓친 걸로 바뀌어요.
+        if not self.done.is_set():
+            if self.bite_at is None:
+                # 🚨 입질 전에 누른 경우. 버튼을 처음부터 눌리게 둔 이유가 이걸 잡기 위해서예요.
+                self.result = "early"
+            elif time.monotonic() - self.bite_at > BITE_WINDOW:
+                self.result = "late"
+            else:
+                self.result = "ok"
+                self.caught = roll_catch()
+                # 📏 치수는 잡힌 **그 순간** 정해져요. 나중에 굴리면 같은 물고기가
+                #    볼 때마다 크기가 달라져요.
+                self.size = roll_size(self.caught)
+            self.done.set()
+
+        try:
             await interaction.response.defer()
-            return
-        if self.bite_at is None:
-            # 🚨 입질 전에 누른 경우. 버튼을 처음부터 눌리게 둔 이유가 이걸 잡기 위해서예요.
-            self.result = "early"
-        elif time.monotonic() - self.bite_at > BITE_WINDOW:
-            self.result = "late"
-        else:
-            self.result = "ok"
-            self.caught = roll_catch()
-            # 📏 치수는 잡힌 **그 순간** 정해져요. 나중에 굴리면 같은 물고기가
-            #    볼 때마다 크기가 달라져요.
-            self.size = roll_size(self.caught)
-        self.done.set()
-        button.disabled = True
-        await interaction.response.edit_message(view=self)
+        except discord.HTTPException:
+            # 이미 응답했거나 만료됐어도 판정은 끝났어요. 결과는 _finish가 보여줘요.
+            log.info("🎣 챔질 defer 실패 (판정은 완료, user=%s)", interaction.user.id)
 
     async def on_timeout(self):
         if not self.done.is_set():
@@ -293,7 +306,20 @@ class Fishing(commands.Cog):
                 view.done.set()
 
         view.stop()
-        await self._finish(interaction, view)
+        # 🚨 여기서 터지면 유저는 **아무 반응도 못 봐요**(찌만 띄워놓고 끝).
+        #    2026-10-17에 "눌렀는데 봇이 반응이 없다"는 신고가 있었는데 로그가 없어서
+        #    원인 찾기가 어려웠어요. 결과 표시 실패는 반드시 흔적을 남겨요.
+        try:
+            await self._finish(interaction, view)
+        except Exception:
+            log.exception("🎣 낚시 결과 표시 실패 (user=%s result=%s)",
+                          interaction.user.id, view.result)
+            try:
+                await interaction.followup.send(
+                    "결과를 보여주는 데 실패했어요. `/어항` 으로 확인해주세요.",
+                    ephemeral=True)
+            except discord.HTTPException:
+                pass
 
     async def _finish(self, interaction: discord.Interaction, view: FishingView):
         key = view.caught if view.result == "ok" else None
@@ -431,7 +457,11 @@ class Fishing(commands.Cog):
 
         # 🚨 **비우면서 내용을 받아와요**(원자적). 읽고 나서 비우면 그 사이에 낚은
         #    물고기가 증발해요.
-        tank, coins = await fishing_store.sell_all(interaction.user.id)
+        # ⚠️ **3개를 받아야 해요** (tank, coins, dust). 치수 시스템에서 `sell_all`이
+        #    잔돈까지 돌려주게 바뀌었는데 여기를 2개로 두는 바람에
+        #    `ValueError: too many values to unpack`으로 **판매가 통째로 죽었어요**
+        #    (2026-10-17 유저 신고). 테스트가 store만 직접 불러서 못 잡았어요.
+        tank, coins, dust = await fishing_store.sell_all(interaction.user.id)
         if not tank:
             await interaction.followup.send(
                 "어항이 비었어요. `/낚시` 로 한 마리 낚아보세요!", ephemeral=True)
@@ -440,8 +470,8 @@ class Fishing(commands.Cog):
         try:
             balance = await coin_wallet.add(interaction.user.id, coins, reason=COIN_LOG_NOTE)
         except Exception:
-            # 🚨 코인이 안 들어갔으면 물고기를 반드시 되돌려요.
-            await fishing_store.restore(interaction.user.id, tank)
+            # 🚨 코인이 안 들어갔으면 물고기를 반드시 되돌려요. 잔돈까지 같이요.
+            await fishing_store.restore(interaction.user.id, tank, dust)
             log.exception("물고기 판매 실패 - 어항을 되돌렸어요 (user=%s)", interaction.user.id)
             await interaction.followup.send(
                 "판매 중 문제가 생겼어요. **물고기는 어항에 그대로 있어요.**", ephemeral=True)

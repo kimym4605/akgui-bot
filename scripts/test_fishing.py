@@ -394,6 +394,76 @@ check("🚨 제한시간 시계가 입질 메시지 **이후**에 시작한다",
       "시계가 먼저면 왕복 지연만큼 유저가 손해를 봐요")
 
 # ==================================================================
+print("\n[8d] 🚨 cog의 /물고기판매·/낚시 경로를 직접 돌린다")
+# ------------------------------------------------------------------
+# 🚨 2026-10-17 사고: `sell_all`이 3개(tank, coins, dust)를 돌려주게 바뀌었는데
+#    cog가 `tank, coins = ...`로 2개만 받아서 **판매가 통째로 죽었어요**
+#    (ValueError: too many values to unpack). 유저가 신고할 때까지 몰랐어요.
+#
+#    원인은 **테스트가 store만 직접 불렀기** 때문이에요. 아무리 store를 잘 검사해도
+#    호출부가 어긋나면 못 잡아요. 그래서 여기서는 **cog 함수를 실제로 호출**해요.
+class FakeResp:
+    def __init__(self): self.deferred = None
+    async def defer(self, *, ephemeral=False, thinking=False): self.deferred = ephemeral
+
+
+class FakeFollowup:
+    def __init__(self): self.sent = []
+    async def send(self, content=None, *, embed=None, file=None, view=None,
+                   ephemeral=False):
+        self.sent.append({"content": content, "embed": embed, "ephemeral": ephemeral})
+
+
+class FakeInter:
+    def __init__(self, uid):
+        self.user = type("U", (), {"id": uid, "display_name": "tester"})()
+        self.response = FakeResp()
+        self.followup = FakeFollowup()
+        self.edited = []
+
+    async def edit_original_response(self, **kw):
+        self.edited.append(kw)
+
+
+class _FakeWallet:
+    def __init__(self): self.bal = 0
+    async def add(self, uid, amount, *, reason=""):
+        self.bal += amount
+        return self.bal
+    async def get_balance(self, uid): return self.bal
+    async def spend(self, uid, amount, *, reason=""): return False
+
+
+_orig_wallet = fishing.coin_wallet
+fishing.coin_wallet = _FakeWallet()
+
+P = "cog-sell"
+fake.docs.pop(P, None)
+run(fishing_store.record_cast(P, COMMON, C_HI))     # 1.0코인
+run(fishing_store.record_cast(P, COMMON, C_HI))     # 1.0코인
+cog = fishing.Fishing(None)
+inter = FakeInter(P)
+run(cog.sell.callback(cog, inter))
+
+check("🚨 /물고기판매가 예외 없이 끝난다", bool(inter.followup.sent),
+      "아무것도 안 보냈어요 — 중간에 터진 거예요")
+if inter.followup.sent:
+    sent = inter.followup.sent[-1]
+    check("결과 임베드를 보냈다", sent["embed"] is not None)
+    check("본인에게만 보인다", sent["ephemeral"] is True)
+check("코인이 실제로 들어갔다", fishing.coin_wallet.bal == 2,
+      f"{fishing.coin_wallet.bal}코인 (기대 2)")
+check("어항이 비었다", not run(fishing_store.get(P))["tank"])
+
+# 빈 어항도 터지지 않아야 해요.
+inter2 = FakeInter("cog-empty")
+run(cog.sell.callback(cog, inter2))
+check("빈 어항 판매도 안내만 하고 끝난다",
+      bool(inter2.followup.sent) and inter2.followup.sent[0]["embed"] is None)
+
+fishing.coin_wallet = _orig_wallet
+
+# ==================================================================
 print("\n[9] 어종표 정합성")
 keys = [f["key"] for rows in FISH.values() for f in rows]
 check("어종 key가 겹치지 않는다", len(keys) == len(set(keys)), f"{len(keys)}종")
