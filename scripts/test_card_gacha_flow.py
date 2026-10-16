@@ -74,10 +74,21 @@ class FakeFollowup:
                           "view": view, "ephemeral": ephemeral})
 
 
-class FakeInteraction:
+class FakeResponse:
     def __init__(self):
+        self.deferred_ephemeral = None
+
+    async def defer(self, *, ephemeral=False, thinking=False):
+        self.deferred_ephemeral = ephemeral
+
+
+class FakeInteraction:
+    def __init__(self, channel_id=None, parent_id=None):
         self.user = FakeUser()
         self.followup = FakeFollowup()
+        self.response = FakeResponse()
+        self.channel_id = channel_id
+        self.channel = type("Ch", (), {"parent_id": parent_id})()
 
 
 def run(coro):
@@ -207,6 +218,58 @@ run(gacha.do_pull(inter))
 footer = inter.followup.sent[0]["embed"].footer.text or ""
 check("레전드 완주자에게 '확정까지'를 안 띄운다", "확정까지" not in footer, footer)
 check("대신 완주를 축하한다", "전부 모으" in footer, footer)
+
+# ==================================================================
+print("\n[9] 결과를 누구에게 보여주는가 (뽑기방이면 공개)")
+# ------------------------------------------------------------------
+# 🚨 2026-10-17에 사용자가 발견한 문제예요. 버튼 결과를 무조건 본인에게만 보여줬더니,
+#    뽑기방에서 `/카드뽑기`로 공개 뽑기를 한 뒤 **같은 메시지의 "한 번 더"를 누르면
+#    그때부터 비공개**가 됐어요. 같은 자리, 같은 행동인데 첫 판만 보이는 모순이에요.
+CARD_CH, OTHER_CH = 1560678667686912040, 1504865376960254044   # 뽑기방 / 출석체크
+os.environ["CARD_CHANNEL_ID"] = str(CARD_CH)
+
+check("뽑기방에서 누르면 공개",
+      gacha._is_card_channel(FakeInteraction(channel_id=CARD_CH)) is True)
+check("출석체크에서 누르면 비공개",
+      gacha._is_card_channel(FakeInteraction(channel_id=OTHER_CH)) is False)
+check("뽑기방 안의 스레드도 공개",
+      gacha._is_card_channel(FakeInteraction(channel_id=999, parent_id=CARD_CH)) is True)
+
+# 채널 지정이 아예 없으면 제한이 없는 상태 -> 결과도 전부 공개로 봐요.
+os.environ.pop("CARD_CHANNEL_ID")
+check("채널 지정이 없으면 공개로 본다",
+      gacha._is_card_channel(FakeInteraction(channel_id=OTHER_CH)) is True)
+os.environ["CARD_CHANNEL_ID"] = str(CARD_CH)
+
+# ⚠️ `do_pull`을 직접 부르면 **버튼의 배선은 검증이 안 돼요**(플래그를 테스트가 직접
+#    계산해 넘기게 되니까요). 그래서 진짜 `GachaButton.callback`을 호출해요 - 콜백이
+#    다시 "무조건 ephemeral=True"로 돌아가면 여기서 잡혀요.
+button = gacha.GachaButton(FakeUser.id)
+
+wallet, _ = setup(balance=100)
+inter = FakeInteraction(channel_id=CARD_CH)
+run(button.callback(inter))
+check("뽑기방 버튼 결과가 공개", inter.followup.sent[0]["ephemeral"] is False)
+check("defer도 공개로 했다", inter.response.deferred_ephemeral is False)
+
+wallet, _ = setup(balance=100)
+inter = FakeInteraction(channel_id=OTHER_CH)
+run(button.callback(inter))
+check("다른 채널 버튼 결과는 본인에게만", inter.followup.sent[0]["ephemeral"] is True)
+check("defer도 비공개로 했다", inter.response.deferred_ephemeral is True)
+
+# 🚨 실패·환불 안내는 **장소와 무관하게 늘 본인에게만** 가야 해요.
+wallet, _ = setup(balance=0)
+inter = FakeInteraction(channel_id=CARD_CH)
+run(gacha.do_pull(inter, ephemeral=False))
+check("뽑기방이어도 잔액부족 안내는 본인에게만",
+      inter.followup.sent[0]["ephemeral"] is True)
+
+wallet, _ = setup(balance=100, pull_result="none")
+inter = FakeInteraction(channel_id=CARD_CH)
+run(gacha.do_pull(inter, ephemeral=False))
+check("뽑기방이어도 환불 안내는 본인에게만",
+      inter.followup.sent[0]["ephemeral"] is True)
 
 # ==================================================================
 print("\n" + "=" * 60)

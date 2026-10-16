@@ -10,6 +10,17 @@
   - **`/출석` 응답에 🎴 버튼**을 달아요. 코인이 손에 들어오는 그 순간이 쓸 자리예요.
   - 뽑기 결과에도 "한 번 더" 버튼을 달아요(이어서 돌릴 수 있게).
 
+## 결과를 누구에게 보여주나
+
+| 어디서 | 결과 |
+|---|---|
+| `/카드뽑기` (뽑기방 전용) | **공개** |
+| 🎴 버튼을 **뽑기방**에서 | **공개** |
+| 🎴 버튼을 다른 채널(`#출석체크` 등)에서 | 본인에게만 |
+
+판단은 `_is_card_channel`이 해요. 실패·환불 안내는 **장소와 무관하게 늘 본인에게만** 보내요
+(남의 잔액 부족을 채널에 띄울 이유가 없어요).
+
 ## 수치 (2026-10-17 사용자 확정)
 
 | 항목 | 값 |
@@ -63,11 +74,40 @@ from utils.card_store import (
     PITY_DRAWS,
     PULL_PRICE,
 )
-from utils.channel_check import restrict_to_channel
+from utils.channel_check import get_allowed_channel_id, restrict_to_channel
 
 log = logging.getLogger(__name__)
 
 COIN_LOG_NOTE = "카드뽑기"
+
+
+def _is_card_channel(interaction: discord.Interaction) -> bool:
+    """지금 이 상호작용이 **뽑기방**에서 일어났는지.
+
+    ## 왜 필요한가 (2026-10-17)
+
+    🎴 버튼은 **컴포넌트라 `restrict_to_channel`이 안 걸려요.** `/출석` 응답에 붙어 있어서
+    `#출석체크`에서도 눌러지는데, 그건 일부러 그런 거예요(코인이 손에 들어온 그 자리에서
+    쓰게 하는 게 이 기능의 전제니까요).
+
+    문제는 **결과를 어디에 보여주느냐**였어요. 처음엔 무조건 본인에게만(ephemeral) 보여줬는데,
+    그러면 뽑기방에서 `/카드뽑기`로 공개 뽑기를 한 뒤 **같은 메시지의 "한 번 더" 버튼을
+    누르면 그때부터 비공개로 바뀌는** 모순이 생겼어요. 같은 자리, 같은 행동인데 첫 판만
+    보이는 거죠. 뽑기는 자랑하는 재미가 큰데 그게 통째로 죽어요.
+
+    그래서 **장소로 판단**해요 - 뽑기방이면 공개, 아니면 본인에게만.
+    `#출석체크`가 뽑기 결과로 덮이지 않으면서 뽑기방에서는 서로의 결과가 보여요.
+
+    ⚠️ 채널 지정이 아예 없으면(`/채널설정`도 `CARD_CHANNEL_ID`도 없을 때) `restrict_to_channel`이
+    "아무 데서나 허용"으로 동작해요. 그 상태에선 여기도 **전부 공개**로 봐요 - 제한이 없는데
+    결과만 숨기면 오히려 이상하니까요.
+    """
+    allowed = get_allowed_channel_id("card", "CARD_CHANNEL_ID")
+    if not allowed:
+        return True
+    # 스레드 안에서 눌렀으면 부모 채널로 판단해요(restrict_to_channel과 같은 규칙).
+    parent_id = getattr(interaction.channel, "parent_id", None)
+    return interaction.channel_id == allowed or parent_id == allowed
 
 
 def _rarest(drawn: list[dict]) -> str:
@@ -221,10 +261,10 @@ class GachaButton(
 
     async def callback(self, interaction: discord.Interaction):
         log.info("🎴 카드 뽑기 버튼: user=%s", interaction.user.id)
-        # 결과를 본인에게만 보여줘요. `/출석` 메시지에 달린 버튼이라 공개로 보내면
-        # 출석 채널이 뽑기 결과로 덮여요.
-        await interaction.response.defer(ephemeral=True)
-        await do_pull(interaction, ephemeral=True)
+        # 뽑기방에서 눌렀으면 **공개**, 다른 채널이면 나한테만 (_is_card_channel 주석 참고).
+        public = _is_card_channel(interaction)
+        await interaction.response.defer(ephemeral=not public)
+        await do_pull(interaction, ephemeral=not public)
 
 
 class GachaView(discord.ui.View):
