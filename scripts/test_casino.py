@@ -427,7 +427,9 @@ async def check_commands():
     await bot.load_extension("cogs.casino")
     group = bot.tree.get_command("도박")
     subs = {c.name: c for c in group.commands}
-    check("하위 명령 4개", sorted(subs) == sorted(["슬롯", "하이로우", "블랙잭", "현황"]), str(sorted(subs)))
+    check("하위 명령 5개",
+          sorted(subs) == sorted(["슬롯", "하이로우", "블랙잭", "현황", "한도늘리기"]),
+          str(sorted(subs)))
     for name, cmd in subs.items():
         check(f"/도박 {name} 에 체크가 붙어 있다", len(cmd.checks) >= 1, f"{len(cmd.checks)}개")
     # 성인이 아니면 실제로 거절되는지 체크 체인으로 확인
@@ -469,6 +471,54 @@ for already, expected in [(0, 5), (1, 10), (2, 15), (4, 25)]:
           f"({expected}코인)" in label, label)
 check("연장권 note가 '도박'으로 시작하지 않는다 (경제 리포트가 베팅액으로 오인해요)",
       not casino_cog.EXTEND_NOTE.startswith("도박"), casino_cog.EXTEND_NOTE)
+
+# ==================================================================
+print("\n🎲 1회 베팅 한도 연장 (2026-10-17)")
+# ------------------------------------------------------------------
+cs = casino_store
+check("기본 1회 한도는 MAX_BET", cs.bet_limit_of(0) == cs.MAX_BET, str(cs.bet_limit_of(0)))
+check("한 번 사면 BONUS만큼 는다",
+      cs.bet_limit_of(1) == cs.MAX_BET + cs.BET_EXTEND_BONUS, str(cs.bet_limit_of(1)))
+check(f"상한 {cs.BET_EXTEND_MAX}회를 넘어도 안 늘어난다",
+      cs.bet_limit_of(cs.BET_EXTEND_MAX + 5) == cs.bet_limit_of(cs.BET_EXTEND_MAX),
+      f"{cs.bet_limit_of(cs.BET_EXTEND_MAX + 5)} vs {cs.bet_limit_of(cs.BET_EXTEND_MAX)}")
+
+# 🚨 값이 **살수록 올라야** 제동이 돼요. 고정가면 지갑 두꺼운 사람이 한 번에 다 사버려요.
+prices = [cs.bet_extend_price(n) for n in range(cs.BET_EXTEND_MAX)]
+check("연장 값이 매번 오른다", all(b > a for a, b in zip(prices, prices[1:])), str(prices))
+check("누적 지출 계산이 값의 합과 같다",
+      cs.bet_extend_spent(cs.BET_EXTEND_MAX) == sum(prices),
+      f"{cs.bet_extend_spent(cs.BET_EXTEND_MAX)} vs {sum(prices)}")
+
+# ⭐ 이게 이 상품의 존재 이유예요 - **하루 총액은 안 변해요**(발행 영향 0, 순수 소각).
+check("⭐ 1회 한도를 올려도 하루 총 한도는 그대로",
+      cs.limit_of(0) == cs.DAILY_LIMIT, str(cs.limit_of(0)))
+
+# 🚨 **하루 총 한도를 넘는 1회 한도는 팔면 안 돼요.** 초과분은 하루 한도가 먼저 막아서
+#    영원히 못 쓰거든요 - 돈만 받고 혜택이 없는 상품이 돼요. 이 검사가 실제로 그 결함을
+#    잡아냈어요(기본 하루 20인데 1회는 최대 30까지 올라갔어요). cog가 구매를 막아요.
+_sellable = [n for n in range(1, cs.BET_EXTEND_MAX + 1)
+             if cs.bet_limit_of(n) <= cs.DAILY_LIMIT]
+check("기본 하루 한도(20)에서 살 수 있는 1회 연장이 최소 1번은 있다", bool(_sellable),
+      f"살 수 있는 횟수: {_sellable}")
+check("상한까지 사려면 🔓 하루 한도도 올려야 한다 (두 상품이 서로를 끌어줘요)",
+      cs.bet_limit_of(cs.BET_EXTEND_MAX) > cs.DAILY_LIMIT,
+      f"1회 최대 {cs.bet_limit_of(cs.BET_EXTEND_MAX)} vs 기본 하루 {cs.DAILY_LIMIT}")
+# 🔓를 산 사람은 그만큼 더 살 수 있어야 해요.
+check("🔓를 1번 사면 1회 한도도 그만큼 더 올릴 수 있다",
+      cs.bet_limit_of(cs.BET_EXTEND_MAX) <= cs.limit_of(1),
+      f"1회 최대 {cs.bet_limit_of(cs.BET_EXTEND_MAX)} vs 🔓1회 하루 {cs.limit_of(1)}")
+
+# 🚨 두 연장권의 note가 갈려야 어느 쪽이 팔리는지 리포트에서 구분돼요.
+check("🎲와 🔓의 note가 다르다",
+      casino_cog.BET_EXTEND_NOTE != casino_cog.EXTEND_NOTE,
+      f"{casino_cog.BET_EXTEND_NOTE} vs {casino_cog.EXTEND_NOTE}")
+check("🎲 note도 '도박'으로 시작하지 않는다",
+      not casino_cog.BET_EXTEND_NOTE.startswith("도박"), casino_cog.BET_EXTEND_NOTE)
+check("🎲 note가 🔓 note의 접두어가 아니다 (startswith 집계가 섞여요)",
+      not casino_cog.BET_EXTEND_NOTE.startswith(casino_cog.EXTEND_NOTE)
+      and not casino_cog.EXTEND_NOTE.startswith(casino_cog.BET_EXTEND_NOTE),
+      f"{casino_cog.BET_EXTEND_NOTE} / {casino_cog.EXTEND_NOTE}")
 
 print()
 if failures:

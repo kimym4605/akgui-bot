@@ -175,7 +175,8 @@ for note, count in Counter(
 print("\n  소비처가 실제로 쓰이는지:")
 for key, label in [("미션리롤", "🎲 미션 리롤권"), ("출석보호권", "🧊 출석 보호권"),
                    ("카드테마", "🎨 카드 테마"), ("칭호구매", "🏷️ 칭호"), ("도박", "🎰 도박"),
-                   ("한도연장", "🔓 도박 한도 연장권"), ("카드뽑기", "🎴 카드 뽑기")]:
+                   ("한도연장", "🔓 하루 한도 연장"), ("베팅한도연장", "🎲 1회 한도 연장"),
+                   ("카드뽑기", "🎴 카드 뽑기")]:
     rows = [l for l in spend if (l["note"] or "").startswith(key)]
     users = len({l.get("from") for l in rows})
     flag = "" if rows else "   ← 0건. 구매력 문제인지 발견 문제인지 [3]과 함께 보세요"

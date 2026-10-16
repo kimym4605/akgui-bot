@@ -50,6 +50,9 @@ EXTEND_VIEW_TIMEOUT = 120
 #    "도박한도연장"이라고 쓰면 베팅총액에 섞이고 환급과의 차액(=실제 소각)이 틀어져요.
 #    연장권은 돌아오지 않는 **순수 소각**이라 따로 잡혀야 해요.
 EXTEND_NOTE = "한도연장"
+# 🚨 🔓(하루 총액)와 🎲(1회)를 **구분**해요. 같은 note를 쓰면 경제 리포트에서 어느 쪽이
+#    팔리는지 알 수 없어요. 둘 다 "도박"으로 시작하지 않는 것도 위와 같은 이유예요.
+BET_EXTEND_NOTE = "베팅한도연장"
 
 # 🔞 성인만 쓸 수 있어요. `/채널설정`으로 도박장 채널에 묶더라도 **명령어 자체를 막지 않으면
 # 다른 채널에서 그냥 쓸 수 있어요.** 채널을 가리는 것만으로는 잠금이 안 돼요.
@@ -91,9 +94,20 @@ async def take_bet(interaction: discord.Interaction, amount: int) -> tuple[bool,
     """한도 확인 → 코인 차감까지. (성공여부, 실패 사유 문구, 한도에 막혔는지).
 
     세 번째 값이 True면 호출부가 🔓 연장권 버튼을 같이 띄워요. "코인이 부족해서" 실패한
-    경우와 구분해야 해요 - 코인이 없는 사람에게 5코인짜리 연장권을 권하면 안 되니까요."""
-    if not (MIN_BET <= amount <= MAX_BET):
-        return False, f"한 판에 걸 수 있는 건 **{MIN_BET}~{MAX_BET}코인**이에요.", False
+    경우와 구분해야 해요 - 코인이 없는 사람에게 5코인짜리 연장권을 권하면 안 되니까요.
+
+    ⚠️ 1회 한도는 **사람마다 달라요**(2026-10-17, 🎲 베팅 한도 연장). 상수 `MAX_BET`을
+    그대로 쓰면 연장권을 산 사람도 5코인에 막혀요 - 반드시 `bet_limit_today`로 읽어요."""
+    bet_limit, bet_times = await casino_store.bet_limit_today(interaction.user.id)
+    if not (MIN_BET <= amount <= bet_limit):
+        tail = ""
+        if amount > bet_limit and bet_times < casino_store.BET_EXTEND_MAX:
+            tail = (f"\n-# 🎲 한 판 한도를 늘리려면 "
+                    f"**{casino_store.bet_extend_price(bet_times)}코인** "
+                    f"(+{casino_store.BET_EXTEND_BONUS}코인 · 영구 · `/도박 한도늘리기`)")
+        return False, (
+            f"한 판에 걸 수 있는 건 **{MIN_BET}~{bet_limit}코인**이에요.{tail}"
+        ), False
 
     ok, wagered = await casino_store.try_wager(interaction.user.id, amount)
     if not ok:
@@ -448,6 +462,86 @@ class Casino(commands.Cog):
             )
 
     # ------------------------------------------------------------------
+    @group.command(name="한도늘리기",
+                   description="한 판에 걸 수 있는 금액을 코인으로 올려요. (영구)")
+    @adult_only()
+    async def extend_bet(self, interaction: discord.Interaction):
+        """🎲 **1회** 베팅 한도를 올려요. 🔓 하루 한도 연장권과는 다른 상품이에요.
+
+        ⭐ 이건 **발행에 영향이 없는 순수 소각**이에요. 하루 총액은 그대로라 걸 수 있는
+        돈의 총량이 안 늘고 한 판의 크기만 커져요. 기본 한도를 그냥 올렸다면 🔓 연장권
+        수요가 죽었을 텐데(2026-10-17 실측으로 도박 소각의 9할이 거기예요 - 연장권
+        175코인 vs 게임 순소각 19코인), 이 방식은 소각처를 **없애지 않고 하나 더** 만들어요.
+        """
+        await interaction.response.defer(ephemeral=True)
+        uid = interaction.user.id
+        bet_limit, times = await casino_store.bet_limit_today(uid)
+
+        if times >= casino_store.BET_EXTEND_MAX:
+            await interaction.followup.send(
+                f"이미 최대예요. 한 판 **{bet_limit}코인**까지 걸 수 있어요.\n"
+                f"-# 통산 {times}번 늘렸고 연장에만 "
+                f"**{casino_store.bet_extend_spent(times)}코인** 썼어요.",
+                ephemeral=True)
+            return
+
+        # 🚨 **하루 총 한도를 넘는 1회 한도는 팔지 않아요.**
+        #
+        # 한 판에 걸 수 있는 돈이 하루치보다 커지면 그 초과분은 영원히 못 써요(하루 한도가
+        # 먼저 막으니까요). 그대로 뒀다면 4·5번째 연장(40+50=90코인)을 사고도 체감이
+        # 전혀 없어서 "돈만 받고 아무것도 안 해줬다"가 돼요. 테스트가 이걸 잡았어요.
+        #
+        # 대신 🔓로 하루 한도를 먼저 올리라고 안내해요 - 두 상품이 서로를 끌어주는
+        # 구조가 돼서 소각처가 둘 다 살아요.
+        _, daily_limit = await casino_store.state_today(uid)
+        if casino_store.bet_limit_of(times + 1) > daily_limit:
+            ext_times = await casino_store.extend_count(uid)
+            await interaction.followup.send(
+                f"하루 총 한도(**{daily_limit}코인**)보다 큰 한 판 한도는 살 수 없어요.\n"
+                f"한 판을 **{casino_store.bet_limit_of(times + 1)}코인**까지 올리려면 "
+                f"하루 한도를 먼저 늘려주세요.\n"
+                f"-# 🔓 하루 한도 +{casino_store.EXTEND_BONUS}는 "
+                f"**{casino_store.extend_price(ext_times)}코인** "
+                f"(`/도박 현황`에서 한도를 다 쓰면 버튼이 떠요)",
+                ephemeral=True)
+            return
+
+        price = casino_store.bet_extend_price(times)
+
+        # 🚨 자리를 **먼저** 잡고 코인을 빼요. 반대로 하면 차감은 됐는데 증가가 실패했을 때
+        #    코인만 사라져요. 차감이 실패하면 undo로 되돌려서 공짜 연장을 막아요.
+        ok, new_limit, new_times = await casino_store.extend_bet_limit(uid)
+        if not ok:
+            await interaction.followup.send(
+                "지금은 늘릴 수 없어요. 잠시 후 다시 시도해주세요.", ephemeral=True)
+            return
+
+        if not await coin_wallet.spend(uid, price, reason=BET_EXTEND_NOTE):
+            await casino_store.undo_bet_extend(uid)
+            balance = await coin_wallet.get_balance(uid)
+            await interaction.followup.send(
+                f"악귀코인이 부족해요. **통산 {new_times}번째 연장은 {price}코인**인데 "
+                f"지금 **{balance}개** 있어요.\n"
+                f"-# 연장은 살수록 {casino_store.BET_EXTEND_BASE_PRICE}코인씩 비싸져요.",
+                ephemeral=True)
+            return
+
+        balance = await coin_wallet.get_balance(uid)
+        log.info("🎲 1회 베팅 한도 연장: %s %d코인 → 한 판 %d코인 (통산 %d번째)",
+                 uid, price, new_limit, new_times)
+
+        # 🚨 몇 번째인지·이번 값·누적 지출을 **반드시** 같이 보여줘요. 값이 오르는 게
+        #    유일한 제동이라, 사는 사람이 얼마를 쓰고 있는지 알아야 해요(🔓와 같은 규칙).
+        nxt = (f"다음 연장은 **{casino_store.bet_extend_price(new_times)}코인**이에요"
+               if new_times < casino_store.BET_EXTEND_MAX else "**이제 최대예요**")
+        await interaction.followup.send(
+            f"🎲 한 판 한도를 **{new_limit}코인**으로 늘렸어요! (영구)\n"
+            f"통산 **{new_times}번째** 연장 · 이번에 **{price}코인** · "
+            f"연장에만 쓴 코인 **{casino_store.bet_extend_spent(new_times)}개**\n"
+            f"남은 악귀코인 **{balance}개** · {nxt}\n"
+            f"-# 하루 **총** 한도는 그대로예요 — 그쪽은 🔓 로 늘려요.",
+            ephemeral=True)
+
     @group.command(name="현황", description="오늘 남은 베팅 한도와 각 게임의 환수율을 봐요.")
     @adult_only()
     async def status(self, interaction: discord.Interaction):
@@ -455,6 +549,7 @@ class Casino(commands.Cog):
         wagered, limit = await casino_store.state_today(interaction.user.id)
         balance = await coin_wallet.get_balance(interaction.user.id)
         times = await casino_store.extend_count(interaction.user.id)
+        bet_limit, bet_times = await casino_store.bet_limit_today(interaction.user.id)
 
         embed = discord.Embed(
             title="🎲 도박 현황",
@@ -463,7 +558,9 @@ class Casino(commands.Cog):
                 f"(남은 한도 **{max(0, limit - wagered)}코인**)"
                 + (f"  🔓 통산 {times}번 연장 ({casino_store.extend_spent(times)}코인)"
                    if times else "")
-                + f"\n내 악귀코인: **{balance}개** · 한 판 {MIN_BET}~{MAX_BET}코인"
+                + f"\n내 악귀코인: **{balance}개** · 한 판 **{MIN_BET}~{bet_limit}코인**"
+                + (f"  🎲 통산 {bet_times}번 연장 "
+                   f"({casino_store.bet_extend_spent(bet_times)}코인)" if bet_times else "")
             ),
             color=HOUSE_COLOR,
         )
