@@ -56,10 +56,26 @@ LABEL_H = 76             # 카드 아래 이름·등급이 들어갈 높이
 
 BG_TOP = (15, 17, 25)
 BG_BOTTOM = (26, 29, 46)
-TEXT = (255, 255, 255)
-TEXT_SUB = (139, 146, 168)
+TEXT_SUB = (139, 146, 168)   # 이미지를 못 열었을 때 쓰는 흐린 글씨
 NEW_BG = (88, 214, 141)
 NEW_TEXT = (10, 20, 14)
+
+
+def _rgb(value: int) -> tuple[int, int, int]:
+    """`0xRRGGBB` 정수를 Pillow가 쓰는 `(R, G, B)` 튜플로 바꿔요.
+
+    🚨 **이 변환을 건너뛰면 빨강과 파랑이 뒤바뀌어요.** Pillow에 정수를 그대로 넘기면
+    `0xBBGGRR`(리틀엔디언)로 읽어요. 그래서 레어 `0x3B82F6`(파랑)이 `(246,130,59)`
+    주황으로, 레전드 `0xFFD700`(황금)이 `(0,215,255)` 청록으로 나왔어요.
+
+    2026-10-17에 4등급을 한 장에 그려 **눈으로 보고서야** 발견했어요. 처음 미리보기에선
+    카드 아트에 원래 들어있는 테두리와 겹쳐 보여서 못 알아챘어요
+    (`profile_card`의 테마 색도 같은 식으로 두 번 고쳤던 전력이 있어요).
+
+    ⚠️ 디스코드 임베드(`discord.Embed(color=...)`)는 정수를 `0xRRGGBB`로 **올바로** 읽어요.
+    그래서 임베드만 보면 멀쩡해 보이고 그림만 틀려요 - 같은 상수를 쓰는데 해석이 달라요.
+    """
+    return ((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
 
 
 def _vertical_gradient(size: tuple[int, int], top: tuple, bottom: tuple):
@@ -100,7 +116,8 @@ def _render(drawn: list[dict]) -> bytes:
 
     for i, card in enumerate(drawn):
         slot_x = PAD + i * (SLOT_W + GAP)
-        color = GRADE_COLOR.get(card["grade"], (150, 150, 150))
+        # ⚠️ 반드시 _rgb를 거쳐야 해요. 정수를 그대로 넘기면 R/B가 뒤바뀌어요(_rgb 주석).
+        color = _rgb(GRADE_COLOR.get(card["grade"], 0x969696))
 
         path = CARD_DIR / f"{card['key']}.webp"
         art = None
@@ -138,7 +155,9 @@ def _render(drawn: list[dict]) -> bytes:
         # 칸보다 긴 이름은 잘라요(세 칸 폭이 고정이라 넘치면 옆 카드와 겹쳐요).
         while name and draw.textlength(name, font=name_font) > SLOT_W - 8:
             name = name[:-1]
-        draw.text((slot_x, label_y + 26), name, font=name_font, fill=TEXT)
+        # 이름도 **등급 색**으로 칠해요(2026-10-17). 전에는 전부 흰색이라 등급이 테두리와
+        # 작은 라벨에만 드러났는데, 제일 크게 보이는 글자가 색을 입으니 한눈에 구분돼요.
+        draw.text((slot_x, label_y + 26), name, font=name_font, fill=color)
 
         # NEW 배지 - 처음 얻은 카드에만. 중복은 아무 표시도 안 해요.
         if card["is_new"]:

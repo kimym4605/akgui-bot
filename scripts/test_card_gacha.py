@@ -315,6 +315,49 @@ s = card_store.summarize({k: 1 for k in BY_KEY})
 check("전부 모으면 83/83", s["owned"] == TOTAL and s["total"] == TOTAL)
 
 # ==================================================================
+print("\n[12] 등급 색이 그림에 제대로 들어가는가")
+# ------------------------------------------------------------------
+# 🚨 2026-10-17에 실제로 당한 버그예요. GRADE_COLOR는 `0xRRGGBB` 정수인데 Pillow에
+#    그대로 넘기면 **`0xBBGGRR`(리틀엔디언)로 읽어서 빨강과 파랑이 뒤바뀌어요.**
+#    레어(파랑)가 주황으로, 레전드(황금)가 청록으로 나갔는데도 카드 아트에 원래 있는
+#    테두리와 겹쳐 보여서 눈으로도 한 번 놓쳤어요. 그래서 **렌더된 픽셀을 직접** 검사해요.
+from utils import card_render  # noqa: E402
+from utils.card_store import GRADE_COLOR, GRADE_ORDER  # noqa: E402
+
+for grade, want_hex in GRADE_COLOR.items():
+    want = ((want_hex >> 16) & 0xFF, (want_hex >> 8) & 0xFF, want_hex & 0xFF)
+    check(f"{grade} _rgb 변환", card_render._rgb(want_hex) == want,
+          f"#{want_hex:06X} -> {card_render._rgb(want_hex)}")
+
+if card_render.PILLOW_AVAILABLE:
+    sample = [{"key": CARDS[g][0]["key"], "grade": g, "name": CARDS[g][0]["name"],
+               "is_new": False, "pity": False} for g in GRADE_ORDER]
+    png = card_render._render(sample)
+    from io import BytesIO  # noqa: E402
+
+    from PIL import Image  # noqa: E402
+
+    im = Image.open(BytesIO(png)).convert("RGB")
+    px = im.load()
+
+    for i, card in enumerate(sample):
+        want_hex = GRADE_COLOR[card["grade"]]
+        want = card_render._rgb(want_hex)
+        # 이 칸의 등급 라벨이 그려진 줄에서 그 색 픽셀을 찾아요.
+        x0 = card_render.PAD + i * (card_render.SLOT_W + card_render.GAP)
+        y = card_render.PAD + card_render.SLOT_H + 10 + 8   # 라벨 글자 높이 안쪽
+        hits = sum(1 for x in range(x0, x0 + card_render.SLOT_W) if px[x, y] == want)
+        check(f"{card['grade']} 라벨이 실제로 그 색", hits > 0, f"{want} 픽셀 {hits}개")
+
+        # 🚨 R/B가 뒤바뀐 색이 찍혀 있으면 즉시 잡아요(이게 실제로 났던 증상이에요).
+        swapped = (want[2], want[1], want[0])
+        if swapped != want:   # 하양·회색은 뒤바꿔도 같아서 검사 못 해요
+            bad = sum(1 for x in range(x0, x0 + card_render.SLOT_W) if px[x, y] == swapped)
+            check(f"{card['grade']} R/B가 안 뒤바뀜", bad == 0, f"뒤바뀐 색 {bad}개")
+else:
+    print("  (Pillow 없음 - 렌더 검사 건너뜀)")
+
+# ==================================================================
 print("\n[참고] 경제 시뮬레이션 (확정된 수치로 실제 기대값)")
 # ------------------------------------------------------------------
 # 사용자가 고른 수치: 10코인에 3장, 천장 30장.
