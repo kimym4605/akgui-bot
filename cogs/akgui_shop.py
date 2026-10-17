@@ -53,10 +53,14 @@ def _shop_embed(balance: int, rerolls_left: int, owned: list[str], selected: str
         color=0xFFC850,
     )
     embed.add_field(
-        name=f"🎣 낚시대 — {ROD_PRICE}코인 (하루 1개)",
+        # ⚠️ "(하루 1개)"가 붙어 있었어요. 2026-10-17 4차에 하루 제한이 풀렸는데
+        #    이 라벨만 안 고쳐져서, 실제로 10명이 88개를 산 뒤에도 "하루 1개"로 읽혔어요.
+        #    🚨 제한을 다시 넣거나 뺄 땐 이 라벨도 같이 고칠 것.
+        name=f"🎣 낚시대 — {ROD_PRICE}코인",
         value=(
             f"**{ROD_DURABILITY}번** 던질 수 있어요. 다 쓰면 부서져요.\n"
             "　└ 낚시는 낚시대가 있어야 해요 · 꽝 없이 **반드시 물고기가 나와요**\n"
+            "　└ **몇 개든** 살 수 있어요 (하루 제한 없어요)\n"
             "　└ 잡은 건 `/어항`에 쌓였다가 `/물고기판매`로 한 번에 팔려요"
         ),
         inline=False,
