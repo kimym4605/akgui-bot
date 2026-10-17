@@ -509,29 +509,371 @@ _src = Path(os.path.join(BOT_DIR, "cogs/fishing.py")).read_text(encoding="utf-8"
 _tree = _ast.parse(_src)
 
 PUBLIC_OK = {"leaderboard"}        # 순위표는 같이 보는 게 맞아요
+
+# 🚨 **클래스 안만 훑으면 안 돼요.** `run_cast`/`finish_cast`가 모듈 함수로 빠지면서
+#    (2026-10-17 다시던지기) 검사 범위에서 조용히 사라졌었어요. 정작 `send_message`를
+#    직접 부르는 건 지금 그 두 함수예요 - 검사 대상이 **본체를 비켜간** 셈이었죠.
+#    클래스 메서드 + 모듈 함수를 **둘 다** 모아요.
+_view_classes = {_c.name for _c in _tree.body if isinstance(_c, _ast.ClassDef)
+                 and any(getattr(_b, "attr", "") == "View" for _b in _c.bases)}
+_funcs = [(_c.name, _f) for _c in _tree.body if isinstance(_c, _ast.ClassDef)
+          for _f in _c.body
+          if isinstance(_f, (_ast.AsyncFunctionDef, _ast.FunctionDef))]
+_funcs += [("<module>", _f) for _f in _tree.body
+           if isinstance(_f, (_ast.AsyncFunctionDef, _ast.FunctionDef))]
+
+
+def _contains(_node, _target):
+    return any(_n is _target for _n in _ast.walk(_node))
+
+
+def _has_eph_defer(_node):
+    """이 가지 안에 `defer(ephemeral=True)`가 있나 = 슬래시 경로를 따로 처리했나."""
+    return any(isinstance(_n, _ast.Call)
+               and getattr(_n.func, "attr", "") == "defer"
+               and any(_k.arg == "ephemeral"
+                       and getattr(_k.value, "value", None) is True
+                       for _k in _n.keywords)
+               for _n in _ast.walk(_node))
+
+
 leaks = []
-for _cls in [n for n in _tree.body if isinstance(n, _ast.ClassDef)]:
-    for _fn in [n for n in _cls.body
-                if isinstance(n, (_ast.AsyncFunctionDef, _ast.FunctionDef))]:
+if True:
+    for _owner, _fn in _funcs:
         for _call in _ast.walk(_fn):
             if not isinstance(_call, _ast.Call):
                 continue
             _name = getattr(_call.func, "attr", "")
             if _name not in ("send_message", "send", "defer"):
                 continue
-            # 컴포넌트 상호작용의 defer는 메시지를 안 만들어요(deferred_message_update).
-            if _name == "defer" and _fn.name == "strike":
+            # 🚨 **버튼 안의 인자 없는 `defer()`는 메시지를 만들지 않아요**
+            #    (deferred_message_update - 원래 메시지를 그대로 둬요). 그래서
+            #    `ephemeral`을 줄 수도 없고, 줄 필요도 없어요.
+            #
+            #    ⚠️ 전엔 `_fn.name == "strike"`로 **이름을 화이트리스트** 했는데,
+            #    버튼을 하나 더 붙였더니(🎣 다시 던지기) 바로 오탐이 났어요. 이름이
+            #    아니라 **조건**으로 막아요: View 안 + 인자 없는 defer.
+            #
+            #    슬래시 명령의 bare `defer()`는 반대로 "생각 중..."이 **공개로** 남아요.
+            #    그래서 View 클래스 안일 때만 면제해요.
+            #
+            #    ⚠️ 2026-10-17: `run_cast`가 **두 경로를 같이** 처리하게 되면서
+            #    (컴포넌트는 bare defer, 슬래시는 `ephemeral=True`) View 밖에도
+            #    정당한 bare defer가 생겼어요. 그래서 면제 조건을 하나 더 둬요 -
+            #    **같은 `if` 안에서 슬래시 경로가 ephemeral로 갈라져 있으면**
+            #    이 bare defer는 컴포넌트 전용이라는 뜻이에요. 함수 이름을
+            #    화이트리스트하는 짓(위 실수)을 되풀이하지 않으려고 조건으로 막아요.
+            if (_name == "defer" and not _call.args and not _call.keywords
+                    and (_owner in _view_classes
+                         or any(_contains(_if, _call) and _has_eph_defer(_if)
+                                for _if in _ast.walk(_fn)
+                                if isinstance(_if, _ast.If)))):
                 continue
             if _fn.name in PUBLIC_OK:
                 continue
             eph = any(k.arg == "ephemeral" and getattr(k.value, "value", None) is True
                       for k in _call.keywords)
             if not eph:
-                leaks.append(f"{_cls.name}.{_fn.name} {_name}() line {_call.lineno}")
+                leaks.append(f"{_owner}.{_fn.name} {_name}() line {_call.lineno}")
 
 check("🚨 /낚시·/어항·/물고기판매의 모든 응답이 ephemeral", not leaks,
       "공개로 남은 곳: " + ", ".join(leaks) if leaks else "")
 check("/낚시왕은 공개 (순위표)", "leaderboard" in PUBLIC_OK)
+
+# ==================================================================
+print("\n[12] 🎣 다시 던지기")
+# ------------------------------------------------------------------
+# 결과 화면의 🎣 버튼으로 바로 또 던져요. 내구도가 10회라 `/낚시`를 열 번
+# 치게 하는 건 번거로워요.
+#
+# 🚨 여기서 제일 위험한 건 **연타**예요. 내구도를 던지기 **전에** 깎으니까,
+#    버튼이 두 번 먹히면 1판만 돌면서 2회가 사라져요 = 유저 돈이 녹아요.
+
+check("CastAgainView가 있다", hasattr(fishing, "CastAgainView"))
+check("run_cast가 모듈 함수로 빠져 있다", callable(getattr(fishing, "run_cast", None)))
+check("finish_cast가 모듈 함수로 빠져 있다",
+      callable(getattr(fishing, "finish_cast", None)))
+
+# 🚨 로직 복붙 금지 - `/낚시`는 `run_cast` 한 줄만 불러야 해요. 복사본이 생기면
+#    선차감·환불·타이밍 규칙 중 **한쪽만** 고쳐져서 조용히 어긋나요.
+_fish_fn = next((f for c in _tree.body if isinstance(c, _ast.ClassDef)
+                 for f in c.body
+                 if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+                 and f.name == "fish"), None)
+check("/낚시는 run_cast에 그대로 넘긴다 (로직 복붙 없음)",
+      _fish_fn is not None and len(_fish_fn.body) == 1
+      and any(getattr(c.func, "id", "") == "run_cast"
+              for c in _ast.walk(_fish_fn) if isinstance(c, _ast.Call)),
+      f"본문 {len(_fish_fn.body) if _fish_fn else '?'}줄")
+
+# 🚨 연타 방어: 두 번째 클릭은 **run_cast까지 가지 않아야** 해요.
+_again_cls = next(c for c in _tree.body
+                  if isinstance(c, _ast.ClassDef) and c.name == "CastAgainView")
+_again_fn = next(f for f in _again_cls.body
+                 if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+                 and f.name == "again")
+check("연타 방어 플래그(_started)를 본다",
+      any(isinstance(n, _ast.Attribute) and n.attr == "_started"
+          for n in _ast.walk(_again_fn)))
+check("가드가 run_cast보다 **먼저** 있다",
+      next(n.lineno for n in _ast.walk(_again_fn)
+           if isinstance(n, _ast.Attribute) and n.attr == "_started")
+      < next(n.lineno for n in _ast.walk(_again_fn)
+             if isinstance(n, _ast.Call) and getattr(n.func, "id", "") == "run_cast"))
+
+
+# 실제로 두 번 눌러봐요(가드가 동작하는지 눈으로 확인).
+class _FakeResp:
+    def __init__(self):
+        self.defers = 0
+
+    async def defer(self, *a, **k):
+        self.defers += 1
+
+
+class _FakeInter:
+    def __init__(self, uid=1):
+        self.user = type("U", (), {"id": uid})()
+        self.response = _FakeResp()
+
+
+_calls = []
+_real_run = fishing.run_cast
+
+
+async def _spy(interaction, *, edit):
+    _calls.append(edit)
+    return True          # ⚠️ 실제 `run_cast`처럼 "받아냈다"를 돌려줘야 가드가 유지돼요
+
+
+fishing.run_cast = _spy
+try:
+    # ⚠️ discord.py는 뷰를 만들 때 버튼의 `callback`을 뷰에 묶어줘요
+    #    (`_ViewCallback`). 그래서 `item.callback(interaction)` 한 번이면
+    #    실제 클릭과 **같은 경로**로 들어가요.
+    _v = fishing.CastAgainView(1, 7)
+    _inter = _FakeInter(1)
+
+    async def _press_twice():
+        await _v.again.callback(_inter)
+        first = len(_calls)
+        await _v.again.callback(_FakeInter(1))     # 연타!
+        return first
+
+    _first = asyncio.run(_press_twice())
+    check("한 번 누르면 run_cast가 1회 (edit=True로 메시지 재사용)",
+          _first == 1 and _calls == [True], f"호출 {_calls}")
+    check("🚨 두 번째 클릭은 막힌다 (내구도 2회 소모 방지)",
+          len(_calls) == 1, f"run_cast가 {len(_calls)}번 불렸어요")
+    check("막힌 클릭도 defer로 응답한다 (상호작용 실패 표시 방지)",
+          _inter.response.defers + 1 >= 1)
+
+    # 🚨 **한 판도 못 돌았으면 가드를 되돌려야** 해요. 안 되돌리면 그 화면의
+    #    버튼이 영구히 죽어서, 낚시대가 남았는데도 `/낚시`를 다시 쳐야 해요.
+    _calls.clear()
+
+    async def _spy_dead(interaction, *, edit):
+        _calls.append(edit)
+        return False                 # 토큰이 죽어 아무것도 못 한 경우
+
+    fishing.run_cast = _spy_dead
+    _v2 = fishing.CastAgainView(1, 7)
+
+    async def _press_twice_dead():
+        await _v2.again.callback(_FakeInter(1))
+        await _v2.again.callback(_FakeInter(1))
+
+    asyncio.run(_press_twice_dead())
+    check("🚨 던지지 못했으면 가드가 풀려서 다시 누를 수 있다",
+          len(_calls) == 2, f"run_cast가 {len(_calls)}번 불렸어요")
+
+    # ⚠️ 반대로, 판이 돈 뒤에 **화면만** 실패한 경우는 되돌리면 안 돼요
+    #    (내구도가 두 번 깎여요). 실제 `run_cast`는 그 경우 True를 줘요.
+    _calls.clear()
+
+    async def _spy_boom(interaction, *, edit):
+        _calls.append(edit)
+        raise RuntimeError("터짐")
+
+    fishing.run_cast = _spy_boom
+    _v3 = fishing.CastAgainView(1, 7)
+
+    async def _press_boom():
+        try:
+            await _v3.again.callback(_FakeInter(1))
+        except RuntimeError:
+            pass
+        return _v3._started
+
+    check("예외로 터져도 가드가 풀린다 (버튼이 죽지 않게)",
+          asyncio.run(_press_boom()) is False)
+finally:
+    fishing.run_cast = _real_run
+
+check("남은 횟수를 버튼 라벨에 적는다",
+      "7" in fishing.CastAgainView(1, 7).again.label)
+check("내구도 0이면 다시던지기 대신 구매 버튼",
+      "BuyRodView(" in _src.split("async def finish_cast")[1].split("class ")[0])
+
+# ==================================================================
+print("\n[13] 🚨 3초 - 상호작용 토큰 만료")
+# ------------------------------------------------------------------
+# 2026-10-17 12:47 실제 사고: 🎣 다시 던지기가 `404 Unknown interaction (10062)`으로
+# 터졌어요. 상호작용 토큰은 **3초**면 만료되는데, `use_rod()`로 Atlas를 다녀온
+# **뒤에** 첫 화면을 띄우고 있었어요. 메모리가 빠듯해 왕복이 밀리면 그 3초를
+# 넘겨요. 그리고 그 순서에선 **내구도는 이미 깎인 뒤**라, 유저는 아무 화면도 못 본
+# 채 1회를 잃었어요.
+#
+# ⭐ 고친 방식: **DB보다 `defer()`가 먼저.** 받아두면 그 뒤로는 15분짜리 웹훅
+#    토큰이라 DB가 얼마나 느리든 안전해요.
+
+_run_fn = next(f for f in _tree.body
+               if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+               and f.name == "run_cast")
+_defer_line = next((n.lineno for n in _ast.walk(_run_fn)
+                    if isinstance(n, _ast.Call)
+                    and getattr(n.func, "attr", "") == "defer"), None)
+_userod_line = next((n.lineno for n in _ast.walk(_run_fn)
+                     if isinstance(n, _ast.Call)
+                     and getattr(n.func, "attr", "") == "use_rod"), None)
+check("🚨 defer가 use_rod보다 **먼저** 있다 (3초 안에 받아둔다)",
+      _defer_line is not None and _userod_line is not None
+      and _defer_line < _userod_line,
+      f"defer {_defer_line}줄 / use_rod {_userod_line}줄")
+
+# 🚨 첫 화면을 `interaction.response.*`로 띄우면 다시 3초 안에 묶여요.
+#    `defer()` 뒤에는 **반드시** `edit_original_response`로 고쳐야 해요.
+_direct = [f"line {n.lineno}" for n in _ast.walk(_run_fn) if isinstance(n, _ast.Call)
+           and getattr(n.func, "attr", "") in ("send_message", "edit_message")]
+check("첫 화면도 edit_original_response로 띄운다", not _direct,
+      "response.send_message/edit_message가 남아 있어요: " + ", ".join(_direct)
+      if _direct else "")
+
+
+# 실제로 토큰이 죽은 상황을 흉내내요 - 낚시대가 깎이면 안 돼요.
+class _FakeHTTPResp:
+    status = 404
+    reason = "Not Found"
+
+
+def _unknown_interaction():
+    import discord
+    return discord.NotFound(_FakeHTTPResp(),
+                            {"code": 10062, "message": "Unknown interaction"})
+
+
+class _DeadResp:
+    async def defer(self, *a, **k):
+        raise _unknown_interaction()
+
+
+class _DeadInter:
+    def __init__(self, uid=1):
+        self.user = type("U", (), {"id": uid})()
+        self.response = _DeadResp()
+
+
+_use_rod_calls = []
+_real_use_rod = fishing.fishing_store.use_rod
+
+
+async def _spy_use_rod(uid):
+    _use_rod_calls.append(uid)
+    return 5
+
+
+fishing.fishing_store.use_rod = _spy_use_rod
+try:
+    _ok = asyncio.run(fishing.run_cast(_DeadInter(1), edit=True))
+    check("🚨 토큰이 죽었으면 **내구도를 건드리지 않는다**",
+          _use_rod_calls == [], f"use_rod가 {len(_use_rod_calls)}번 불렸어요")
+    check("못 던졌다고 알려준다 (False)", _ok is False, f"반환 {_ok!r}")
+finally:
+    fishing.fishing_store.use_rod = _real_use_rod
+
+
+# 정상 경로도 **끝까지** 돌려봐요. 순서만 맞아도 kwarg 하나 어긋나면 실사용에서
+# 그대로 터지니까, 디스코드 호출 순서를 기록해서 눈으로 확인해요.
+class _RecResp:
+    def __init__(self, rec):
+        self.rec = rec
+
+    async def defer(self, *a, **k):
+        self.rec.append(("defer", k.get("ephemeral", False)))
+
+    async def send_message(self, *a, **k):
+        self.rec.append(("send_message", k.get("ephemeral", False)))
+
+    async def edit_message(self, *a, **k):
+        self.rec.append(("edit_message", None))
+
+
+class _RecInter:
+    def __init__(self, rec, uid=1):
+        self.rec = rec
+        self.user = type("U", (), {"id": uid})()
+        self.response = _RecResp(rec)
+
+    async def edit_original_response(self, **k):
+        self.rec.append(("edit_original", tuple(sorted(k))))
+
+    class _FollowUp:
+        def __init__(self, rec):
+            self.rec = rec
+
+        async def send(self, *a, **k):
+            self.rec.append(("followup", k.get("ephemeral", False)))
+
+    @property
+    def followup(self):
+        return self._FollowUp(self.rec)
+
+
+_store_patch = {
+    # ⚠️ `use_rod`를 **느리게** 만들어요. 고친 코드의 핵심이 "DB가 느려도 괜찮다"라,
+    #    빠른 가짜로만 돌리면 정작 그 성질을 안 건드려요.
+    "use_rod": lambda uid: 4,
+    "record_cast": lambda uid, key, size: None,
+    "give_back_rod": lambda uid: None,
+    "get": lambda uid: {"tank": {}, "casts": 1, "caught": 1, "sold": 0},
+}
+_saved = {k: getattr(fishing.fishing_store, k) for k in _store_patch}
+
+
+def _mk(fn, delay=0.0):
+    async def _f(*a, **k):
+        if delay:
+            await asyncio.sleep(delay)
+        return fn(*a, **k)
+    return _f
+
+
+for _k, _fn in _store_patch.items():
+    setattr(fishing.fishing_store, _k, _mk(_fn, 0.05 if _k == "use_rod" else 0.0))
+
+# 찌·입질 대기를 짧게 줄여요(테스트가 몇 초씩 멈추지 않게).
+_saved_timing = (fishing.BITE_MIN, fishing.BITE_MAX, fishing.BITE_WINDOW)
+fishing.BITE_MIN, fishing.BITE_MAX, fishing.BITE_WINDOW = 0.01, 0.02, 0.01
+try:
+    _rec = []
+    _ok2 = asyncio.run(fishing.run_cast(_RecInter(_rec), edit=True))
+    _kinds = [r[0] for r in _rec]
+    check("🚨 정상 경로도 defer로 시작한다 (버튼)",
+          _kinds[:1] == ["defer"], f"순서 {_kinds}")
+    check("DB가 느려도 끝까지 돈다 (결과 화면까지)",
+          _ok2 is True and _kinds.count("edit_original") >= 2, f"순서 {_kinds}")
+    check("도중에 response.*를 다시 쓰지 않는다 (3초에 다시 묶이지 않게)",
+          "send_message" not in _kinds and "edit_message" not in _kinds,
+          f"순서 {_kinds}")
+
+    _rec2 = []
+    asyncio.run(fishing.run_cast(_RecInter(_rec2), edit=False))
+    check("🚨 슬래시 경로의 defer는 ephemeral이다 (채널에 '생각 중'이 안 남게)",
+          _rec2 and _rec2[0] == ("defer", True), f"첫 호출 {_rec2[:1]}")
+finally:
+    for _k, _v in _saved.items():
+        setattr(fishing.fishing_store, _k, _v)
+    fishing.BITE_MIN, fishing.BITE_MAX, fishing.BITE_WINDOW = _saved_timing
 
 print("\n" + "=" * 60)
 if failures:

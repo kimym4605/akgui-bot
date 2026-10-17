@@ -30,6 +30,11 @@
 1. `/낚시` -> 내구도 1 소모 + "찌를 던졌어요" + **🎣 챔질 버튼**
 2. 2~8초 뒤 메시지가 "🐟 입질이 왔어요!"로 바뀌어요
 3. 그때부터 **2.5초 안에** 버튼을 눌러야 잡혀요
+4. 결과 화면에 **🎣 다시 던지기** 버튼이 붙어요 (내구도가 남아 있으면)
+
+⭐ **한 번 던지기는 `run_cast()` 하나예요.** `/낚시`는 `edit=False`로, 다시던지기 버튼은
+`edit=True`로 불러요. 로직을 복붙하지 말고 꼭 이 함수를 쓰세요 - 선차감·환불·타이밍
+규칙이 전부 여기 들어있어서, 복사본은 반드시 한쪽만 고쳐지고 어긋나요.
 
 - 입질 전에 누르면 **성급** (놓침 → 횟수 돌려줌)
 - 늦게 누르면 **놓침** (횟수 돌려줌)
@@ -83,7 +88,7 @@ from discord.ext import commands
 from utils import coin_wallet, fish_data, fishing_store
 from utils.channel_check import restrict_to_channel
 from utils.fish_data import (
-    BY_KEY, COIN_PIECES, FISH, GRADE_ORDER, GRADES, ROD_DURABILITY, ROD_PER_DAY,
+    BY_KEY, COIN_PIECES, FISH, GRADE_ORDER, GRADES, ROD_DURABILITY,
     ROD_PRICE, pieces_of, roll_size,
 )
 
@@ -172,6 +177,244 @@ class BuyRodView(discord.ui.View):
             await interaction.followup.send(msg, ephemeral=True)
 
 
+async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> None:
+    """낚시 한 판의 결과를 보여줘요. `run_cast`가 불러요.
+
+    ⚠️ `FishingView`가 **아래에** 정의돼 있어서 타입 힌트를 따옴표로 감쌌어요.
+    그냥 쓰면 모듈을 불러올 때 `NameError`로 cog 전체가 죽어요."""
+    key = view.caught if view.result == "ok" else None
+    size = view.size if key else None
+
+    # 🚨 **놓치면 내구도를 돌려줘요** (2026-10-17 사용자 결정).
+    #
+    # 전엔 놓쳐도 1 소모였어요("미니게임이 장식이 되지 않게"). 그런데 디스코드
+    # 왕복 지연 때문에 **실력과 무관하게 놓치는 경우**가 있어서, 그 몫까지
+    # 유저가 물게 되는 건 맞지 않아요.
+    #
+    # ⭐ 경제적으로도 이쪽이 더 깔끔해요. 낚시대 1개가 **항상 10마리**를 주니
+    #    순이익이 실력과 무관하게 +0.21로 고정돼요. 전엔 못 하는 사람만 손해를
+    #    봤는데, 무제한 구매 구조에서 그건 "못하면 벌칙"이 돼요.
+    #
+    # ⚠️ 그래도 **던지기 전 선차감**은 그대로예요. 돌려주는 건 결과가 난 뒤라,
+    #    미니게임 도중에 `/낚시`를 여러 번 쳐서 한 개로 여러 판을 돌리는 건 여전히
+    #    막혀요(동시에 여러 판을 열면 그만큼 선차감되니까요).
+    if key is None:
+        await fishing_store.give_back_rod(interaction.user.id)
+        view.rod_left += 1
+
+    await fishing_store.record_cast(interaction.user.id, key, size)
+    state = await fishing_store.get(interaction.user.id)
+    total = sum(len(v) for v in state["tank"].values())
+
+    if key:
+        grade, name = BY_KEY[key]
+        g = GRADES[grade]
+        pieces = pieces_of(key, size)
+        lo, hi = fish_data.SIZE_BY_KEY[key]
+        # 📏 같은 어종 안에서 몇 %짜리인지 - "대물급 피라미"의 재미가 여기서 나와요.
+        pct = int((size - lo) / max(1, hi - lo) * 100)
+        tag = " 🏆 **최대급!**" if pct >= 90 else (" ✨ 큼직해요" if pct >= 70 else "")
+        embed = discord.Embed(
+            title=f"{g['emoji']} {grade} · {name} {size}cm{tag}",
+            description=f"판매가 **{pieces / COIN_PIECES:.1f}코인**",
+            color=g["color"],
+        )
+    else:
+        # ⚠️ 이제 **못 잡는 경우는 타이밍 실패뿐**이에요(꽝 제거, 2026-10-17 2차).
+        #    운이 아니라 내 실수라서, 사유를 분명히 알려줘요.
+        reason = {
+            "early": "너무 일찍 챘어요. 미끼만 날아갔네요.",
+            "late": "늦었어요. 물고기가 도망갔어요.",
+        }.get(view.result, "놓쳤어요.")
+        embed = discord.Embed(
+            title="💨 놓쳤어요",
+            description=reason + "\n-# 🎣 **횟수는 돌려드렸어요.** 다시 던져보세요!",
+            color=MISS_COLOR)
+
+    embed.add_field(name="어항", value=f"**{total}마리**", inline=True)
+    embed.add_field(name="🎣 낚시대",
+                    value=(f"**{view.rod_left}번** 남음" if view.rod_left
+                           else "**부서졌어요**"), inline=True)
+    embed.set_footer(
+        text=("/어항 으로 확인하고 /물고기판매 로 한 번에 팔아요" if view.rod_left
+              else f"{ROD_PRICE}코인으로 새 낚시대를 사면 이어서 던질 수 있어요"))
+
+    # 🎣 횟수가 남았으면 **바로 다시 던질 수 있게**, 없으면 **살 수 있게**.
+    #    매번 `/낚시`를 치게 하면 10회짜리 낚시대가 고역이에요.
+    next_view = (CastAgainView(interaction.user.id, view.rod_left) if view.rod_left
+                 else BuyRodView(interaction.user.id))
+    try:
+        await interaction.edit_original_response(embed=embed, view=next_view)
+    except discord.HTTPException:
+        await interaction.followup.send(embed=embed, view=next_view, ephemeral=True)
+
+
+class CastAgainView(discord.ui.View):
+    """🎣 다시 던지기 - 결과 화면에 붙어요.
+
+    낚시대가 10회라 `/낚시`를 열 번 치게 하는 건 번거로워요. 🎴 뽑기의 "한 번 더"와
+    같은 패턴이에요.
+
+    🚨 **연타 방어가 필수예요.** 내구도는 던지기 전에 깎이니까, 두 번 눌리면
+    **1판만 돌면서 2회가 사라져요.** `_started`로 한 번만 통과시켜요(봇이 단일
+    프로세스라 인스턴스 상태로 충분해요).
+
+    ⚠️ 같은 ephemeral 메시지를 **재사용**해요(`edit=True`). 새 메시지를 띄우면
+    던질 때마다 쌓여서 어느 게 지금 찌인지 알 수 없어져요."""
+
+    def __init__(self, user_id: int, rod_left: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self._started = False
+        self.again.label = f"다시 던지기 ({rod_left}번 남음)"
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+    @discord.ui.button(label="다시 던지기", emoji="🎣",
+                       style=discord.ButtonStyle.primary)
+    async def again(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._started:
+            await interaction.response.defer()
+            return
+        self._started = True
+
+        # ⚠️ 던지기가 **시작조차 못 하면** 가드를 되돌려요. 이 뷰는 화면에 그대로
+        #    남아 있는데 `_started`를 세워둔 채 두면 버튼이 **영구히 죽어서**, 유저는
+        #    낚시대가 남았는데도 `/낚시`를 다시 쳐야 해요.
+        #
+        # 🚨 되돌리는 건 "한 판도 안 돌았을 때"뿐이에요. 판이 돈 뒤에 화면만
+        #    실패한 경우까지 되돌리면 내구도가 두 번 깎여요(`run_cast`의 반환값 참고).
+        try:
+            started = await run_cast(interaction, edit=True)
+        except Exception:
+            self._started = False
+            raise
+        if not started:
+            self._started = False
+
+
+async def run_cast(interaction: discord.Interaction, *, edit: bool) -> bool:
+    """한 번 던지기. `/낚시`와 🎣 다시 던지기 버튼이 **같이** 써요.
+
+    `edit=False`면 새 메시지를 띄우고(슬래시 명령), `edit=True`면 **지금 메시지를
+    고쳐서** 찌를 다시 띄워요(버튼). 던질 때마다 새 메시지를 만들면 쌓여서
+    어느 게 지금 찌인지 알 수 없어져요.
+
+    상호작용을 받아냈으면 `True`, 토큰이 이미 죽어 아무것도 못 했으면 `False`를
+    줘요(호출한 쪽이 연타 가드를 되돌릴 수 있게).
+
+    ⚠️ 두 경로 모두 이후에는 `interaction.edit_original_response`로 같은 메시지를
+    고쳐요. 컴포넌트 상호작용에서도 그 메서드는 **버튼이 달려 있던 메시지**를 가리켜요."""
+    uid = interaction.user.id
+
+    # 🚨 **DB보다 응답이 먼저예요.** 상호작용 토큰은 **3초**면 만료돼요.
+    #
+    # 전에는 `use_rod()`로 Atlas를 다녀온 **뒤에** 첫 화면을 띄웠어요. 메모리가
+    # 빠듯해 왕복이 밀리면 그 3초를 넘겨서 `404 Unknown interaction (10062)`으로
+    # 터졌고, 하필 그 순서에선 **내구도는 이미 깎인 뒤**라 유저는 아무 화면도 못 본 채
+    # 1회를 잃었어요 (2026-10-17 12:47 실제 발생).
+    #
+    # ⭐ 먼저 `defer()`로 받아두면 그 뒤로는 **15분**짜리 웹훅 토큰을 쓰게 돼서, DB가
+    #    얼마나 느리든 안전해요. 컴포넌트의 인자 없는 `defer()`는 화면을 건드리지
+    #    않아서(`deferred_message_update`) 찌가 깜빡이지도 않아요. 슬래시 쪽은
+    #    그 타입을 쓸 수 없어서 `ephemeral=True`로 "생각 중"을 잠깐 띄웠다가
+    #    아래 `show()`가 바로 덮어써요.
+    try:
+        if edit:
+            await interaction.response.defer()
+        else:
+            await interaction.response.defer(ephemeral=True)
+    except discord.HTTPException:
+        # ⚠️ 여기서 실패하면 **내구도를 건드리기 전에** 빠져나와요. 화면을 띄울 수
+        #    없는 상황에서 낚시대만 깎는 게 제일 나쁜 결과예요.
+        log.warning("🎣 상호작용을 받지 못했어요 (user=%s edit=%s)", uid, edit)
+        return False
+
+    async def show(**kw):
+        """첫 화면을 띄워요. `defer()`로 받아둔 응답을 고쳐 쓰니 경로가 하나예요."""
+        await interaction.edit_original_response(**kw)
+
+    # 🚨 **내구도를 먼저 깎고** 시작해요. 던지고 나서 깎으면, 미니게임 도중에
+    #    여러 번 `/낚시`를 쳐서 내구도 1개로 여러 판을 돌릴 수 있어요.
+    left = await fishing_store.use_rod(uid)
+    if left is None:
+        await show(
+            content=(f"🎣 낚시대가 없어요. **{ROD_PRICE}코인**으로 하나 사면 "
+                     f"**{ROD_DURABILITY}번** 던질 수 있어요.\n"
+                     "-# 몇 개든 살 수 있지만, 평균적으로는 **본전** 정도예요."),
+            # ⚠️ 메시지를 재사용하니 이전 임베드를 **명시적으로 지워야** 해요.
+            embed=None,
+            view=BuyRodView(uid),
+        )
+        return True
+
+    view = FishingView(uid)
+    view.rod_left = left
+    embed = discord.Embed(
+        title="🎣 찌를 던졌어요",
+        description="찌를 지켜보세요... **입질이 오면 바로 챔질!**",
+        color=WAIT_COLOR,
+    )
+    embed.set_footer(text="너무 일찍 누르면 미끼만 날려요")
+    # 🚨 **본인에게만** 보여요. 한 채널에서 여러 명이 동시에 던지면 찌가 뒤섞여서
+    #    어느 게 내 건지 알 수 없고, 남의 '입질!'을 보고 눌러버리기도 해요.
+    await show(content=None, embed=embed, view=view)
+
+    # 입질까지 기다려요. 그 사이에 유저가 누르면 done이 먼저 떨어져요(= 성급).
+    try:
+        await asyncio.wait_for(view.done.wait(),
+                               timeout=random.uniform(BITE_MIN, BITE_MAX))
+    except asyncio.TimeoutError:
+        pass
+
+    if not view.done.is_set():
+        bite = discord.Embed(
+            title="🐟 입질이 왔어요!",
+            description="**지금 챔질하세요!**",
+            color=BITE_COLOR,
+        )
+        try:
+            await interaction.edit_original_response(embed=bite, view=view)
+        except discord.HTTPException:
+            log.info("입질 표시 실패 (메시지가 사라졌을 수 있어요)")
+
+        # 🚨 제한시간 시계는 **메시지를 보낸 뒤에** 시작해요.
+        #
+        # 전에는 `edit_original_response` **앞**에서 찍었는데, 그 호출이 디스코드까지
+        # 다녀오는 데 100~300ms가 걸려요. 즉 유저가 "입질!"을 보기도 전에 제한시간이
+        # 흐르기 시작해서, 체감 2.5초가 실제로는 2초 남짓이었어요. 못 잡는 게
+        # 실력이 아니라 **지연 때문**이었던 거예요(2026-10-17 사용자 신고).
+        #
+        # ⚠️ 돌아오는 길(클릭 -> 봇)은 여전히 포함돼요. 그건 클라이언트 시각을
+        #    받을 수 없어서 어쩔 수 없고, 대신 창을 넉넉히 잡아 상쇄해요.
+        view.bite_at = time.monotonic()
+        try:
+            await asyncio.wait_for(view.done.wait(), timeout=BITE_WINDOW + 1.0)
+        except asyncio.TimeoutError:
+            view.result = "late"
+            view.done.set()
+
+    view.stop()
+    # 🚨 여기서 터지면 유저는 **아무 반응도 못 봐요**(찌만 띄워놓고 끝).
+    #    2026-10-17에 "눌렀는데 봇이 반응이 없다"는 신고가 있었는데 로그가 없어서
+    #    원인 찾기가 어려웠어요. 결과 표시 실패는 반드시 흔적을 남겨요.
+    try:
+        await finish_cast(interaction, view)
+    except Exception:
+        log.exception("🎣 낚시 결과 표시 실패 (user=%s result=%s)", uid, view.result)
+        try:
+            await interaction.followup.send(
+                "결과를 보여주는 데 실패했어요. `/어항` 으로 확인해주세요.",
+                ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+    # 던지기는 끝났어요. 결과 화면을 못 띄웠더라도 **판은 돌았고 기록도 남았으니**
+    # True예요(연타 가드를 되돌리면 안 돼요 - 한 판이 두 번 돌아요).
+    return True
+
+
 class FishingView(discord.ui.View):
     """찌 하나짜리 화면. 한 사람의 한 번의 낚시에만 쓰여요.
 
@@ -241,147 +484,7 @@ class Fishing(commands.Cog):
     @app_commands.command(name="낚시", description="찌를 던져 물고기를 낚아요. (낚시대가 필요해요)")
     @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
     async def fish(self, interaction: discord.Interaction):
-        # 🚨 **내구도를 먼저 깎고** 시작해요. 던지고 나서 깎으면, 미니게임 도중에
-        #    여러 번 `/낚시`를 쳐서 내구도 1개로 여러 판을 돌릴 수 있어요.
-        left = await fishing_store.use_rod(interaction.user.id)
-        if left is None:
-            _, bought_today = await fishing_store.rod_state(interaction.user.id)
-            if bought_today:
-                msg = (f"🎣 낚시대가 부서졌어요. (하루 **{ROD_PER_DAY}개**까지만 살 수 있어요)\n"
-                       "-# 내일 다시 사서 던질 수 있어요.")
-                view = None
-            else:
-                msg = (f"🎣 낚시대가 없어요. **{ROD_PRICE}코인**으로 하나 사면 "
-                       f"**{ROD_DURABILITY}번** 던질 수 있어요.")
-                # 🚨 상점에 진열만 해두면 안 팔려요(리롤권·보호권·테마가 12일째 0건).
-                #    **막힌 바로 이 자리**에서 바로 살 수 있게 버튼을 붙여요.
-                view = BuyRodView(interaction.user.id)
-            await interaction.response.send_message(msg, view=view, ephemeral=True)
-            return
-
-        view = FishingView(interaction.user.id)
-        view.rod_left = left
-        embed = discord.Embed(
-            title="🎣 찌를 던졌어요",
-            description="찌를 지켜보세요... **입질이 오면 바로 챔질!**",
-            color=WAIT_COLOR,
-        )
-        embed.set_footer(text="너무 일찍 누르면 미끼만 날려요")
-        # 🚨 **본인에게만** 보여요. 한 채널에서 여러 명이 동시에 던지면 찌가 뒤섞여서
-        #    어느 게 내 건지 알 수 없고, 남의 '입질!'을 보고 눌러버리기도 해요.
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-        # 입질까지 기다려요. 그 사이에 유저가 누르면 done이 먼저 떨어져요(= 성급).
-        wait = random.uniform(BITE_MIN, BITE_MAX)
-        try:
-            await asyncio.wait_for(view.done.wait(), timeout=wait)
-        except asyncio.TimeoutError:
-            pass
-
-        if not view.done.is_set():
-            bite = discord.Embed(
-                title="🐟 입질이 왔어요!",
-                description="**지금 챔질하세요!**",
-                color=BITE_COLOR,
-            )
-            try:
-                await interaction.edit_original_response(embed=bite, view=view)
-            except discord.HTTPException:
-                log.info("입질 표시 실패 (메시지가 사라졌을 수 있어요)")
-
-            # 🚨 제한시간 시계는 **메시지를 보낸 뒤에** 시작해요.
-            #
-            # 전에는 `edit_original_response` **앞**에서 찍었는데, 그 호출이 디스코드까지
-            # 다녀오는 데 100~300ms가 걸려요. 즉 유저가 "입질!"을 보기도 전에 제한시간이
-            # 흐르기 시작해서, 체감 2.5초가 실제로는 2초 남짓이었어요. 못 잡는 게
-            # 실력이 아니라 **지연 때문**이었던 거예요(2026-10-17 사용자 신고).
-            #
-            # ⚠️ 돌아오는 길(클릭 -> 봇)은 여전히 포함돼요. 그건 클라이언트 시각을
-            #    받을 수 없어서 어쩔 수 없고, 대신 창을 넉넉히 잡아 상쇄해요.
-            view.bite_at = time.monotonic()
-            try:
-                await asyncio.wait_for(view.done.wait(), timeout=BITE_WINDOW + 1.0)
-            except asyncio.TimeoutError:
-                view.result = "late"
-                view.done.set()
-
-        view.stop()
-        # 🚨 여기서 터지면 유저는 **아무 반응도 못 봐요**(찌만 띄워놓고 끝).
-        #    2026-10-17에 "눌렀는데 봇이 반응이 없다"는 신고가 있었는데 로그가 없어서
-        #    원인 찾기가 어려웠어요. 결과 표시 실패는 반드시 흔적을 남겨요.
-        try:
-            await self._finish(interaction, view)
-        except Exception:
-            log.exception("🎣 낚시 결과 표시 실패 (user=%s result=%s)",
-                          interaction.user.id, view.result)
-            try:
-                await interaction.followup.send(
-                    "결과를 보여주는 데 실패했어요. `/어항` 으로 확인해주세요.",
-                    ephemeral=True)
-            except discord.HTTPException:
-                pass
-
-    async def _finish(self, interaction: discord.Interaction, view: FishingView):
-        key = view.caught if view.result == "ok" else None
-        size = view.size if key else None
-
-        # 🚨 **놓치면 내구도를 돌려줘요** (2026-10-17 사용자 결정).
-        #
-        # 전엔 놓쳐도 1 소모였어요("미니게임이 장식이 되지 않게"). 그런데 디스코드
-        # 왕복 지연 때문에 **실력과 무관하게 놓치는 경우**가 있어서, 그 몫까지
-        # 유저가 물게 되는 건 맞지 않아요.
-        #
-        # ⭐ 경제적으로도 이쪽이 더 깔끔해요. 낚시대 1개가 **항상 10마리**를 주니
-        #    순이익이 실력과 무관하게 +0.21로 고정돼요. 전엔 못 하는 사람만 손해를
-        #    봤는데, 무제한 구매 구조에서 그건 "못하면 벌칙"이 돼요.
-        #
-        # ⚠️ 그래도 **던지기 전 선차감**은 그대로예요. 돌려주는 건 결과가 난 뒤라,
-        #    미니게임 도중에 `/낚시`를 여러 번 쳐서 한 개로 여러 판을 돌리는 건 여전히
-        #    막혀요(동시에 여러 판을 열면 그만큼 선차감되니까요).
-        if key is None:
-            await fishing_store.give_back_rod(interaction.user.id)
-            view.rod_left += 1
-
-        await fishing_store.record_cast(interaction.user.id, key, size)
-        state = await fishing_store.get(interaction.user.id)
-        total = sum(len(v) for v in state["tank"].values())
-
-        if key:
-            grade, name = BY_KEY[key]
-            g = GRADES[grade]
-            pieces = pieces_of(key, size)
-            lo, hi = fish_data.SIZE_BY_KEY[key]
-            # 📏 같은 어종 안에서 몇 %짜리인지 - "대물급 피라미"의 재미가 여기서 나와요.
-            pct = int((size - lo) / max(1, hi - lo) * 100)
-            tag = " 🏆 **최대급!**" if pct >= 90 else (" ✨ 큼직해요" if pct >= 70 else "")
-            embed = discord.Embed(
-                title=f"{g['emoji']} {grade} · {name} {size}cm{tag}",
-                description=f"판매가 **{pieces / COIN_PIECES:.1f}코인**",
-                color=g["color"],
-            )
-        else:
-            # ⚠️ 이제 **못 잡는 경우는 타이밍 실패뿐**이에요(꽝 제거, 2026-10-17 2차).
-            #    운이 아니라 내 실수라서, 사유를 분명히 알려줘요.
-            reason = {
-                "early": "너무 일찍 챘어요. 미끼만 날아갔네요.",
-                "late": "늦었어요. 물고기가 도망갔어요.",
-            }.get(view.result, "놓쳤어요.")
-            embed = discord.Embed(
-                title="💨 놓쳤어요",
-                description=reason + "\n-# 🎣 **횟수는 돌려드렸어요.** 다시 던져보세요!",
-                color=MISS_COLOR)
-
-        embed.add_field(name="어항", value=f"**{total}마리**", inline=True)
-        embed.add_field(name="🎣 낚시대",
-                        value=(f"**{view.rod_left}번** 남음" if view.rod_left
-                               else "**부서졌어요**"), inline=True)
-        embed.set_footer(
-            text=("/어항 으로 확인하고 /물고기판매 로 한 번에 팔아요" if view.rod_left
-                  else f"내일 {ROD_PRICE}코인으로 새 낚시대를 살 수 있어요"))
-        try:
-            await interaction.edit_original_response(embed=embed, view=None)
-        except discord.HTTPException:
-            await interaction.followup.send(embed=embed, ephemeral=True)
+        await run_cast(interaction, edit=False)
 
     @app_commands.command(name="어항", description="낚아둔 물고기를 봐요.")
     @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
@@ -427,15 +530,14 @@ class Fishing(commands.Cog):
                           if pieces % COIN_PIECES else "")),
                 inline=True)
 
-        # 🎣 낚시대 상태를 제일 먼저 보여줘요 - "오늘 몇 번 더 던질 수 있나"가
+        # 🎣 낚시대 상태를 제일 먼저 보여줘요 - "몇 번 더 던질 수 있나"가
         #    낚시에서 제일 궁금한 정보예요.
-        left, bought_today = await fishing_store.rod_state(interaction.user.id)
-        if left:
-            rod = f"**{left}/{ROD_DURABILITY}번** 남음"
-        elif bought_today:
-            rod = "**부서졌어요** (내일 다시)"
-        else:
-            rod = f"없어요 ({ROD_PRICE}코인)"
+        #
+        # ⚠️ 전엔 "부서졌어요 (내일 다시)"를 띄웠는데, 하루 제한을 푼 뒤로는
+        #    **거짓 안내**예요. 지금은 바로 또 살 수 있어요.
+        left, _bought_today = await fishing_store.rod_state(interaction.user.id)
+        rod = (f"**{left}/{ROD_DURABILITY}번** 남음" if left
+               else f"없어요 (`/악귀상점` {ROD_PRICE}코인)")
         embed.add_field(name="🎣 낚시대", value=rod, inline=True)
 
         hit = f"{data['caught']}/{data['casts']}" if data["casts"] else "0/0"
