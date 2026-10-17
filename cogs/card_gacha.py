@@ -49,7 +49,7 @@
 | 채널 | 명령어 | 그룹 / env |
 |---|---|---|
 | `#🎴｜뽑기방` | `/카드뽑기` `/카드확률` | `card` / `CARD_CHANNEL_ID` |
-| `#🎪｜거래장터` | `/장터` `/장터등록` `/내장터` | `card_market` / `CARD_MARKET_CHANNEL_ID` |
+| `#🎪｜거래장터` | `/카드거래` `/거래함` | `card_market` / `CARD_MARKET_CHANNEL_ID` |
 | `#📖｜도감` | `/도감` | `card_dex` / `CARD_DEX_CHANNEL_ID` | 그런데 `/채널설정`이 저장하는 `data/settings.json`은
 **Fly 볼륨 위에 있어서** 배포로 못 넣어요([[project_pokemon_bot_fly_volume_shadowing]]).
 `flyctl sftp`에는 `rm`이 없어 교체도 안 되고(get/put/shell뿐), `ssh console`은 막혀 있어요.

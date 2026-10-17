@@ -18,7 +18,7 @@ from discord.ext import commands
 TARGET_COGS = ["attendance", "achievement", "team", "rank", "betting", "mission", "coin",
                "card_gacha", "card_market", "fishing"]
 NEW_COMMANDS = {"프로필", "업적", "내전전적", "주간랭킹", "내전시즌", "팀짜기", "팀보기",
-                "카드뽑기", "도감", "카드확률", "장터", "장터등록", "내장터", "낚시", "어항", "물고기판매", "낚시왕",
+                "카드뽑기", "도감", "카드확률", "카드거래", "거래함", "낚시", "어항", "물고기판매", "낚시왕",
                 "낚시확률"}
 
 failed = []

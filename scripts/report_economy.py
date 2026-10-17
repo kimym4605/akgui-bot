@@ -138,7 +138,9 @@ print(f"  내전베팅   {len(rows_of('redist')):4d}건 / {total('redist'):5d}�
       "(파리뮤추얼 = 재분배, 총량 불변이라 양쪽에서 제외)")
 # 🎪 장터·개인 송금도 유저끼리 주고받는 거라 총량이 안 바뀌어요.
 _tr = rows_of("transfer")
-_market = [l for l in _tr if (l["note"] or "").startswith("장터")]
+# 🚨 2026-10-18에 note가 `장터:` → `거래:`로 바뀌었어요(공개 장터 → 지목 거래).
+#    옛 기록이 `장터:`로 남아있어서 **둘 다** 봐야 과거 거래가 안 사라져요.
+_market = [l for l in _tr if (l["note"] or "").startswith(("장터", "거래"))]
 print(f"  송금·장터   {len(_tr):4d}건 / {total('transfer'):5d}코인   "
       f"(유저 간 이동 = 재분배 · 그중 장터 {len(_market)}건 "
       f"{sum(l['amount'] for l in _market)}코인)")

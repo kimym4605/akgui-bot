@@ -317,7 +317,7 @@ class Attendance(commands.Cog):
         app_commands.Choice(name="미션 (/미션)", value="mission"),
         app_commands.Choice(name="도박 (/도박 슬롯·하이로우·블랙잭)", value="casino"),
         app_commands.Choice(name="악귀카드 뽑기 (/카드뽑기, /카드확률)", value="card"),
-        app_commands.Choice(name="악귀카드 거래장터 (/장터, /장터등록, /내장터)", value="card_market"),
+        app_commands.Choice(name="악귀카드 거래 (/카드거래, /거래함)", value="card_market"),
         app_commands.Choice(name="악귀카드 도감 (/도감)", value="card_dex"),
         app_commands.Choice(name="🎣 낚시 (/낚시, /어항, /물고기판매, /낚시왕)", value="fishing"),
         app_commands.Choice(name="즉석생성형 통화방 명령어 (/방만들기 등)", value="room"),
