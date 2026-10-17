@@ -154,7 +154,16 @@ _watchdog_armed = False  # 로그인(READY) 전까지는 무장하지 않아요
 #    (바로 아래 스택 덤프가 같은 이유로 락 없는 fd 쓰기를 쓴다.)
 MEM_REPORT_INTERVAL = 600.0     # 10분마다 한 줄 = 하루 144줄, 추세를 보기에 충분
 MEM_WARN_MB = 48.0              # 2026-09-06 실측 idle 여유가 68MB였다
+#
+# 🚨 2026-10-17: **여유 RAM만 보면 놓친다.** 256MB 시절 3시간 20분을 관측했더니 여유는
+#    10~46MB에서 진동만 하는데(= 꽉 찬 채 평평) 스왑 여유가 434 → 368MB로 시간당 20MB씩
+#    단조로 줄고 있었다. 즉 늘어나는 상주량이 스왑으로 흘러들어가 **RAM 쪽 숫자에는 안 보였다.**
+#    512MB로 올린 뒤에는 여유가 넉넉해져 위 경고가 아예 안 뜨므로, 같은 일이 또 일어나면
+#    더더욱 안 보인다. 그래서 스왑 쪽에도 경고를 두고, 한 줄 안에 **기동 대비 증감**을 같이 적는다
+#    (한 줄만 보고도 추세를 알 수 있어야 한다 — 20줄을 눈으로 비교하다 이걸 늦게 발견했다).
+MEM_SWAP_WARN_MB = 128.0        # 스왑 512MB 중 1/4. 이 밑이면 남은 시간이 몇 시간뿐이다
 _last_mem_report = 0.0
+_first_swap_free: float | None = None   # 기동 직후 스왑 여유. 추세 비교의 기준선
 
 
 def _meminfo_mb() -> tuple[float, float] | None:
@@ -181,14 +190,24 @@ def _meminfo_mb() -> tuple[float, float] | None:
 
 def _report_memory() -> None:
     """메모리 여유를 stderr에 한 줄 남겨요. 락을 쓰지 않아요(위 주석 참고)."""
+    global _first_swap_free
     info = _meminfo_mb()
     if info is None:
         return
     avail, swap_free = info
-    mark = "🚨 여유 부족" if avail < MEM_WARN_MB else "🩺"
+    if _first_swap_free is None:
+        _first_swap_free = swap_free
+    drift = swap_free - _first_swap_free
+    if avail < MEM_WARN_MB:
+        mark = "🚨 여유 부족"
+    elif swap_free < MEM_SWAP_WARN_MB:
+        mark = "🚨 스왑 고갈"
+    else:
+        mark = "🩺"
     try:
         os.write(2, f"{mark} 메모리: 여유 {avail:.0f}MB · 스왑여유 "
-                    f"{swap_free:.0f}MB\n".encode("utf-8", "replace"))
+                    f"{swap_free:.0f}MB (기동 대비 {drift:+.0f}MB)"
+                    f"\n".encode("utf-8", "replace"))
     except OSError:
         pass
 

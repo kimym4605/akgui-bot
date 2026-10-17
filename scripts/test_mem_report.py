@@ -192,6 +192,57 @@ check("여유 40MB(<48)면 🚨가 붙는다", "🚨" in out, out.strip())
 check("숫자가 사람이 읽을 형태로 들어간다", "40MB" in out and "391MB" in out,
       out.strip())
 
+
+# ==================================================================
+print("\n[5] 🚨 스왑 추세 - RAM만 보면 놓치는 신호")
+# ------------------------------------------------------------------
+# 2026-10-17에 실제로 놓쳤던 것: 여유 RAM은 10~46MB에서 진동만 하는데(= 꽉 찬 채 평평)
+# 스왑 여유가 3시간 20분에 434 → 368MB로 단조 감소하고 있었어요. 512MB로 올린 뒤에는
+# 여유가 넉넉해 [4]의 경고가 아예 안 뜨니, 같은 일이 또 나면 더더욱 안 보여요.
+# 그래서 ① 한 줄에 기동 대비 증감이 들어가는지 ② 스왑이 마르면 🚨가 뜨는지를 못 박아요.
+
+
+def _say(fn, payload):
+    """`_report_memory()` 한 번의 stderr를 문자열로 받아와요."""
+    with _FakeOpen(payload):
+        r, w = os.pipe()
+        saved = os.dup(2)
+        os.dup2(w, 2)
+        try:
+            fn()
+        finally:
+            os.dup2(saved, 2)
+            os.close(w)
+            os.close(saved)
+            got = os.read(r, 4096).decode("utf-8", "replace")
+            os.close(r)
+    return got.strip()
+
+
+def _meminfo(avail_mb, swap_mb):
+    return (f"MemTotal:         499216 kB\nMemAvailable:{avail_mb * 1024:>12} kB\n"
+            f"SwapTotal:        524284 kB\nSwapFree:{swap_mb * 1024:>16} kB\n").encode()
+
+
+# ⚠️ `_load`는 매번 새 네임스페이스에 실행하니, 새로 부르면 기준선도 초기화돼요.
+#    같은 env로 연달아 부르면 **같은 프로세스가 계속 떠 있는 것**과 같아요.
+fresh = _load(["_report_memory"])["_report_memory"]
+first = _say(fresh, _meminfo(250, 434))
+check("기동 첫 줄은 기동 대비 +0MB", "+0MB" in first, first)
+check("여유·스왑 다 넉넉하면 🩺", first.startswith("🩺"), first)
+
+later = _say(fresh, _meminfo(250, 368))
+check("3시간 뒤 66MB 밀린 걸 한 줄에 적는다", "-66MB" in later, later)
+check("아직 128MB 위면 경고는 안 띄운다", later.startswith("🩺"), later)
+
+dry = _say(fresh, _meminfo(250, 100))
+check("스왑 여유가 128MB 밑이면 🚨 (여유 RAM은 250MB로 멀쩡)",
+      "🚨 스왑 고갈" in dry, dry)
+
+# 둘 다 나쁠 때는 더 급한 쪽(RAM)을 띄워요 - 그쪽이 먼저 OOM으로 갑니다.
+both = _say(_load(["_report_memory"])["_report_memory"], _meminfo(20, 50))
+check("여유·스왑이 다 나쁘면 RAM 쪽을 띄운다", "🚨 여유 부족" in both, both)
+
 print("\n" + "=" * 60)
 if failures:
     print(f"❌ 실패 {len(failures)}건")
