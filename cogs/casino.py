@@ -31,6 +31,7 @@ from utils import casino_games as games
 from utils import casino_store, coin_wallet
 from utils.casino_store import DAILY_LIMIT, EXTEND_BONUS, MAX_BET, MIN_BET
 from utils.channel_check import restrict_to_channel
+from utils.interaction_ack import ack
 
 log = logging.getLogger(__name__)
 
@@ -322,7 +323,13 @@ class BlackjackView(discord.ui.View):
 
         log.info("🃏 블랙잭: %s %d코인 → %d코인", self.user_id, self.bet, payout)
         if interaction is not None:
-            await interaction.response.edit_message(embed=embed, view=self)
+            # 🚨 `edit_original_response`예요. 부르는 쪽(`hit`·`stand`)이 **이미 `ack`로
+            #    받아둔** 상호작용이라 `response.*`를 다시 쓸 수 없어요.
+            #
+            #    왜 받아두나: 바로 위 `pay_out()`이 Atlas를 다녀와요. 3초를 넘기면
+            #    배당은 들어갔는데 **화면이 안 바뀌고**, `self.done`이 True라 다시
+            #    눌러도 아무 일이 없어서 **이겼는지 졌는지 영구히 못 봐요.**
+            await interaction.edit_original_response(embed=embed, view=self)
         elif self.message is not None:
             try:
                 await self.message.edit(embed=embed, view=self)
@@ -339,14 +346,25 @@ class BlackjackView(discord.ui.View):
     # 버튼이 필요 없는 '처음부터 21' 판만 성공해서 더 늦게 발견됐어요.
     @discord.ui.button(label="히트", emoji="➕", style=discord.ButtonStyle.primary)
     async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 🚨 **카드를 뽑기 전에** 받아둬요. 못 받으면 덱만 소모되고 유저는 그 카드를
+        #    영원히 못 봐요(판은 계속 돌아가는데 화면이 한 장 뒤처져요).
+        #    인자 없는 `ack`라 화면은 그대로 있어요. -> utils/interaction_ack.py
+        if not await ack(interaction):
+            return
+
         self.player.append(self.deck.pop())
         if games.hand_value(self.player) >= 21:
             await self.finish(interaction)
             return
-        await interaction.response.edit_message(embed=self.table_embed(reveal=False), view=self)
+        await interaction.edit_original_response(embed=self.table_embed(reveal=False), view=self)
 
     @discord.ui.button(label="스탠드", emoji="✋", style=discord.ButtonStyle.secondary)
     async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 🚨 `finish`가 `pay_out()`으로 Atlas를 다녀와요. 먼저 받아둬야 해요.
+        #    ⚠️ 못 받았으면 정산하지 말고 빠져나와요 - `on_timeout`이 자동 정산하니
+        #    코인이 허공에 뜨지 않아요.
+        if not await ack(interaction):
+            return
         await self.finish(interaction)
 
 

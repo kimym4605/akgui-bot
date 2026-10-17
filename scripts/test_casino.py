@@ -520,6 +520,93 @@ check("🎲 note가 🔓 note의 접두어가 아니다 (startswith 집계가 �
       and not casino_cog.EXTEND_NOTE.startswith(casino_cog.BET_EXTEND_NOTE),
       f"{casino_cog.BET_EXTEND_NOTE} / {casino_cog.EXTEND_NOTE}")
 
+# ==================================================================
+print("\n11) 🚨 3초 - 블랙잭이 배당만 넣고 화면을 못 띄우던 문제")
+# ------------------------------------------------------------------
+# `finish()`는 `pay_out()`으로 Atlas를 다녀온 **뒤에** 화면을 고쳤어요. 3초를 넘기면
+# `10062`로 터지는데, 하필 `self.done`이 이미 True라 **다시 눌러도 아무 일이 없어요**
+# → 유저는 이겼는지 졌는지 **영구히 못 봐요**(배당은 들어간 상태).
+# 그래서 `hit`·`stand`가 **맨 앞에서** `ack`로 받아둬요. -> utils/interaction_ack.py
+import ast as _ast  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+_cas_src = _Path(os.path.join(BOT_DIR, "cogs/casino.py")).read_text(encoding="utf-8")
+_cas_tree = _ast.parse(_cas_src)
+_bj = next(c for c in _cas_tree.body
+           if isinstance(c, _ast.ClassDef) and c.name == "BlackjackView")
+_bj_fns = {f.name: f for f in _bj.body
+           if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))}
+
+for _name in ("hit", "stand"):
+    _fn = _bj_fns[_name]
+    _first = sorted((n for n in _ast.walk(_fn) if isinstance(n, _ast.Await)),
+                    key=lambda n: (n.lineno, n.col_offset))[0]
+    _called = getattr(getattr(_first.value, "func", None), "id", "") or \
+        getattr(getattr(_first.value, "func", None), "attr", "")
+    check(f"🚨 {_name}의 첫 await가 ack다", _called == "ack",
+          f"{_called}():{_first.lineno}")
+
+# 🚨 ack 뒤에는 `response.*`를 다시 쓸 수 없어요. `finish`까지 같이 봐요.
+_resp_uses = [f"{_n}:{n.lineno}" for _n in ("hit", "stand", "finish")
+              for n in _ast.walk(_bj_fns[_n]) if isinstance(n, _ast.Call)
+              and getattr(getattr(n.func, "value", None), "attr", "") == "response"]
+check("🚨 ack 뒤에 response.edit_message를 안 쓴다", not _resp_uses,
+      ", ".join(_resp_uses) if _resp_uses else "edit_original_response만 씀")
+
+
+# 토큰이 죽은 상황 - **배당을 지급하면 안 돼요**(화면 없이 판이 끝나버려요).
+# ⚠️ discord.py가 버튼 콜백을 뷰에 묶어줘요(`_ViewCallback`). 그래서
+#    `view.stand(...)`가 아니라 **`view.stand.callback(interaction)`** 으로
+#    불러야 실제 클릭과 같은 경로로 들어가요(인자도 interaction 하나예요).
+class _DeadHTTP:
+    status = 404
+    reason = "Not Found"
+
+
+class _DeadResp:
+    async def defer(self, *a, **k):
+        raise discord.NotFound(_DeadHTTP(), {"code": 10062, "message": "Unknown interaction"})
+
+
+class _DeadInter:
+    type = "component"
+
+    def __init__(self, uid=1):
+        self.user = type("U", (), {"id": uid})()
+        self.response = _DeadResp()
+
+
+_payouts = []
+_real_payout = casino_cog.pay_out
+
+
+async def _spy_payout(uid, bet, multiplier):
+    _payouts.append((uid, bet, multiplier))
+    return bet, 100
+
+
+def _mk_view():
+    """손패는 10+5=15(히트할 만한 패)로 고정해요. 21이면 즉시 정산 경로로 새요."""
+    return casino_cog.BlackjackView(None, 1, 5, [7, 8, 9, 10], [10, 5], [10, 6])
+
+
+casino_cog.pay_out = _spy_payout
+try:
+    _view = _mk_view()
+    asyncio.run(_view.stand.callback(_DeadInter(1)))
+    check("🚨 토큰이 죽으면 정산하지 않는다 (타임아웃이 대신 해줘요)",
+          _payouts == [] and _view.done is False,
+          f"pay_out {len(_payouts)}번 / done={_view.done}")
+
+    # 히트도 마찬가지 - 받지 못했으면 **카드를 뽑지 않아야** 해요.
+    _v2 = _mk_view()
+    _before = len(_v2.player)
+    asyncio.run(_v2.hit.callback(_DeadInter(1)))
+    check("🚨 토큰이 죽으면 카드를 뽑지 않는다 (화면이 한 장 뒤처지지 않게)",
+          len(_v2.player) == _before, f"{_before} → {len(_v2.player)}장")
+finally:
+    casino_cog.pay_out = _real_payout
+
 print()
 if failures:
     print(f"❌ 실패 {len(failures)}건: {failures}")
