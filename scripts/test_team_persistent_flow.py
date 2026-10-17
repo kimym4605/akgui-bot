@@ -76,8 +76,12 @@ class FakeResponse:
     async def edit_message(self, **kwargs):
         self.edited.append(kwargs)
 
-    async def defer(self):
+    # ⚠️ 인자를 실제 discord.py와 같게 받아요(`defer(*, ephemeral, thinking)`).
+    #    예전엔 인자 없는 defer만 받아서, `ack(interaction, ephemeral=True)`를 쓰는
+    #    핸들러를 테스트가 TypeError로 떨궜어요.
+    async def defer(self, *, ephemeral: bool = False, thinking: bool = False):
         self.deferred = True
+        self.defer_kwargs = {"ephemeral": ephemeral, "thinking": thinking}
 
     async def send(self, content=None, **kwargs):
         """followup.send 흉내예요. `wait=True`면 메시지를 돌려줘야 해요."""
@@ -93,6 +97,13 @@ class FakeInteraction:
         self.guild = None
         self.response = FakeResponse()
         self.followup = FakeResponse()
+        self.edited_original = []    # edit_original_response로 고친 것들
+
+    async def edit_original_response(self, **kwargs):
+        """받아둔(defer한) 뒤에 화면을 고치는 길이에요. 컴포넌트에선 버튼이 달려 있던
+        메시지를 가리켜요."""
+        self.edited_original.append(kwargs)
+        return self.message
 
 
 def players_of(n):
@@ -172,13 +183,21 @@ async def main():
           (True, True))
     check("본 메시지를 고쳤음", message.edits > edits_before, True)
     check("임베드에 👑이 보임", "👑" in message.embeds[0].fields[0].value, True)
+    # 🚨 3초 토큰 — 본 메시지 편집(`_edit_main`)보다 **받아두기가 먼저**여야 해요.
+    #    안 그러면 팀장은 정해졌는데 화면만 안 뜨는 꼴이 돼요.
+    check("먼저 받아뒀음(defer)", interaction.response.deferred, True)
+    check("받아둔 뒤엔 edit_message를 안 씀", interaction.response.edited, [])
+    check("화면은 edit_original_response로 고쳤음",
+          len(interaction.edited_original) >= 1, True)
 
     print("\n🗺️ 맵")
     from cogs.team import MapPickView
     map_view = MapPickView(message, Session.load(MESSAGE_ID))
-    await map_view.on_map_chosen(FakeInteraction(OWNER, message), "어센트")
+    map_interaction = FakeInteraction(OWNER, message)
+    await map_view.on_map_chosen(map_interaction, "어센트")
     check("맵이 저장됨", Session.load(MESSAGE_ID).map_name, "어센트")
     check("제목에 맵이 붙음", "어센트" in message.embeds[0].title, True)
+    check("맵도 먼저 받아뒀음(defer)", map_interaction.response.deferred, True)
 
     print("\n🔄 다시 섞어도 맵은 남고 팀장은 지워져요")
     await press(view, "reshuffle", message=message)

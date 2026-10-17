@@ -17,6 +17,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.interaction_ack import ack
+
 MAX_POOL_SIZE = 25  # 디스코드 드롭다운(Select) 옵션 최대 개수 제한이에요.
 
 
@@ -266,17 +268,30 @@ class Scrim(commands.Cog):
         )
         view = ChallengeView(self, interaction.user, 상대팀장, interaction.channel)
 
+        # 🚨 DM 보내기(`상대팀장.send`)가 응답보다 앞에 있어요. DM 왕복이 3초를 넘기면
+        # **제안은 갔는데 명령은 실패한 것처럼** 보여요. 그 앞에서 받아둬요.
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            self.pending.discard(interaction.channel_id)   # 못 받았으면 잠금을 풀어줘요
+            return
+
         try:
             dm_message = await 상대팀장.send(embed=embed, view=view)
             view.message = dm_message
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"✅ {상대팀장.mention}님에게 DM으로 팀장 제안을 보냈어요!", ephemeral=True
             )
         except discord.Forbidden:
             # DM이 막혀있으면 어쩔 수 없이 채널에 공개로 올려요. (버튼은 여전히 상대팀장만 누를 수 있어요)
+            # ⚠️ 받아둔 응답은 비공개라서, 공개 제안은 **채널에 직접** 올려요
+            #    (`original_response`는 이제 그 비공개 응답을 가리켜요).
             embed.description += "\n\n(⚠️ DM이 막혀있어서 채널에 대신 올렸어요)"
-            await interaction.response.send_message(content=상대팀장.mention, embed=embed, view=view)
-            view.message = await interaction.original_response()
+            view.message = await interaction.channel.send(
+                content=상대팀장.mention, embed=embed, view=view
+            )
+            await interaction.followup.send(
+                f"⚠️ {상대팀장.mention}님의 DM이 막혀 있어서 이 채널에 대신 올렸어요.",
+                ephemeral=True,
+            )
 
     async def start_recruitment(self, channel: discord.abc.Messageable, captain1: discord.Member, captain2: discord.Member):
         session = ScrimSession(captain1, captain2)

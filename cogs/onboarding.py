@@ -4,6 +4,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.interaction_ack import ack
 from utils.rules_store import (
     get_rules,
     set_rules,
@@ -137,19 +138,24 @@ class FinalApprovalView(discord.ui.View):
         if not isinstance(interaction.user, discord.Member) or not _is_senior(interaction.user):
             await interaction.response.send_message("❌ 부방장/방장만 최종 승인할 수 있어요.", ephemeral=True)
             return
+        # 🚨 멤버 조회(REST)와 역할 두 번 주고받기가 응답보다 앞에 있어요. 밀리면
+        # **역할은 줬는데 화면이 안 바뀌어** 승인자가 또 누르게 돼요. 먼저 받아둬요.
+        # (위 권한 안내는 왕복이 없어서 `response.send_message` 한 방이 맞아요)
+        if not await ack(interaction):
+            return
         guild = interaction.guild
         applicant = await _resolve_member(guild, self.applicant_id)
         if applicant is None:
-            await interaction.response.send_message("⚠️ 신청자가 이미 서버를 나갔어요.", ephemeral=True)
+            await interaction.followup.send("⚠️ 신청자가 이미 서버를 나갔어요.", ephemeral=True)
             return
         try:
             member_role = await self._grant_role(guild, applicant, interaction.user)
         except discord.Forbidden:
-            await interaction.response.send_message("❌ 봇에게 역할 관리 권한이 없어요.", ephemeral=True)
+            await interaction.followup.send("❌ 봇에게 역할 관리 권한이 없어요.", ephemeral=True)
             return
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=f"🏆 {interaction.user.mention}님이 **{applicant.mention}** 님을 최종 승인했어요!", view=self
         )
         try:
@@ -163,11 +169,14 @@ class FinalApprovalView(discord.ui.View):
         if not isinstance(interaction.user, discord.Member) or not _is_senior(interaction.user):
             await interaction.response.send_message("❌ 부방장/방장만 최종 거절할 수 있어요.", ephemeral=True)
             return
+        # 🚨 멤버 조회(REST)가 응답보다 앞이에요 — 먼저 받아둬요.
+        if not await ack(interaction):
+            return
         guild = interaction.guild
         applicant = await _resolve_member(guild, self.applicant_id)
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=f"❌ {interaction.user.mention}님이 **{applicant.mention if applicant else self.applicant_id}** 님을 최종 거절했어요.",
             view=self,
         )
@@ -187,10 +196,14 @@ class RequestApprovalView(discord.ui.View):
         self.applicant_id = applicant_id
 
     async def _finalize_as_senior(self, interaction: discord.Interaction, approve: bool):
+        # 🚨 멤버 조회 + 역할 두 번이 응답보다 앞에 있어요(승인 버튼과 같은 사정).
+        #    부르는 쪽(✅/❌ 버튼)은 권한 검사만 하고 바로 넘겨서, 받아두는 건 여기가 맨 앞이에요.
+        if not await ack(interaction):
+            return
         guild = interaction.guild
         applicant = await _resolve_member(guild, self.applicant_id)
         if applicant is None:
-            await interaction.response.send_message("⚠️ 신청자가 이미 서버를 나갔어요.", ephemeral=True)
+            await interaction.followup.send("⚠️ 신청자가 이미 서버를 나갔어요.", ephemeral=True)
             return
         for child in self.children:
             child.disabled = True
@@ -203,9 +216,9 @@ class RequestApprovalView(discord.ui.View):
                 if member_role:
                     await applicant.add_roles(member_role, reason=f"{interaction.user}가 즉시 승인")
             except discord.Forbidden:
-                await interaction.response.send_message("❌ 봇에게 역할 관리 권한이 없어요.", ephemeral=True)
+                await interaction.followup.send("❌ 봇에게 역할 관리 권한이 없어요.", ephemeral=True)
                 return
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=f"🏆 {interaction.user.mention}님(부방장/방장)이 **{applicant.mention}** 님을 바로 승인했어요!",
                 view=self,
             )
@@ -214,7 +227,7 @@ class RequestApprovalView(discord.ui.View):
             except discord.Forbidden:
                 pass
         else:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=f"❌ {interaction.user.mention}님(부방장/방장)이 **{applicant.mention}** 님을 바로 거절했어요.",
                 view=self,
             )
@@ -224,13 +237,16 @@ class RequestApprovalView(discord.ui.View):
                 pass
 
     async def _recommend_as_manager(self, interaction: discord.Interaction, approve: bool):
+        # 🚨 멤버 조회(REST)가 응답보다 앞이에요 — 먼저 받아둬요.
+        if not await ack(interaction):
+            return
         guild = interaction.guild
         applicant = await _resolve_member(guild, self.applicant_id)
         action_text = "승인 추천 ✅" if approve else "거절 추천 ❌"
         senior_mentions = _mention_seniors(guild)
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=(
                 f"🔔 매니저 {interaction.user.mention}님이 **{applicant.mention if applicant else self.applicant_id}** 님을 "
                 f"**{action_text}**했어요.\n{senior_mentions} 최종 확인 부탁드려요!"
@@ -279,6 +295,11 @@ class RulesConfirmView(discord.ui.View):
             await interaction.response.send_message("⚠️ 알림 채널을 찾을 수 없어요. 관리자에게 문의해주세요.", ephemeral=True)
             return
 
+        # 🚨 관리방에 글을 올리는 왕복이 응답보다 앞에 있어요. 밀리면 **승인 요청은 갔는데
+        # 신입에게는 아무 말도 안 뜨고**, 다시 눌러서 요청이 두 번 올라가요.
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
+
         mention_text = _mention_managers(guild)
 
         embed = discord.Embed(
@@ -290,7 +311,7 @@ class RulesConfirmView(discord.ui.View):
         embed.add_field(name="유저", value=f"{member} ({member.id})")
 
         await manager_channel.send(content=mention_text, embed=embed, view=RequestApprovalView(applicant_id=member.id))
-        await interaction.response.send_message("✅ 관리진에게 확인 요청을 보냈어요. 조금만 기다려주세요!", ephemeral=True)
+        await interaction.followup.send("✅ 관리진에게 확인 요청을 보냈어요. 조금만 기다려주세요!", ephemeral=True)
 
 
 # ============================================================
@@ -305,19 +326,24 @@ class DescriptionConfirmView(discord.ui.View):
         guild = interaction.guild
         member = interaction.user
 
+        # 🚨 채널 권한을 열어주는 왕복(`set_permissions`)이 응답보다 앞에 있어요.
+        # 밀리면 **채널은 열렸는데 안내가 안 떠서** 신입이 또 누르게 돼요.
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
+
         try:
             rules_channel = await _open_channel_for(
                 guild, RULES_CHANNEL_ID, member, reason=f"{member} 설명글 확인 완료 → 규칙방 열람 허용"
             )
         except discord.Forbidden:
-            await interaction.response.send_message("❌ 봇에게 채널 권한 관리 권한이 없어요. 관리자에게 문의해주세요.", ephemeral=True)
+            await interaction.followup.send("❌ 봇에게 채널 권한 관리 권한이 없어요. 관리자에게 문의해주세요.", ephemeral=True)
             return
 
         if rules_channel is None:
-            await interaction.response.send_message("⚠️ 규칙 채널을 찾을 수 없어요. 관리자에게 문의해주세요.", ephemeral=True)
+            await interaction.followup.send("⚠️ 규칙 채널을 찾을 수 없어요. 관리자에게 문의해주세요.", ephemeral=True)
             return
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ 확인 완료! {rules_channel.mention} 채널이 열렸어요. 이제 규칙을 확인해주세요!", ephemeral=True
         )
 
@@ -334,19 +360,23 @@ class GuidanceConfirmView(discord.ui.View):
         guild = interaction.guild
         member = interaction.user
 
+        # 🚨 위 '설명 확인' 버튼과 같은 이유로 먼저 받아둬요(채널 권한 왕복이 앞에 있어요).
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
+
         try:
             description_channel = await _open_channel_for(
                 guild, DESCRIPTION_CHANNEL_ID, member, reason=f"{member} 신입유도 확인 완료 → 서버설명방 열람 허용"
             )
         except discord.Forbidden:
-            await interaction.response.send_message("❌ 봇에게 채널 권한 관리 권한이 없어요. 관리자에게 문의해주세요.", ephemeral=True)
+            await interaction.followup.send("❌ 봇에게 채널 권한 관리 권한이 없어요. 관리자에게 문의해주세요.", ephemeral=True)
             return
 
         if description_channel is None:
-            await interaction.response.send_message("⚠️ 설명 채널을 찾을 수 없어요. 관리자에게 문의해주세요.", ephemeral=True)
+            await interaction.followup.send("⚠️ 설명 채널을 찾을 수 없어요. 관리자에게 문의해주세요.", ephemeral=True)
             return
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ 확인 완료! {description_channel.mention} 채널이 열렸어요. 다음으로 서버 소개를 확인해주세요!",
             ephemeral=True,
         )
@@ -409,6 +439,12 @@ class EntryInfoModal(discord.ui.Modal, title="겜악귀 입장 정보"):
         embed.add_field(name="추천인", value=self.referrer.value, inline=True)
         embed.add_field(name="주로 하는 게임", value=self.main_game.value, inline=False)
 
+        # 🚨 입장 정보 게시 + 채널 권한 열기, 왕복이 둘이나 응답보다 앞에 있어요.
+        # 모달 제출도 3초 제한이 똑같아요 — 밀리면 **정보는 올라갔는데 신입 화면엔
+        # "앱이 응답하지 않았습니다"** 만 남아요.
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
+
         await entry_channel.send(embed=embed)
 
         try:
@@ -416,18 +452,18 @@ class EntryInfoModal(discord.ui.Modal, title="겜악귀 입장 정보"):
                 guild, DESCRIPTION_CHANNEL_ID, member, reason=f"{member} 입장 정보 제출 완료 → 서버설명방 열람 허용"
             )
         except discord.Forbidden:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ 봇에게 채널 권한 관리 권한이 없어요. 관리자에게 문의해주세요.", ephemeral=True
             )
             return
 
         if description_channel is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "⚠️ 설명 채널을 찾을 수 없어요. 관리자에게 문의해주세요.", ephemeral=True
             )
             return
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ 입장 정보가 전달됐어요! {description_channel.mention} 채널이 열렸어요. 서버 소개를 확인해주세요!",
             ephemeral=True,
         )
@@ -536,8 +572,11 @@ class Onboarding(commands.Cog):
             ),
             color=0xF1C40F,
         )
+        # 🚨 채널에 글을 올리는 왕복이 응답보다 앞이에요(아래 `/설명안내`·`/규칙안내`도 같아요).
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
         await interaction.channel.send(embed=embed, view=EntryStartView())
-        await interaction.response.send_message("✅ 입장 정보 입력 버튼을 게시했어요.", ephemeral=True)
+        await interaction.followup.send("✅ 입장 정보 입력 버튼을 게시했어요.", ephemeral=True)
 
     # ---- 서버설명방 ----
     @app_commands.command(name="설명설정", description="[관리자] 서버 설명글을 입력/수정해요.")
@@ -565,8 +604,10 @@ class Onboarding(commands.Cog):
             ),
             color=0x3498DB,
         )
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
         await interaction.channel.send(embed=embed, view=DescriptionConfirmView())
-        await interaction.response.send_message("✅ 설명글 안내 메시지를 게시했어요.", ephemeral=True)
+        await interaction.followup.send("✅ 설명글 안내 메시지를 게시했어요.", ephemeral=True)
 
     # ---- 규칙방 ----
     @app_commands.command(name="규칙설정", description="[관리자] 서버 규칙을 입력/수정해요.")
@@ -594,8 +635,10 @@ class Onboarding(commands.Cog):
             ),
             color=0x2ECC71,
         )
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
         await interaction.channel.send(embed=embed, view=RulesConfirmView())
-        await interaction.response.send_message("✅ 규칙 안내 메시지를 게시했어요.", ephemeral=True)
+        await interaction.followup.send("✅ 규칙 안내 메시지를 게시했어요.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

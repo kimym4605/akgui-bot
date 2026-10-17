@@ -13,6 +13,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils import notify_prefs
+from utils.interaction_ack import ack
 from utils.notify_prefs import NOTIFY_KINDS
 
 log = logging.getLogger(__name__)
@@ -84,13 +85,19 @@ class NotifySettingsView(discord.ui.View):
         return True
 
     async def toggle(self, interaction: discord.Interaction, key: str):
+        # 🚨 Atlas에 쓰기 전에 상호작용을 먼저 받아둬요. 저장이 3초보다 느리면
+        # (메모리 압박·네트워크) 토큰이 먼저 죽어서 "앱이 응답하지 않았습니다"만 남아요.
+        # 버튼이라 인자 없는 ack면 화면이 깜빡이지 않아요.
+        if not await ack(interaction):
+            return
+
         new_state = not self.states.get(key, True)
         try:
             await notify_prefs.set_enabled(self.user_id, key, new_state)
         except Exception:  # noqa: BLE001
             # 저장이 안 됐는데 버튼만 바뀌면 "껐는데 또 오네요"가 돼요. 화면을 그대로 두고 알려줘요.
             log.warning("알림 설정 저장 실패 (user=%s key=%s)", self.user_id, key, exc_info=True)
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "⚠️ 설정을 저장하지 못했어요. 잠시 뒤에 다시 눌러주세요.", ephemeral=True
             )
             return
@@ -99,7 +106,7 @@ class NotifySettingsView(discord.ui.View):
         for item in self.children:
             if isinstance(item, _ToggleButton):
                 item.refresh(self.states.get(item.key, True))
-        await interaction.response.edit_message(embed=_build_embed(self.states), view=self)
+        await interaction.edit_original_response(embed=_build_embed(self.states), view=self)
 
     async def on_timeout(self):
         for item in self.children:

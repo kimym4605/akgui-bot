@@ -43,6 +43,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from utils.channel_check import restrict_to_channel
+from utils.interaction_ack import ack
 from utils import (
     atomic_json,
     notify_prefs,
@@ -1611,9 +1612,14 @@ class MyShop(commands.Cog):
 
     @wishlist.command(name="목록", description="내 위시리스트를 봐요.")
     async def wishlist_list(self, interaction: discord.Interaction):
+        # 🚨 알림 설정(`notify_prefs.is_enabled`)을 Atlas에서 읽은 뒤에 화면을 띄워요.
+        # 그 왕복이 3초를 넘기면 목록이 통째로 안 뜨니까 먼저 받아둬요.
+        if not await ack(interaction, ephemeral=True):
+            return
+
         skins = wishlist_store.get_skins(interaction.user.id)
         if not skins:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "위시리스트가 비어있어요. `/위시리스트 추가` 로 원하는 스킨을 담아보세요.", ephemeral=True
             )
             return
@@ -1638,7 +1644,7 @@ class MyShop(commands.Cog):
             embed.set_footer(text="⚠️ DM이 막혀 있어서 알림을 못 보내고 있어요.")
         else:
             embed.set_footer(text=f"매일 {check_time}에 확인해서, 떴으면 DM으로 알려드려요.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @wishlist.command(name="비우기", description="위시리스트를 전부 비워요(알림도 꺼져요).")
     async def wishlist_clear(self, interaction: discord.Interaction):

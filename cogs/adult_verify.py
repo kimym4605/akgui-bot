@@ -18,6 +18,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.interaction_ack import ack
+
 KST = ZoneInfo("Asia/Seoul")
 ADULT_AGE = 19
 
@@ -81,14 +83,20 @@ class AdultApprovalView(discord.ui.View):
             await interaction.response.send_message("❌ 매니저/부방장/방장만 사용할 수 있어요.", ephemeral=True)
             return
 
+        # 🚨 멤버 조회(캐시에 없으면 REST)와 역할 부여가 응답보다 앞에 있어요.
+        # 그 왕복이 3초를 넘기면 **역할은 줬는데 화면은 안 바뀌어서**, 매니저가 다시
+        # 누르게 돼요. 먼저 받아둬요(버튼이라 깜빡임 없음).
+        if not await ack(interaction):
+            return
+
         applicant = await _resolve_member(interaction.guild, self.applicant_id)
         if applicant is None:
-            await interaction.response.send_message("⚠️ 신청자가 이미 서버를 나갔어요.", ephemeral=True)
+            await interaction.followup.send("⚠️ 신청자가 이미 서버를 나갔어요.", ephemeral=True)
             return
 
         role = _get_adult_role(interaction.guild)
         if role is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "⚠️ 성인 역할이 설정되어 있지 않아요. (.env의 ADULT_ROLE_ID를 확인해주세요)", ephemeral=True
             )
             return
@@ -96,12 +104,12 @@ class AdultApprovalView(discord.ui.View):
         try:
             await applicant.add_roles(role, reason=f"{member}가 성인 인증 승인")
         except discord.Forbidden:
-            await interaction.response.send_message("❌ 봇에게 역할 관리 권한이 없어요.", ephemeral=True)
+            await interaction.followup.send("❌ 봇에게 역할 관리 권한이 없어요.", ephemeral=True)
             return
 
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=f"✅ {member.mention}님이 **{applicant.mention}** 님의 성인 인증을 승인했어요! (**{role.name}** 역할 부여됨)",
             view=self,
         )
@@ -117,10 +125,14 @@ class AdultApprovalView(discord.ui.View):
             await interaction.response.send_message("❌ 매니저/부방장/방장만 사용할 수 있어요.", ephemeral=True)
             return
 
+        # 🚨 멤버 조회가 응답보다 앞에 있어요(위 승인 버튼과 같은 이유).
+        if not await ack(interaction):
+            return
+
         applicant = await _resolve_member(interaction.guild, self.applicant_id)
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=f"❌ {member.mention}님이 **{applicant.mention if applicant else self.applicant_id}** 님의 성인 인증을 거절했어요.",
             view=self,
         )
@@ -198,12 +210,17 @@ class AdultVerifyModal(discord.ui.Modal, title="성인 인증"):
         mention_roles = [interaction.guild.get_role(rid) for rid in (MANAGER_ROLE_IDS + SENIOR_ROLE_IDS)]
         mention_text = " ".join(r.mention for r in mention_roles if r) or "매니저"
 
+        # 🚨 여기서부터 왕복이 생겨요(관리방에 글 올리기). 위 안내들은 DB도 안 치고 바로
+        # 답하는 자리라 `response.send_message` 한 방이 맞고, **받아두는 건 여기서** 해요.
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
+
         await manager_channel.send(
             content=mention_text,
             embed=embed,
             view=AdultApprovalView(applicant_id=member.id),
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "✅ 1차 확인(만 나이)을 통과했어요! 관리진에게 최종 승인을 요청했으니 잠시만 기다려주세요.", ephemeral=True
         )
 

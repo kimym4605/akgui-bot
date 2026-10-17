@@ -62,6 +62,7 @@ from utils import (
     tier_roles,
     valorant_maps,
 )
+from utils.interaction_ack import ack
 from utils.staff_check import restrict_to_staff
 
 log = logging.getLogger(__name__)
@@ -473,16 +474,22 @@ class ManualAdjustView(discord.ui.View):
 
     @discord.ui.button(label="적용", emoji="✅", style=discord.ButtonStyle.success, row=2)
     async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 🚨 본 메시지를 고치는 `_edit_main`이 먼저 있어서, 그게 밀리면(채널 편집 한도·
+        # 네트워크) 3초 토큰이 먼저 죽어요. **편성은 바뀌었는데 화면만 안 뜨는** 꼴이라
+        # 받아두는 걸 맨 앞에 둬요. 버튼이라 인자 없는 ack면 깜빡이지 않아요.
+        if not await ack(interaction):
+            return
+
         # ⚠️ 저장소에서 **다시 읽어요.** 이 창을 열어둔 사이에 다시 섞기를 눌렀을 수도 있어서,
         # 창을 열 때의 명단으로 덮어쓰면 화면과 기록이 어긋나요.
         session = Session.load(self._message.id)
         if session is None:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="이 팀짜기 기록이 없어요. `/팀짜기`를 새로 써주세요.", view=None
             )
             return
         if session.reported:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="이 경기는 이미 결과가 기록돼서 편성을 바꿀 수 없어요.", view=None
             )
             return
@@ -492,14 +499,14 @@ class ManualAdjustView(discord.ui.View):
         b_out = _pick(team_b, self._b_select.values)
 
         if a_out is None and b_out is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "바꿀 사람을 한 명 이상 골라주세요.", ephemeral=True
             )
             return
 
         new_a, new_b = swap_players(team_a, team_b, a_out, b_out)
         if not new_a or not new_b:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "한쪽 팀이 비어버려요. 맞교환으로 바꾸거나, `/팀짜기`를 새로 써주세요.",
                 ephemeral=True,
             )
@@ -520,7 +527,7 @@ class ManualAdjustView(discord.ui.View):
             summary = f"🔀 **{a_out.label}** 를 🅱️ B팀으로 옮겼어요."
         else:
             summary = f"🔀 **{b_out.label}** 를 🅰️ A팀으로 옮겼어요."
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=f"{summary} (실력 차이 약 {diff:.2f}단계)\n"
                     "-# 더 바꾸려면 위 메시지에서 🔀 직접 조정을 다시 눌러주세요.",
             view=None,
@@ -597,10 +604,12 @@ class CaptainPickView(discord.ui.View):
         self.add_item(self._b_select)
 
     async def _fresh(self, interaction: discord.Interaction) -> Session | None:
-        """저장소에서 다시 읽어요(창을 열어둔 사이에 편성이 바뀌었을 수 있어요)."""
+        """저장소에서 다시 읽어요(창을 열어둔 사이에 편성이 바뀌었을 수 있어요).
+
+        ⚠️ 부르는 쪽이 **이미 `ack`로 받아둔 뒤**라서 `edit_original_response`를 써요."""
         session = Session.load(self._message.id)
         if session is None:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="이 팀짜기 기록이 없어요. `/팀짜기`를 새로 써주세요.", view=None
             )
         return session
@@ -612,13 +621,17 @@ class CaptainPickView(discord.ui.View):
 
     @discord.ui.button(label="적용", emoji="✅", style=discord.ButtonStyle.success, row=2)
     async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 🚨 `_apply`가 본 메시지를 먼저 고쳐요(`_edit_main`). 그 왕복이 3초를 넘기면
+        # **팀장은 정해졌는데 화면만 안 뜨는** 꼴이 돼요. 그래서 맨 앞에서 받아둬요.
+        if not await ack(interaction):
+            return
         session = await self._fresh(interaction)
         if session is None:
             return
         a_pick = _pick(session.team_a, self._a_select.values)
         b_pick = _pick(session.team_b, self._b_select.values)
         if a_pick is None and b_pick is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "팀장으로 세울 사람을 한 명 이상 골라주세요. "
                 "(다 비우려면 **👑 팀장 해제**를 눌러주세요)",
                 ephemeral=True,
@@ -637,12 +650,14 @@ class CaptainPickView(discord.ui.View):
             named.append(f"🅰️ A팀 **{a_pick.label}**")
         if b_pick:
             named.append(f"🅱️ B팀 **{b_pick.label}**")
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content="👑 팀장을 정했어요 — " + " · ".join(named), view=None
         )
 
     @discord.ui.button(label="무작위로 뽑기", emoji="🎲", style=discord.ButtonStyle.primary, row=2)
     async def roll(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ack(interaction):
+            return
         session = await self._fresh(interaction)
         if session is None:
             return
@@ -653,7 +668,7 @@ class CaptainPickView(discord.ui.View):
             found = next((p for p in team if p.key == captain_id), None)
             return f"**{found.label}**" if found else "(없음)"
 
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=(
                 f"🎲 팀장을 뽑았어요 — 🅰️ A팀 {name_of(session.team_a, captains[0])} · "
                 f"🅱️ B팀 {name_of(session.team_b, captains[1])}"
@@ -663,11 +678,13 @@ class CaptainPickView(discord.ui.View):
 
     @discord.ui.button(label="팀장 해제", emoji="👑", style=discord.ButtonStyle.secondary, row=3)
     async def clear(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ack(interaction):
+            return
         session = await self._fresh(interaction)
         if session is None:
             return
         await self._apply(session, (None, None))
-        await interaction.response.edit_message(content="👑 팀장을 없앴어요.", view=None)
+        await interaction.edit_original_response(content="👑 팀장을 없앴어요.", view=None)
 
 
 class _MapSelect(discord.ui.Select):
@@ -696,16 +713,19 @@ class MapPickView(discord.ui.View):
         self.add_item(_MapSelect(session.map_name))
 
     async def _set_map(self, interaction: discord.Interaction, name: str | None, text: str):
+        # 🚨 `_edit_main`(본 메시지 편집)이 응답보다 앞에 있어요. 받아두고 나서 고쳐요.
+        if not await ack(interaction):
+            return
         session = Session.load(self._message.id)
         if session is None:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="이 팀짜기 기록이 없어요. `/팀짜기`를 새로 써주세요.", view=None
             )
             return
         session.map_name = name
         session.save()
         await _edit_main(self._message, session)
-        await interaction.response.edit_message(content=text, view=None)
+        await interaction.edit_original_response(content=text, view=None)
 
     async def on_map_chosen(self, interaction: discord.Interaction, name: str):
         await self._set_map(
@@ -745,14 +765,17 @@ class MatchMapView(discord.ui.View):
         return False
 
     async def on_map_chosen(self, interaction: discord.Interaction, name: str):
+        # 🚨 Atlas 쓰기(`set_match_map`)가 응답보다 앞에 있어요 — 먼저 받아둬요.
+        if not await ack(interaction):
+            return
         saved = await scrim_record_store.set_match_map(self._match_id, name)
         if not saved:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "그 경기를 못 찾아서 맵을 기록하지 못했어요.", ephemeral=True
             )
             return
         self.stop()
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=f"{self._summary}\n\n🗺️ 맵: **{name}** 으로 기록했어요.", view=None
         )
 
@@ -1012,14 +1035,19 @@ class TeamSplitView(discord.ui.View):
         베팅 기능이 `/베팅개설`→`/베팅`→`/베팅마감`→`/베팅결과` 네 단계라 아무도 안 썼어요.
         여기 붙여서 **내전 흐름 안에서 자연스럽게 보이게** 했어요.
         """
+        # 🚨 베팅 개설(`bet_store.create`)까지 Atlas를 두 번 다녀온 **뒤에** 화면을 띄워요.
+        # 그 사이 3초를 넘기면 **베팅은 열렸는데 패널이 안 뜨는** 꼴이 돼요. 먼저 받아둬요.
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
+
         session = Session.load(interaction.message.id) if interaction.message else None
         if session is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "이 팀짜기 기록이 없어요. `/팀짜기`를 새로 써주세요.", ephemeral=True
             )
             return
         if session.reported:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "이미 결과가 나온 경기예요.", ephemeral=True
             )
             return
@@ -1037,14 +1065,14 @@ class TeamSplitView(discord.ui.View):
                 source_message_id=interaction.message.id,
             )
             if doc is None:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "이 채널에 이미 다른 베팅이 진행 중이에요.", ephemeral=True
                 )
                 return
             log.info("🎲 팀짜기에서 베팅 개설: message=%s", interaction.message.id)
 
         if doc["status"] != bet_store.STATUS_OPEN:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "베팅이 이미 마감됐어요.", ephemeral=True
             )
             return
@@ -1055,7 +1083,7 @@ class TeamSplitView(discord.ui.View):
             f"\n지금 **{bet_store.team_name(doc, my_team)}**에 {my_total}코인 걸어둔 상태예요."
             if my_team else ""
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"🎲 **어느 팀에 거시겠어요?**\n"
             f"판돈 — 🅰️ A팀 **{t1}코인** · 🅱️ B팀 **{t2}코인**\n"
             f"진 쪽 판돈을 이긴 쪽이 건 비율대로 나눠 가져요. "

@@ -189,6 +189,29 @@ async def main():
 
     await bot.close()
 
+    # ── 🚨 3초 토큰 전수 검사 ────────────────────────────────────────
+    # 상호작용 핸들러에서 **첫 응답보다 앞에 왕복(DB·네트워크)이 있으면** 토큰이 죽어서
+    # "일은 벌어졌는데 화면만 안 뜨는" 사고가 나요. 이름 목록으로는 또 빠뜨리니까
+    # 배포 전 관문인 이 테스트에 전수 스캔을 묶어둬요(판정 규칙은 그 스크립트 머리말에).
+    print("\n3초 토큰 (첫 응답보다 앞에 왕복이 있는 핸들러):")
+    import importlib.util
+    _scan_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "scan_interaction_latency.py")
+    _spec = importlib.util.spec_from_file_location("scan_interaction_latency", _scan_path)
+    _scan = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_scan)
+    _findings = []
+    for _path in sorted(_scan.COGS.glob("*.py")):
+        _found, _ = _scan.scan_file(_path)
+        _findings.extend(_found)
+    if _findings:
+        for line in _findings:
+            print(f"  🚨 {line}")
+        failed.append(f"3초 토큰 위험 {len(_findings)}곳 "
+                      "(`python scripts/scan_interaction_latency.py`로 자세히)")
+    else:
+        print("  ✅ 걸린 핸들러 없음")
+
     print("\n" + "=" * 50)
     if failed:
         print("❌ 실패:", ", ".join(failed))
