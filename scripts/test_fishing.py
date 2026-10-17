@@ -7,7 +7,7 @@
   1) 꽝 확률이 설정(MISS_RATE)과 맞는다
   2) 잡혔을 때 등급 분포가 가중치와 맞는다
   3) 1회 기댓값이 계산식과 실측이 일치한다 (숫자를 바꾸면 여기서 드러나요)
-  4) 🚨 발행량 시뮬레이션 - 하루 N번 던지면 얼마가 생기나
+  4) 🚨 발행량 - 낚시대 1개당 순이익이 설계값과 같나 (5차부터 상한이 없어요)
   5) 어항에 담기·총액 계산
   6) 🚨 판매는 **비우면서 받아오기**라 그 사이 낚은 물고기가 증발하지 않는다
   7) 판매 실패 시 어항이 되돌아온다
@@ -27,8 +27,8 @@ os.environ["MONGODB_DB_NAME"] = "agwi_fish_test"
 
 from utils import fish_data, fishing_store  # noqa: E402
 from utils.fish_data import (  # noqa: E402
-    BY_KEY, COIN_PIECES, FISH, GRADES, ROD_DURABILITY, ROD_PER_DAY, ROD_PRICE,
-    SIZE_BY_KEY, pieces_of, roll_size,
+    BY_KEY, COIN_PIECES, FISH, GRADE_ORDER, GRADES, ROD_DURABILITY, ROD_PER_DAY,
+    ROD_PRICE, SIZE_BY_KEY, pieces_of, roll_size,
 )
 
 failures = []
@@ -71,28 +71,39 @@ check("기댓값 계산식과 실측이 일치", abs(measured - formula) < 0.05,
       f"계산 {formula:.3f} vs 실측 {measured:.3f} 코인/회")
 
 # ==================================================================
-print("\n[4] 🚨 발행량 — 순이익 ≈ 0이 상한을 대신해요")
+print("\n[4] 🚨 발행량 — 상한이 없어요 (5차)")
 day_gross = measured * ROD_DURABILITY
 net = day_gross - ROD_PRICE
 print(f"  1회 평균 {measured:.2f}코인 · 낚시대 {ROD_PRICE}코인에 {ROD_DURABILITY}회")
 print(f"  낚시대 1개: 수입 {day_gross:.1f} − 값 {ROD_PRICE} = 순이익 {net:+.2f}코인")
-print(f"  시간당 5개를 써도 {net * 5:+.1f}코인 (무제한이지만 안전)")
+print(f"  9명이 하루 1개씩 → {net * 9:+.0f}코인/일 · 한 명이 8개 사면 {net * 8:+.0f}코인")
 print("  -# 참고: 2026-10-17 서버 전체 일일 발행 27~52코인, 출석은 1인 3~5코인")
 
-# 🚨 **이게 지금 유일한 발행 안전장치예요.**
+# 🚨 **4차의 안전장치("순이익 ≈ 0")가 5차에서 없어졌어요.**
 #
-# 하루 구매 제한을 풀었으니(2026-10-17 4차) 상한은 "시간"뿐이에요. 1개당 순이익이
-# 양수로 커지면 **시간만 쓰면 무한 발행**이 돼요. 제한이 있던 시절엔 +8.8이어도
-# 하루 10회로 막혀 있었지만 지금은 아니에요.
-check("🚨 낚시대 1개당 순이익이 0 근처다 (무제한이라 필수)",
-      -0.5 <= net <= 1.0,
-      f"{net:+.2f}코인 — 양수로 키우려면 하루 제한을 되살려야 해요")
-check("그래도 아주 조금은 남는다 (0이면 절반이 손해라 아무도 안 해요)",
-      net > 0, f"{net:+.2f}코인")
-check("시간당(5개)으로도 안전하다",
-      (net) * 5 <= 5, f"시간당 {net * 5:+.1f}코인")
-check("낚시대값이 하루 총수입보다 싸다 (아니면 아무도 안 사요)",
+# 사용자가 "가격이 짜다"고 해서 일반 0.5~1.0 -> 0.8~1.5, 희귀 1.5~3.0 -> 2.0~3.8으로
+# 올렸어요. 발행 증가를 **숫자를 보고 수용한 결정**이에요(2026-10-17 5차).
+#
+# ⭐ 그래서 이 테스트의 성격이 바뀌었어요. **"0 근처인지"를 재는 상한 가드가 아니라,
+#    "의도한 값에서 벗어났는지"를 보는 회귀 가드예요.** 가드를 아예 지우면 발행량이
+#    다음에 조용히 또 커져도 아무도 모르니까요.
+#
+# ⚠️ 이 값을 바꿀 땐 숫자를 같이 고치고, **커밋 메시지에 왜 바꿨는지 남겨주세요.**
+EXPECTED_NET = 4.13          # 5차 설계값 (일반 8~15 · 희귀 20~38 · 낚시대 10코인)
+check(f"🚨 낚시대 1개당 순이익이 설계값({EXPECTED_NET:+.2f})과 같다",
+      abs(net - EXPECTED_NET) < 0.15,
+      f"{net:+.2f}코인 — 의도한 변경이면 EXPECTED_NET을 같이 고쳐주세요")
+check("낚시가 '벌이'가 된다 (4차의 본전 구조에서 벗어났는지)",
+      net > 2.0, f"{net:+.2f}코인")
+check("낚시대값이 총수입보다 싸다 (아니면 아무도 안 사요)",
       ROD_PRICE < day_gross, f"{ROD_PRICE} vs {day_gross:.1f}")
+
+# 🚨 상한이 없다는 걸 **테스트가 알고 있게** 해둬요. 누가 `ROD_PER_DAY`를 되살리면
+#    여기서 눈에 띄고, 그때는 발행 걱정 없이 순이익을 더 키울 수 있어요.
+print(f"  ⚠️ 하루 구매 제한: {fish_data.ROD_PER_DAY or '무제한'} "
+      f"→ 발행 총량 상한 {'있음' if fish_data.ROD_PER_DAY else '**없음**'}")
+if fish_data.ROD_PER_DAY:
+    print(f"     1인 하루 최대 발행 {net * fish_data.ROD_PER_DAY:+.1f}코인")
 
 # 🐋 전설이 너무 자주 뜨면 '전설'이라는 말이 무색해져요(꽝을 없애니 22%까지 올랐었어요).
 lw = GRADES["전설"]["weight"] / sum(g["weight"] for g in GRADES.values())
@@ -227,8 +238,22 @@ check("최고 기록이 전설로 갱신", (data.get("best") or {}).get("key") =
 # 📏 같은 어종이라도 **치수에 따라 값이 달라야** 해요 (사용자 요청의 핵심).
 lo_p, hi_p = pieces_of(COMMON, C_LO), pieces_of(COMMON, C_HI)
 check("작은 놈보다 큰 놈이 비싸다", hi_p > lo_p, f"{lo_p} vs {hi_p}조각")
-check("🚨 일반 물고기가 0.5~1.0코인 범위",
-      lo_p == 5 and hi_p == 10, f"{lo_p / 10:.1f}~{hi_p / 10:.1f}코인")
+check("🚨 일반 물고기가 0.8~1.5코인 범위 (5차, 사용자 요청)",
+      lo_p == 8 and hi_p == 15, f"{lo_p / 10:.1f}~{hi_p / 10:.1f}코인")
+
+# 🚨 **등급 경계가 겹치면 상위 등급의 맛이 사라져요.**
+#
+# 5차에서 일반을 0.8~1.5로 올렸더니 희귀 최소(1.5)와 **딱 맞닿았어요** — "희귀를
+# 잡았는데 일반 대물급과 같은 값"이 나오는 상태죠. 그래서 희귀도 2.0~3.8로 같이
+# 올렸어요(사용자 결정 - 4.0으로 하면 이번엔 대물 최소와 맞닿아요). 다음에 한쪽만 또 올리면 여기서 걸려요.
+# ⚠️ `GRADE_ORDER`는 **내림차순**(전설→일반)이에요. 방향에 기대지 말고 값으로 정렬해요.
+_bounds = sorted(((g, GRADES[g]["pieces"]) for g in GRADE_ORDER),
+                 key=lambda gp: gp[1][0])
+_overlaps = [f"{a}({ap[0]}~{ap[1]}) ≥ {b}({bp[0]}~{bp[1]})"
+             for (a, ap), (b, bp) in zip(_bounds, _bounds[1:]) if ap[1] >= bp[0]]
+check("🚨 등급 간 값 범위가 겹치지 않는다", not _overlaps,
+      " · ".join(_overlaps) if _overlaps
+      else " < ".join(f"{g} {p[0]/10:.1f}~{p[1]/10:.1f}" for g, p in _bounds))
 check("어항 가치가 치수 합과 일치",
       data["pieces"] == lo_p + hi_p + pieces_of(LEGEND, SIZE_BY_KEY[LEGEND][0]),
       f"{data['pieces']}조각")
@@ -255,10 +280,16 @@ tank, coins, dust = run(fishing_store.sell_all(U))
 after = run(fishing_store.get(U))
 
 sold_pieces = fishing_store.tank_pieces(tank)
+# ⚠️ **잔돈(`dust`)을 여기 더하면 안 돼요.** 판 조각(`sold_pieces`) 안에 이미 들어
+#    있어요 - 그중 10의 배수만 코인이 되고 나머지가 `dust`로 이월되는 구조라
+#    (바로 아래 검사가 그 관계를 봐요). 더하면 이중 계산이에요.
+#
+#    전엔 조각 합이 우연히 10의 배수여서 `dust`가 0이라 통과했는데, 5차에서 가격이
+#    바뀌어 331조각이 되자 바로 드러났어요. **우연히 통과하던 식**이었던 거예요.
 check("🚨 판매 중 낚은 물고기가 한 마리도 안 사라진다",
-      sold_pieces + after["pieces"] + after["dust"] == before_pieces + lo_p,
-      f"판 {sold_pieces} + 남은어항 {after['pieces']} + 잔돈 {after['dust']} "
-      f"vs 넣은 {before_pieces + lo_p}조각")
+      sold_pieces + after["pieces"] == before_pieces + lo_p,
+      f"판 {sold_pieces} + 남은어항 {after['pieces']} "
+      f"vs 넣은 {before_pieces + lo_p}조각 (이월 잔돈 {after['dust']})")
 check("🚨 지급 코인 + 잔돈 = 판 물고기 값 (한 조각도 안 샌다)",
       coins * COIN_PIECES + dust == sold_pieces, f"{coins}코인 + {dust}조각 vs {sold_pieces}")
 
@@ -299,13 +330,16 @@ check("빈 어항은 0코인", coins2 == 0 and not tank2 and dust2 == 0)
 # ==================================================================
 print("\n[8a] 🚨 잔돈(조각) — 한 마리씩 팔아 이득 보는 구멍이 없어야 해요")
 # ------------------------------------------------------------------
-# 일반 물고기 하나가 0.5코인이에요. 팔 때마다 반올림했다면 **한 마리씩 10번 팔아
-# 10코인**(실제 5코인어치)을 받는 구멍이 생겨요. 나머지를 어항에 남기면 막혀요.
+# 일반 물고기 **최소 크기**는 1코인이 안 돼요(5차 기준 0.8코인). 팔 때마다 반올림했다면
+# **한 마리씩 10번 팔아 10코인**(실제 8코인어치)을 받는 구멍이 생겨요.
+# 나머지를 어항에 남기면 막혀요.
+#
+# ⚠️ 기대값을 숫자로 박지 말고 `lo_p`에서 계산해요 - 가격은 또 바뀌어요(5차에 깨졌어요).
 S = "dust-user"
 fake.docs.pop(S, None)
 one_at_a_time = 0
 for _ in range(10):
-    run(fishing_store.record_cast(S, COMMON, C_LO))     # 0.5코인짜리
+    run(fishing_store.record_cast(S, COMMON, C_LO))     # 일반 최소 크기
     _, c, _ = run(fishing_store.sell_all(S))
     one_at_a_time += c
 
@@ -317,7 +351,8 @@ _, bulk, _ = run(fishing_store.sell_all(T))
 
 check("🚨 한 마리씩 팔아도 한 번에 판 것과 같다",
       one_at_a_time == bulk, f"한마리씩 {one_at_a_time} vs 한번에 {bulk}코인")
-check("0.5코인 10마리 = 5코인", bulk == 5, f"{bulk}코인")
+check(f"일반 최소({lo_p / 10:.1f}코인) 10마리 = {lo_p * 10 // COIN_PIECES}코인",
+      bulk == lo_p * 10 // COIN_PIECES, f"{bulk}코인")
 
 # ==================================================================
 print("\n[8b] 🎣 낚시대 — 무제한 구매 · 내구도 누적")
@@ -439,8 +474,8 @@ fishing.coin_wallet = _FakeWallet()
 
 P = "cog-sell"
 fake.docs.pop(P, None)
-run(fishing_store.record_cast(P, COMMON, C_HI))     # 1.0코인
-run(fishing_store.record_cast(P, COMMON, C_HI))     # 1.0코인
+run(fishing_store.record_cast(P, COMMON, C_HI))     # 일반 최대 크기
+run(fishing_store.record_cast(P, COMMON, C_HI))     # 일반 최대 크기
 cog = fishing.Fishing(None)
 inter = FakeInter(P)
 run(cog.sell.callback(cog, inter))
@@ -451,8 +486,8 @@ if inter.followup.sent:
     sent = inter.followup.sent[-1]
     check("결과 임베드를 보냈다", sent["embed"] is not None)
     check("본인에게만 보인다", sent["ephemeral"] is True)
-check("코인이 실제로 들어갔다", fishing.coin_wallet.bal == 2,
-      f"{fishing.coin_wallet.bal}코인 (기대 2)")
+check("코인이 실제로 들어갔다", fishing.coin_wallet.bal == hi_p * 2 // COIN_PIECES,
+      f"{fishing.coin_wallet.bal}코인 (기대 {hi_p * 2 // COIN_PIECES})")
 check("어항이 비었다", not run(fishing_store.get(P))["tank"])
 
 # 빈 어항도 터지지 않아야 해요.
