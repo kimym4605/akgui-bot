@@ -76,8 +76,81 @@ GRADES = {
     "레전드": "l",
 }
 
+# 등급 -> 카드에 **그려진** 번호 접두어 (C-015 처럼 좌상단 뱃지에 적혀 있어요).
+NO_PREFIX = {"일반": "C", "레어": "R", "에픽": "E", "레전드": "L"}
+
+# 🚨 **카드에 그려진 번호.** 파일명에는 없고 **그림 안에만** 있어요.
+#
+# 키(n01…)는 파일명을 가나다순으로 세어 붙인 거라 그려진 번호와 **전혀 다릅니다**
+# (n01 = VP악귀 = C-015). 그대로 두면 `/도감`이 번호가 아니라 **이름순**으로 늘어서요.
+# 2026-10-18에 사용자가 지적해서, 83장의 뱃지를 전부 눈으로 읽어 아래 표를 만들었어요.
+#
+# 🚨 **키는 DB(`cards` 컬렉션)에 저장돼 있어서 절대 바꾸면 안 돼요.** 그래서 키는 그대로
+#    두고 번호를 따로 들고 다니며 **정렬에만** 씁니다.
+#
+# 아트를 새로 받으면: `scripts/dump_card_numbers.py`로 뱃지만 잘라낸 시트를 만들어
+# 눈으로 읽고 이 표를 고치세요. 표와 실제 장수가 어긋나면 이 스크립트가 중단돼요.
+CARD_NUMBERS: dict[str, int] = {
+    # 일반 C-
+    "n01": 15, "n02": 18, "n03": 8, "n04": 5, "n05": 11, "n06": 17,
+    "n07": 2, "n08": 10, "n09": 14, "n10": 9, "n11": 24, "n12": 4,
+    "n13": 13, "n14": 12, "n15": 3, "n16": 20, "n17": 23, "n18": 6,
+    "n19": 1, "n20": 21, "n21": 19, "n22": 7, "n23": 16, "n24": 22,
+    # 레어 R-
+    "r01": 3, "r02": 11, "r03": 13, "r04": 15, "r05": 10, "r06": 2,
+    "r07": 5, "r08": 6, "r09": 1, "r10": 12, "r11": 16, "r12": 7,
+    "r13": 14, "r14": 9, "r15": 8, "r16": 4,
+    # 에픽 E-
+    "e01": 9, "e02": 5, "e03": 25, "e04": 22, "e05": 28, "e06": 26,
+    "e07": 23, "e08": 30, "e09": 21, "e10": 19, "e11": 20, "e12": 2,
+    "e13": 11, "e14": 7, "e15": 15, "e16": 12, "e17": 10, "e18": 6,
+    "e19": 8, "e20": 27, "e21": 18, "e22": 14, "e23": 16, "e24": 1,
+    "e25": 24, "e26": 29, "e27": 17, "e28": 3, "e29": 13, "e30": 4,
+    # 레전드 L-
+    "l01": 4, "l02": 2, "l03": 10, "l04": 8, "l05": 5, "l06": 1,
+    "l07": 6, "l08": 11, "l09": 3, "l10": 12, "l11": 7, "l12": 9,
+    "l13": 13,
+}
+
+
+def _number_cards(grade: str, cards: list[dict]) -> list[dict]:
+    """카드에 그려진 번호를 붙이고 **번호순으로 정렬**해요.
+
+    🚨 번호표가 실제 카드와 어긋나면 **조용히 넘어가지 않고 멈춰요.** 어긋난 채로
+    레지스트리를 쓰면 `/도감` 순서가 또 틀어지는데, 그건 눈으로 봐야만 알 수 있어요."""
+    keys = [c["key"] for c in cards]
+    missing = [k for k in keys if k not in CARD_NUMBERS]
+    if missing:
+        raise SystemExit(
+            f"❌ {grade}: CARD_NUMBERS에 없는 키 {missing}\n"
+            f"   아트가 늘었나요? scripts/dump_card_numbers.py 로 뱃지를 읽어 표를 채우세요.")
+    nums = sorted(CARD_NUMBERS[k] for k in keys)
+    want = list(range(1, len(keys) + 1))
+    if nums != want:
+        raise SystemExit(
+            f"❌ {grade}: 번호가 1~{len(keys)}의 완전한 집합이 아니에요 (중복·누락)\n"
+            f"   받은 번호: {nums}")
+    out = [{**c, "no": CARD_NUMBERS[c["key"]]} for c in cards]
+    return sorted(out, key=lambda c: c["no"])
+
 
 def main() -> int:
+    # `--registry-only`: 이미지는 그대로 두고 `utils/card_data.py`만 다시 써요.
+    # 번호표(CARD_NUMBERS)만 고쳤을 때 269MB 원본을 다시 변환할 이유가 없고,
+    # 재변환하면 webp 바이트가 미세하게 달라져 **의미 없는 git 변경**이 생겨요.
+    if "--registry-only" in sys.argv:
+        sys.path.insert(0, str(ROOT))
+        from utils.card_data import CARDS as _old           # noqa: PLC0415
+        registry = {g: _number_cards(g, [{"key": c["key"], "name": c["name"],
+                                          "file": c["file"]} for c in rows])
+                    for g, rows in _old.items()}
+        _write_registry(registry)
+        for g, rows in registry.items():
+            print(f"  {g:4s} {len(rows):2d}장 → "
+                  f"{NO_PREFIX[g]}-{rows[0]['no']:03d} … {NO_PREFIX[g]}-{rows[-1]['no']:03d}")
+        print(f"\n✅ 레지스트리만 갱신: {OUT_PY.relative_to(ROOT)} (이미지는 그대로)")
+        return 0
+
     if not SRC.is_dir():
         print(f"❌ 원본 폴더가 없어요: {SRC}")
         return 1
@@ -131,8 +204,9 @@ def main() -> int:
             total_out += dest.stat().st_size
             cards.append({"key": key, "name": name, "file": dest.name})
 
-        registry[grade] = cards
-        print(f"  {grade:4s} {len(cards):2d}장")
+        registry[grade] = _number_cards(grade, cards)
+        print(f"  {grade:4s} {len(cards):2d}장 "
+              f"({NO_PREFIX[grade]}-001~{NO_PREFIX[grade]}-{len(cards):03d} 순으로 정렬)")
 
     _write_registry(registry)
 

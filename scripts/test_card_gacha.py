@@ -17,6 +17,7 @@
  10) 레지스트리의 모든 카드에 실제 이미지 파일이 있다 (없으면 뽑고 나서 터져요)
  11) 도감 요약(summarize)이 등급별 보유/전체를 맞게 센다
 """
+import re
 import os
 import sys
 from collections import Counter
@@ -478,6 +479,36 @@ check(
 )
 
 # ==================================================================
+print("\n[번호] 🔢 /도감이 카드에 그려진 번호순으로 늘어서는가")
+# ------------------------------------------------------------------
+# 🚨 2026-10-18 사용자 신고: `/도감`이 번호가 아니라 **이름순**으로 늘어서 있었어요.
+#    키(n01…)는 파일명을 가나다순으로 세어 붙인 거라 그림에 그려진 번호(C-015)와
+#    전혀 다르거든요. `CARD_NUMBERS` 표로 정렬하게 고쳤는데, 번호표 없이 레지스트리를
+#    다시 만들면 **조용히 이름순으로 되돌아가요.** 그래서 여기서 못 박아요.
+
+for _grade, _rows in CARDS.items():
+    _nos = [c.get("no") for c in _rows]
+    check(f"{_grade}: 모든 카드에 번호(no)가 있다",
+          all(isinstance(n, int) for n in _nos),
+          f"빠진 카드 {[c['key'] for c in _rows if not isinstance(c.get('no'), int)]}")
+    check(f"{_grade}: 번호가 1~{len(_rows)} 중복·누락 없음",
+          sorted(_nos) == list(range(1, len(_rows) + 1)), str(sorted(_nos)))
+    check(f"🔢 {_grade}: 목록이 **번호순**으로 정렬돼 있다",
+          _nos == sorted(_nos), f"{_nos[:8]}…")
+
+# 역검증: 이름순이면 FAIL이 나야 의미가 있어요 (지금이 우연히 통과한 게 아닌지).
+_by_name = sorted(CARDS["일반"], key=lambda c: c["name"])
+check("🚨 (역검증) 이름순으로 늘어놓으면 번호순이 아니다",
+      [c["no"] for c in _by_name] != sorted(c["no"] for c in _by_name),
+      "이름순과 번호순이 같다면 이 테스트는 아무것도 못 잡아요")
+
+# 키는 DB(`cards` 컬렉션)에 저장돼요. 정렬을 바꾸느라 키가 흔들리면 모두의 도감이 깨져요.
+_keys = [c["key"] for rows in CARDS.values() for c in rows]
+check("🚨 키가 전부 고유하다 (DB 저장 값)", len(_keys) == len(set(_keys)))
+check("키 형식이 <접두어><2자리>다",
+      all(re.fullmatch(r"[nrel]\d{2}", k) for k in _keys),
+      str([k for k in _keys if not re.fullmatch(r"[nrel]\d{2}", k)]))
+
 print("\n" + "=" * 60)
 if failures:
     print(f"❌ 실패 {len(failures)}건")
