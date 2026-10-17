@@ -1,0 +1,38 @@
+[
+  {
+    "uid": "902186090742579220",
+    "caught": 17,
+    "paid": 17,
+    "best": "🐋 전설 달빛가물치 (치수 기록 없음)",
+    "best_coins": 30.0,
+    "est_pieces": 473.7,
+    "snapped": 475,
+    "dust": 5,
+    "should": 47,
+    "top_up": 30
+  },
+  {
+    "uid": "1274597436689743964",
+    "caught": 9,
+    "paid": 9,
+    "best": "🐠 희귀 쏘가리 31cm",
+    "best_coins": 1.9,
+    "est_pieces": 90.7,
+    "snapped": 89,
+    "dust": 9,
+    "should": 8,
+    "top_up": 0
+  },
+  {
+    "uid": "1224751871638376553",
+    "caught": 4,
+    "paid": 4,
+    "best": "🐋 전설 달빛가물치 (치수 기록 없음)",
+    "best_coins": 30.0,
+    "est_pieces": 332.6,
+    "snapped": 328,
+    "dust": 8,
+    "should": 32,
+    "top_up": 28
+  }
+]
