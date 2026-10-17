@@ -543,7 +543,15 @@ import ast as _ast  # noqa: E402
 _src = Path(os.path.join(BOT_DIR, "cogs/fishing.py")).read_text(encoding="utf-8")
 _tree = _ast.parse(_src)
 
-PUBLIC_OK = {"leaderboard"}        # 순위표는 같이 보는 게 맞아요
+# 🚨 여기에 이름을 더할 땐 **왜 ephemeral이 아니어도 되는지**를 같이 적을 것.
+#    이 가드가 막는 건 "여러 명의 찌가 뒤섞이는 것"이라, **내 판이 걸린 화면**은
+#    반드시 ephemeral이어야 해요. 아래 둘은 판과 무관한 **고정 안내**예요.
+PUBLIC_OK = {
+    "leaderboard",   # 🏆 순위표 — 같이 보는 게 맞아요
+    "rates",         # 🎣 /낚시확률 — 확률·값 공개. 뒤섞일 내 판이 없고, 공개여야
+                     #    옆사람이 보고 알게 돼요(`/카드확률`도 공개예요).
+                     #    발견 경로가 좁은 게 지금 낚시의 실제 문제예요.
+}
 
 # 🚨 **클래스 안만 훑으면 안 돼요.** `run_cast`/`finish_cast`가 모듈 함수로 빠지면서
 #    (2026-10-17 다시던지기) 검사 범위에서 조용히 사라졌었어요. 정작 `send_message`를
@@ -909,6 +917,103 @@ finally:
     for _k, _v in _saved.items():
         setattr(fishing.fishing_store, _k, _v)
     fishing.BITE_MIN, fishing.BITE_MAX, fishing.BITE_WINDOW = _saved_timing
+
+# ==================================================================
+print("\n[14] 🎣 /낚시확률 - 공개하는 숫자가 실제와 같나")
+# ------------------------------------------------------------------
+# 🚨 안내문이 옛값으로 남는 사고가 이 저장소에서 반복됐어요(`/악귀상점`의 "하루 1개"가
+#    4차 이후로 거짓이었어요). 그래서 이 명령어는 **전부 fish_data에서 계산**하고,
+#    여기서 ⒜ 계산이 실제 추첨과 맞는지 ⒝ 소스에 숫자를 손으로 박지 않았는지를 봐요.
+
+import inspect  # noqa: E402
+import types  # noqa: E402
+
+_fd = fishing.fish_data
+
+# ⒜ `expected_*`가 실제 추첨 함수와 맞나 — 치수가 작은 쪽으로 치우쳐 있어서
+#    등급 중앙값으로 계산하면 과대평가돼요. 누가 "간단히" 고치면 여기서 걸려요.
+_rng = Random(20261018)
+_grades = list(_fd.GRADES)
+_weights = [_fd.GRADES[g]["weight"] for g in _grades]
+_keys = {g: [f["key"] for f in rows] for g, rows in _fd.FISH.items()}
+_N, _sum = 200_000, 0
+for _ in range(_N):
+    _g = _rng.choices(_grades, weights=_weights, k=1)[0]
+    _k = _rng.choice(_keys[_g])
+    _sum += _fd.pieces_of(_k, _fd.roll_size(_k, _rng))
+_mc = _sum / _N / _fd.COIN_PIECES
+_calc = _fd.expected_coin_per_cast()
+check("expected_coin_per_cast가 실제 추첨과 일치 (±3%)",
+      abs(_calc - _mc) / _mc < 0.03,
+      f"계산 {_calc:.3f} vs 몬테카를로 {_mc:.3f}")
+
+_mid = sum(_fd.GRADES[g]["weight"] / sum(_weights) * sum(_fd.GRADES[g]["pieces"]) / 2
+           for g in _grades) / _fd.COIN_PIECES
+check("🚨 중앙값 근사보다 낮다 (치우침을 반영하고 있다)",
+      _calc < _mid, f"계산 {_calc:.3f} < 중앙값근사 {_mid:.3f}")
+
+# ⒝ 소스에 숫자를 손으로 박지 않았나
+#    ⚠️ **독스트링·주석은 빼고** 봐요 — "중앙값으로 계산하면 14.8이 나오는데 14.1이
+#    맞다"처럼 왜 그렇게 계산하는지 적어두는 건 오히려 필요한 설명이에요. 막으려는 건
+#    유저에게 **보내는 문자열**에 박힌 숫자예요.
+#
+#    🚨 `__doc__`으로 지우려 했더니 안 됐어요 — 파이썬 3.13+는 독스트링을 컴파일할 때
+#    **dedent**해서, 들여쓰기가 남은 원본 소스와 문자열이 안 맞아요. AST로 떼야 해요.
+#    (`ast.unparse`는 주석도 같이 버려서 마침 원하는 결과예요.)
+import textwrap  # noqa: E402
+
+_rates_fn = fishing.Fishing.rates.callback
+_fnode = _ast.parse(textwrap.dedent(inspect.getsource(_rates_fn))).body[0]
+if (_fnode.body and isinstance(_fnode.body[0], _ast.Expr)
+        and isinstance(getattr(_fnode.body[0].value, "value", None), str)):
+    _fnode.body = _fnode.body[1:]
+_src = _ast.unparse(_fnode)
+_hard = [tok for tok in ("90.5", "6.7", "2.7", "14코인", "14.1", "4.13", "0.8~1.5")
+         if tok in _src]
+check("🚨 확률·값·평균을 소스에 하드코딩하지 않았다", not _hard, f"발견: {_hard}")
+
+
+class _RatesResp:
+    def __init__(self):
+        self.calls = []
+        self.embed = None
+
+    async def send_message(self, *a, **kw):
+        self.calls.append("send_message")
+        self.embed = kw.get("embed")
+
+    async def defer(self, **kw):
+        self.calls.append("defer")
+
+
+class _RatesInter:
+    def __init__(self):
+        self.response = _RatesResp()
+        self.user = types.SimpleNamespace(id=1, display_name="t")
+
+
+_ri = _RatesInter()
+asyncio.run(fishing.Fishing.rates.callback(fishing.Fishing(None), _ri))
+check("DB를 안 치니 defer 없이 한 방에 답한다",
+      _ri.response.calls == ["send_message"], f"호출 {_ri.response.calls}")
+
+_emb = _ri.response.embed
+_blob = (_emb.description or "") + "".join(
+    (f.name or "") + (f.value or "") for f in _emb.fields)
+
+for _g in _fd.GRADE_ORDER:
+    _pct = _fd.GRADES[_g]["weight"] / sum(_weights) * 100
+    check(f"{_g} 확률 {_pct:.1f}%를 보여준다", f"{_pct:.1f}%" in _blob)
+
+check("낚시대 값·내구도가 코드값과 같다",
+      f"{_fd.ROD_PRICE}코인" in _blob and f"{_fd.ROD_DURABILITY}번" in _blob)
+check("평균 벌이를 헬퍼값으로 보여준다",
+      f"{_fd.expected_coin_per_day():.0f}코인" in _blob,
+      f"{_fd.expected_coin_per_day():.0f}코인")
+check("어종 14종을 전부 적는다",
+      all(f["name"] in _blob for rows in _fd.FISH.values() for f in rows))
+check("⚠️ 내림을 숨기지 않는다 (기대를 부풀리지 않게)", "내림" in _blob)
+check("🚨 '하루 1개' 같은 옛 제한을 다시 쓰지 않는다", "하루 1개" not in _blob)
 
 print("\n" + "=" * 60)
 if failures:

@@ -638,6 +638,79 @@ class Fishing(commands.Cog):
         await interaction.followup.send(
             embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
+    @app_commands.command(name="낚시확률",
+                          description="등급별 확률과 물고기 값을 공개해요.")
+    @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
+    async def rates(self, interaction: discord.Interaction):
+        """🎣 확률·값 공개. `/카드확률`과 같은 성격이에요.
+
+        🚨 **숫자를 손으로 적지 말 것.** 전부 `fish_data`에서 계산해요. 값을 올리거나
+        확률을 바꿀 때 안내문만 옛값으로 남는 사고가 이 저장소에서 반복됐어요
+        (`/악귀상점`의 "하루 1개"가 4차 이후로 거짓이었던 게 그 예예요).
+
+        ⚠️ 평균 벌이는 `expected_*` 헬퍼를 써요. 등급 값 범위의 **중앙값으로 계산하면
+        과대 안내**예요 - 치수가 작은 쪽으로 치우쳐 있어서(`SIZE_SKEW`) 14.8이 아니라
+        14.1이 맞아요.
+        """
+        total_w = sum(g["weight"] for g in GRADES.values())
+        lines = []
+        for grade in GRADE_ORDER:
+            g = GRADES[grade]
+            lo_p, hi_p = g["pieces"]
+            lines.append(
+                f"{g['emoji']} **{grade}** — {g['weight'] / total_w * 100:.1f}% · "
+                f"{lo_p / COIN_PIECES:.1f}~{hi_p / COIN_PIECES:.1f}코인 · "
+                f"{len(FISH[grade])}종")
+
+        embed = discord.Embed(
+            title="🎣 낚시 확률과 값",
+            description="\n".join(lines),
+            color=0x3B82F6,
+        )
+        embed.add_field(
+            name="🎣 낚시대",
+            value=(f"`/악귀상점`에서 **{ROD_PRICE}코인** · 한 개로 **{ROD_DURABILITY}번**\n"
+                   "　└ **몇 개든** 살 수 있어요 (하루 제한 없어요)"),
+            inline=False,
+        )
+        per_cast = fish_data.expected_coin_per_cast()
+        per_rod = fish_data.expected_coin_per_day()
+        net = fish_data.net_issue_per_rod()
+        embed.add_field(
+            name="⭐ 평균 얼마 벌리나",
+            value=(f"한 번 던지면 평균 **{per_cast:.1f}코인** → 낚시대 하나로 "
+                   f"약 **{per_rod:.0f}코인**\n"
+                   f"　└ 낚시대값 {ROD_PRICE}코인을 빼면 **{net:+.0f}코인**쯤 남아요\n"
+                   "　└ ⚠️ 판매는 **내림**이에요(1코인 = 10조각) — 남는 조각은 "
+                   "다음 판매로 넘어가요"),
+            inline=False,
+        )
+        embed.add_field(
+            name="📏 같은 어종도 치수가 값을 갈라요",
+            value=("위 등급 값 범위의 **아래쪽~위쪽**을 치수가 정해요.\n"
+                   "　└ 치수는 **작은 쪽으로 치우쳐** 있어서 최대어는 드물어요 "
+                   "(그래서 기록에 의미가 있어요)"),
+            inline=False,
+        )
+        embed.add_field(
+            name="🐟 어떤 물고기가 있나",
+            value="\n".join(
+                f"{GRADES[grade]['emoji']} " + " · ".join(
+                    f"{f['name']} {f['size'][0]}~{f['size'][1]}cm"
+                    for f in FISH[grade])
+                for grade in GRADE_ORDER),
+            inline=False,
+        )
+        embed.add_field(
+            name="꽝은 없어요",
+            value=("타이밍만 맞히면 **반드시 뭔가 나와요.**\n"
+                   "　└ 챔질을 놓쳐도 **횟수를 돌려드려요** — 운이 아니라 실수니까요"),
+            inline=False,
+        )
+        embed.set_footer(text="/어항 에서 지금 가치를 확인해보세요")
+        # DB를 안 건드려서 defer 없이 바로 답해도 3초를 안 넘겨요.
+        await interaction.response.send_message(embed=embed)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Fishing(bot))
