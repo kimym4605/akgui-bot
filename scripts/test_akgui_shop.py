@@ -335,6 +335,209 @@ async def load_cog():
 
 asyncio.run(load_cog())
 
+# ==================================================================
+print("\n12) 🚨 3초 - 코인보다 ack가 먼저인가 (전수 검사)")
+# ------------------------------------------------------------------
+# 상호작용 토큰은 3초면 만료돼요(`404 Unknown interaction`, code 10062).
+# 🚨 진짜 피해는 404가 아니라 **순서**예요 - 코인을 먼저 빼고 응답을 나중에 하면,
+#    응답이 실패했을 때 **유저는 화면도 못 보고 코인만 잃어요.**
+#    2026-10-17에 🎣 낚시 다시던지기가 이걸로 터졌고, 상점 5곳이 같은 모양이었어요
+#    (🎨테마 10코인 · 🧊보호권 3코인 · 🎲리롤 2코인).
+#
+# 핸들러를 하나 더 붙일 때 또 빠뜨리지 않게 **이름 목록이 아니라 전수로** 검사해요.
+import ast as _ast  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+_shop_src = _Path(os.path.join(BOT_DIR, "cogs/akgui_shop.py")).read_text(encoding="utf-8")
+_shop_tree = _ast.parse(_shop_src)
+
+_handlers = [(c.name, f) for c in _shop_tree.body if isinstance(c, _ast.ClassDef)
+             for f in c.body if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+             and any(a.arg == "interaction" for a in f.args.args)]
+check("상호작용 핸들러를 찾았다", len(_handlers) >= 8, f"{len(_handlers)}개")
+
+# ⚠️ `interaction_check`는 예외예요 - 거절 안내만 하고 DB를 안 쳐요. 거기서 defer하면
+#    "받아놓고 아무것도 안 한" 빈 응답이 남아요.
+_EXEMPT = {"interaction_check", "on_timeout", "callback"}
+
+_late, _ok_list = [], []
+for _owner, _fn in _handlers:
+    if _fn.name in _EXEMPT:
+        continue
+    # 함수 본문에서 **처음 나오는 await**가 ack여야 해요(중첩 함수는 제외).
+    _inner = {id(n) for f2 in _ast.walk(_fn)
+              if f2 is not _fn and isinstance(f2, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+              for n in _ast.walk(f2)}
+    _awaits = sorted((n for n in _ast.walk(_fn)
+                      if isinstance(n, _ast.Await) and id(n) not in _inner),
+                     key=lambda n: (n.lineno, n.col_offset))
+    if not _awaits:
+        continue
+    _first = _awaits[0].value
+    _func = getattr(_first, "func", None)
+    _name = getattr(_func, "id", "") or getattr(_func, "attr", "")
+    # ⭐ 규칙은 "ack를 써라"가 아니라 **"첫 응답 전에 다른 await를 하지 마라"**예요.
+    #    DB를 안 치고 바로 답하는 안내문(`ShopView.title`)은 `ack` 없이
+    #    `response.send_message` 한 방이 맞아요 - defer를 끼우면 왕복만 늘어요.
+    _is_direct_reply = getattr(getattr(_func, "value", None), "attr", "") == "response"
+    if _name == "ack" or _is_direct_reply:
+        _ok_list.append(f"{_owner}.{_fn.name}")
+    else:
+        _late.append(f"{_owner}.{_fn.name} → {_name}():{_awaits[0].lineno}")
+
+check("🚨 첫 응답 전에 다른 await가 없다 (코인보다 ack가 먼저)", not _late,
+      "늦게 받는 곳: " + ", ".join(_late) if _late else f"{len(_ok_list)}곳 확인")
+
+# 🚨 ack 뒤에는 `interaction.response.*`를 쓸 수 없어요(이미 응답한 상태예요).
+_bad_resp = []
+for _owner, _fn in _handlers:
+    if _fn.name in _EXEMPT:
+        continue
+    _uses_ack = any(getattr(getattr(n, "func", None), "id", "") == "ack"
+                    for n in _ast.walk(_fn) if isinstance(n, _ast.Call))
+    if not _uses_ack:
+        continue
+    for n in _ast.walk(_fn):
+        if (isinstance(n, _ast.Call)
+                and getattr(getattr(n.func, "value", None), "attr", "") == "response"
+                and getattr(n.func, "attr", "") in ("send_message", "edit_message")):
+            _bad_resp.append(f"{_owner}.{_fn.name} response.{n.func.attr}():{n.lineno}")
+check("🚨 ack 뒤에 response.send_message/edit_message를 안 쓴다", not _bad_resp,
+      ", ".join(_bad_resp) if _bad_resp else "followup/edit_original만 씀")
+
+
+# 실제로 토큰이 죽은 상황을 흉내내요 - 코인이 빠지면 안 돼요.
+class _DeadHTTP:
+    status = 404
+    reason = "Not Found"
+
+
+class _DeadResp:
+    async def defer(self, *a, **k):
+        raise discord.NotFound(_DeadHTTP(), {"code": 10062, "message": "Unknown interaction"})
+
+
+class _DeadInter:
+    type = "component"
+
+    def __init__(self, uid=1):
+        self.user = type("U", (), {"id": uid})()
+        self.response = _DeadResp()
+
+
+import cogs.akgui_shop as _shop_mod  # noqa: E402
+from utils import coin_wallet as _wallet  # noqa: E402
+
+_spends = []
+_real_spend = _wallet.spend
+
+
+async def _spy_spend(uid, amount, *, reason=""):
+    _spends.append((uid, amount, reason))
+    return True
+
+
+_wallet.spend = _spy_spend
+try:
+    _v = _shop_mod.ThemeView(1, [], cosmetic_store.DEFAULT_THEME)
+    asyncio.run(_v.pick_theme(_DeadInter(1), "심해"))
+    check("🚨 토큰이 죽으면 테마 코인(10)이 빠지지 않는다",
+          _spends == [], f"spend가 {len(_spends)}번 불렸어요: {_spends}")
+
+    _spends.clear()
+    _rv = _shop_mod.RerollView(1, LINKED_PICKS)
+    asyncio.run(_rv.do_reroll(_DeadInter(1), LINKED_PICKS[0]))
+    check("🚨 토큰이 죽으면 리롤 코인(2)이 빠지지 않는다",
+          _spends == [], f"spend가 {len(_spends)}번 불렸어요: {_spends}")
+finally:
+    _wallet.spend = _real_spend
+
+
+# ------------------------------------------------------------------
+# 정상 경로도 끝까지 돌려봐요. `edit_message` -> `edit_original_response`,
+# `send_message` -> `followup.send` 치환을 하나라도 빠뜨리면 **ack 뒤에 다시
+# 응답하려다 터져요**(`InteractionResponded`). AST로는 안 잡히는 종류예요.
+class _RecResp:
+    def __init__(self, rec):
+        self.rec = rec
+
+    async def defer(self, *a, **k):
+        self.rec.append(("defer", k.get("ephemeral", False), k.get("thinking", False)))
+
+    async def send_message(self, *a, **k):
+        self.rec.append(("🚨response.send_message", None, None))
+
+    async def edit_message(self, *a, **k):
+        self.rec.append(("🚨response.edit_message", None, None))
+
+
+class _RecInter:
+    type = "component"
+
+    def __init__(self, rec, uid=1):
+        self.rec = rec
+        self.user = type("U", (), {"id": uid})()
+        self.response = _RecResp(rec)
+
+    async def edit_original_response(self, **k):
+        self.rec.append(("edit_original", None, None))
+
+    class _FollowUp:
+        def __init__(self, rec):
+            self.rec = rec
+
+        async def send(self, *a, **k):
+            self.rec.append(("followup", k.get("ephemeral", False), None))
+
+    @property
+    def followup(self):
+        return self._FollowUp(self.rec)
+
+
+_patches = {
+    (_wallet, "spend"): lambda uid, amt, reason="": True,
+    (_wallet, "get_balance"): lambda uid: 99,
+    (cosmetic_store, "owned_themes"): lambda uid: [],
+    (cosmetic_store, "grant_theme"): lambda uid, key: True,
+    (cosmetic_store, "select_theme"): lambda uid, key: None,
+    (mission_store, "reroll"): lambda uid, key: (SERVER_KEYS[0], None),
+    (mission_store, "rerolls_left"): lambda uid: 0,
+}
+_orig = {(m, n): getattr(m, n) for (m, n) in _patches}
+
+
+def _mk_async(fn):
+    async def _f(*a, **k):
+        return fn(*a, **k)
+    return _f
+
+
+for (_m, _n), _fn in _patches.items():
+    setattr(_m, _n, _mk_async(_fn))
+try:
+    _rec = []
+    asyncio.run(_shop_mod.ThemeView(1, [], cosmetic_store.DEFAULT_THEME)
+                .pick_theme(_RecInter(_rec), "심해"))
+    _kinds = [r[0] for r in _rec]
+    check("🎨 테마: ack로 시작해 edit_original로 끝난다",
+          _kinds == ["defer", "edit_original"], f"순서 {_kinds}")
+
+    _rec2 = []
+    asyncio.run(_shop_mod.RerollView(1, LINKED_PICKS)
+                .do_reroll(_RecInter(_rec2), LINKED_PICKS[0]))
+    _kinds2 = [r[0] for r in _rec2]
+    check("🎲 리롤: ack로 시작해 edit_original로 끝난다",
+          _kinds2 == ["defer", "edit_original"], f"순서 {_kinds2}")
+
+    # 🚨 Select 경로의 defer는 **인자가 없어야** 해요. `thinking=True`로 주면
+    #    고르던 메시지는 그대로 남고 **새 메시지가 하나 더 생겨서** 화면이 쌓여요.
+    check("🚨 Select의 defer는 인자 없이 (화면을 그대로 두고 받기)",
+          _rec[0] == ("defer", False, False) and _rec2[0] == ("defer", False, False),
+          f"테마 {_rec[0]} / 리롤 {_rec2[0]}")
+finally:
+    for (_m, _n), _fn in _orig.items():
+        setattr(_m, _n, _fn)
+
 print()
 if failures:
     print(f"❌ 실패 {len(failures)}건: {failures}")

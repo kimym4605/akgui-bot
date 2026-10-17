@@ -25,6 +25,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils import attend_service, coin_wallet, cosmetic_store, inventory_store, mission_store, riot_account_store
+from utils.interaction_ack import ack
 from utils.inventory_store import PROTECT_MAX, PROTECT_PRICE
 from utils.mission_store import MISSIONS, REROLL_LIMIT_PER_DAY, REROLL_PRICE
 from utils.fish_data import ROD_DURABILITY, ROD_PRICE
@@ -129,10 +130,17 @@ class RerollView(discord.ui.View):
         return interaction.user.id == self.user_id
 
     async def do_reroll(self, interaction: discord.Interaction, key: str):
+        # 🚨 **코인보다 `ack`가 먼저예요.** 전에는 코인을 뺀 뒤 DB를 네 번 다녀와서야
+        #    첫 응답을 했어요. 3초를 넘기면 `10062`로 터지는데, 그 순서에선
+        #    **코인은 빠지고 미션은 바뀐 채 유저는 아무 화면도 못 봐요.**
+        #    받지 못했으면 코인을 건드리기 전에 빠져나와요. -> utils/interaction_ack.py
+        if not await ack(interaction):
+            return
+
         # ⚠️ 코인부터 빼요. 미션을 먼저 바꾸면 코인이 모자랄 때 공짜 리롤이 돼요.
         if not await coin_wallet.spend(interaction.user.id, REROLL_PRICE, reason="미션리롤"):
             balance = await coin_wallet.get_balance(interaction.user.id)
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=f"악귀코인이 부족해요. 리롤권은 **{REROLL_PRICE}개**가 필요한데 "
                         f"지금 **{balance}개** 갖고 있어요.",
                 embed=None, view=None,
@@ -143,7 +151,7 @@ class RerollView(discord.ui.View):
         if new_key is None:
             # 바꾸지 못했으면 반드시 돌려줘요(실패 사유와 무관하게).
             await coin_wallet.add(interaction.user.id, REROLL_PRICE, reason="미션리롤 실패 환불")
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=f"⚠️ {REROLL_ERRORS.get(reason, '바꾸지 못했어요.')} (코인은 돌려드렸어요)",
                 embed=None, view=None,
             )
@@ -151,7 +159,7 @@ class RerollView(discord.ui.View):
 
         balance = await coin_wallet.get_balance(interaction.user.id)
         left = await mission_store.rerolls_left(interaction.user.id)
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=(
                 f"🎲 **{MISSIONS[key]['title']}** → **{MISSIONS[new_key]['title']}** 으로 바꿨어요!\n"
                 f"　└ {MISSIONS[new_key]['desc']}\n"
@@ -192,12 +200,18 @@ class ThemeView(discord.ui.View):
         return interaction.user.id == self.user_id
 
     async def pick_theme(self, interaction: discord.Interaction, key: str):
+        # 🚨 **코인보다 `ack`가 먼저예요.** 여기는 상점에서 제일 비싸요(10코인).
+        #    전에는 DB를 다섯 번 다녀와서야 첫 응답을 했어요 - 3초를 넘기면 10코인이
+        #    빠진 채 화면이 안 떠요. -> utils/interaction_ack.py
+        if not await ack(interaction):
+            return
+
         owned = await cosmetic_store.owned_themes(interaction.user.id)
 
         if key not in owned:
             if not await coin_wallet.spend(interaction.user.id, THEME_PRICE, reason=f"카드테마:{key}"):
                 balance = await coin_wallet.get_balance(interaction.user.id)
-                await interaction.response.edit_message(
+                await interaction.edit_original_response(
                     content=f"악귀코인이 부족해요. 테마는 **{THEME_PRICE}개**가 필요한데 "
                             f"지금 **{balance}개** 갖고 있어요.",
                     embed=None, view=None,
@@ -212,7 +226,7 @@ class ThemeView(discord.ui.View):
         await cosmetic_store.select_theme(interaction.user.id, key)
         info = THEMES[key]
         balance = await coin_wallet.get_balance(interaction.user.id)
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=(
                 f"{info['emoji']} 카드 테마를 **{key}**(으)로 바꿨어요. ({info['desc']})\n"
                 f"`/프로필` 을 다시 쳐보면 적용돼 있어요 · 남은 코인 {balance}개"
@@ -257,7 +271,8 @@ class ShopView(discord.ui.View):
 
         ⚠️ 구매 로직은 `cogs/fishing.py`의 `purchase_rod` 하나뿐이에요. 여기서 복사해
         두면 한쪽만 고치는 사고가 나요(지급→차감→실패 시 환불 순서가 핵심이에요)."""
-        await interaction.response.defer(ephemeral=True)
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
         from cogs.fishing import purchase_rod
 
         _, msg = await purchase_rod(interaction.user.id)
@@ -265,9 +280,14 @@ class ShopView(discord.ui.View):
 
     @discord.ui.button(label="미션 리롤", emoji="🎲", style=discord.ButtonStyle.primary)
     async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 🚨 DB를 세 번 다녀오니 먼저 받아둬요(`thinking=True` = 새 비공개 메시지).
+        #    -> utils/interaction_ack.py
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
+
         left = await mission_store.rerolls_left(interaction.user.id)
         if left <= 0:
-            await interaction.response.send_message(REROLL_ERRORS["limit"], ephemeral=True)
+            await interaction.followup.send(REROLL_ERRORS["limit"], ephemeral=True)
             return
 
         # ⚠️ `linked`를 반드시 실제로 확인해요. False로 넘기면, 오늘 미션 문서가 아직
@@ -277,12 +297,12 @@ class ShopView(discord.ui.View):
         done = set(doc.get("done") or [])
         pending = [k for k in (doc.get("picks") or []) if k not in done]
         if not pending:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "오늘 미션을 전부 깼어요! 바꿀 게 없네요 👏", ephemeral=True
             )
             return
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"바꿀 미션을 골라주세요. **{REROLL_PRICE}코인**이 들어요.\n"
             "-# 바뀐 미션은 **서버 미션**(통화·명령어) 중에서 무작위로 나와요.",
             view=RerollView(interaction.user.id, pending),
@@ -291,9 +311,15 @@ class ShopView(discord.ui.View):
 
     @discord.ui.button(label="출석 보호권", emoji="🧊", style=discord.ButtonStyle.primary)
     async def protect(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 🚨 **코인보다 `ack`가 먼저예요.** 전에는 DB를 네 번 다녀와서야 첫 응답을
+        #    했어요 - 3초를 넘기면 코인은 빠지고 보호권은 들어간 채 화면이 안 떠요.
+        #    -> utils/interaction_ack.py
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
+
         have = await inventory_store.protect_count(interaction.user.id)
         if have >= PROTECT_MAX:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"보호권은 최대 **{PROTECT_MAX}장**까지만 가질 수 있어요. 지금 {have}장 갖고 있어요.\n"
                 "-# 쌓아둘 수 있으면 사실상 연속 출석이 무의미해져서 상한을 뒀어요.",
                 ephemeral=True,
@@ -303,7 +329,7 @@ class ShopView(discord.ui.View):
         # ⚠️ 코인부터 빼요. 지급을 먼저 하면 코인이 모자랄 때 공짜로 받아가요.
         if not await coin_wallet.spend(interaction.user.id, PROTECT_PRICE, reason="출석보호권"):
             balance = await coin_wallet.get_balance(interaction.user.id)
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"악귀코인이 부족해요. 보호권은 **{PROTECT_PRICE}개**가 필요한데 "
                 f"지금 **{balance}개** 갖고 있어요.",
                 ephemeral=True,
@@ -313,14 +339,14 @@ class ShopView(discord.ui.View):
         if not await inventory_store.grant_protect(interaction.user.id):
             # 그 찰나에 상한이 찼어요(동시에 두 번 눌렀을 때). 코인은 돌려줘요.
             await coin_wallet.add(interaction.user.id, PROTECT_PRICE, reason="출석보호권 환불")
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"보호권이 이미 {PROTECT_MAX}장이에요. 코인은 돌려드렸어요.", ephemeral=True
             )
             return
 
         have = await inventory_store.protect_count(interaction.user.id)
         balance = await coin_wallet.get_balance(interaction.user.id)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"🧊 출석 보호권을 샀어요. 지금 **{have}장** · 남은 코인 {balance}개\n"
             "-# 하루 빠진 뒤 `/출석`을 하면 **자동으로** 쓰여서 연속이 이어져요.",
             ephemeral=True,
@@ -329,8 +355,11 @@ class ShopView(discord.ui.View):
 
     @discord.ui.button(label="카드 테마", emoji="🎨", style=discord.ButtonStyle.secondary)
     async def theme(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
+
         state = await cosmetic_store.get(interaction.user.id)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"테마를 고르면 바로 적용돼요. 안 가진 테마는 고르는 순간 **{THEME_PRICE}코인**이 빠져요.\n"
             "-# 한 번 산 테마는 영구히 남아서 언제든 다시 고를 수 있어요.",
             view=ThemeView(interaction.user.id, state["themes"], state["theme"]),
@@ -355,7 +384,11 @@ class AkguiShop(commands.Cog):
     async def shop(self, interaction: discord.Interaction):
         # 채널 제한을 안 걸었어요. 소비처가 없어서 코인이 쌓이는 게 문제였는데, 여기에
         # "그건 저쪽 채널에서" 를 또 붙이면 안 쓰는 이유를 하나 더 만드는 거예요.
-        await interaction.response.defer(ephemeral=True)
+        #
+        # ⚠️ 슬래시 명령이라 `thinking`은 필요 없어요(컴포넌트 전용 타입을 못 써서
+        #    어차피 "생각 중"이 돼요). `ephemeral=True`만 반드시 줘요.
+        if not await ack(interaction, ephemeral=True):
+            return
         balance = await coin_wallet.get_balance(interaction.user.id)
         left = await mission_store.rerolls_left(interaction.user.id)
         state = await cosmetic_store.get(interaction.user.id)
