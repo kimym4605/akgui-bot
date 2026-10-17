@@ -211,6 +211,47 @@ check("누적 순위는 안 온 사람도 포함(99회가 1등)",
       [r[0] for r in data["total"]][:2] == ["b", "a"], str(data["total"][:3]))
 check("누적 순위에 5명 전원", len(data["total"]) == 5, str(len(data["total"])))
 
+# ==================================================================
+print("\n🚨 /출석 응답에는 소비 버튼이 붙지 않는다 (2026-10-17 사용자 지시)")
+# ------------------------------------------------------------------
+# 한동안 🎴 카드 뽑기 버튼(10코인·5연속)이 `/출석` 응답에 달려 있었다. "상점에 진열만
+# 하면 안 쓰인다"(리롤권·보호권·테마 0건)는 실측 교훈을 "코인이 손에 들어오는 순간"에
+# 적용한 건데, **그 자리를 /출석으로 고른 건 사용자에게 묻지 않은 판단**이었다.
+# 사용자가 "출석에 카드뽑기가 들어가면 안 된다"고 해서 뗐다(`2f12c8b` → 제거).
+#
+# ⭐ 교훈 자체는 유효하다 — 소비처는 "막힌 그 자리"에 붙어야 팔린다. 다만 **출석은
+#    코인을 받는 자리**라 성격이 반대다. 어디에 붙일지는 먼저 물어볼 것.
+import ast as _ast  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+_att_src = _Path(os.path.join(BOT_DIR, "cogs/attendance.py")).read_text(encoding="utf-8")
+_att_tree = _ast.parse(_att_src)
+_do_attend = next((f for c in _att_tree.body if isinstance(c, _ast.ClassDef)
+                   for f in c.body
+                   if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+                   and f.name == "do_attend"), None)
+check("/출석 핸들러(do_attend)를 찾았다", _do_attend is not None)
+
+if _do_attend is not None:
+    # ⚠️ `view=` kwarg 뿐 아니라 `**extra` 같은 **간접 전달도** 막아야 해요.
+    #    전에 붙어 있던 코드가 정확히 `**extra`로 넘기는 형태였어요.
+    _sends = [n for n in _ast.walk(_do_attend) if isinstance(n, _ast.Call)
+              and getattr(n.func, "attr", "") in ("send", "send_message")]
+    _views = [f"line {n.lineno}" for n in _sends
+              if any(k.arg == "view" for k in n.keywords)
+              or any(k.arg is None for k in n.keywords)]
+    check("🚨 응답에 view를 붙이지 않는다 (**kwargs 간접 전달도 금지)", not _views,
+          ", ".join(_views) if _views else f"send {len(_sends)}곳 확인")
+
+    # 🚨 import 자체를 막아요. 뷰를 만들어 두고 다른 경로로 붙이는 걸 잡으려면
+    #    kwarg 검사만으로는 부족해요.
+    _gacha = [f"line {n.lineno}" for n in _ast.walk(_do_attend)
+              if isinstance(n, (_ast.Import, _ast.ImportFrom))
+              and "card_gacha" in (getattr(n, "module", "") or ""
+                                   ) + "".join(a.name for a in n.names)]
+    check("🚨 card_gacha를 불러오지 않는다", not _gacha,
+          ", ".join(_gacha) if _gacha else "")
+
 print()
 if failures:
     print(f"❌ 실패 {len(failures)}건: {failures}")
