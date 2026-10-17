@@ -1015,6 +1015,61 @@ check("어종 14종을 전부 적는다",
 check("⚠️ 내림을 숨기지 않는다 (기대를 부풀리지 않게)", "내림" in _blob)
 check("🚨 '하루 1개' 같은 옛 제한을 다시 쓰지 않는다", "하루 1개" not in _blob)
 
+# ==================================================================
+print("\n[15] 📏 치수 - 실제 크기로 바꿔도 경제는 그대로여야 한다")
+# ------------------------------------------------------------------
+# 2026-10-18에 치수를 실제 어종 크기로 전면 교정했어요(송사리 6→5, 철갑상어 200→350 등).
+# 그걸 마음 놓고 하려면 **치수가 가격과 분리돼 있다**는 게 보장돼야 해요.
+
+for _key, (_lo, _hi) in _fd.SIZE_BY_KEY.items():
+    _name = _fd.BY_KEY[_key][1]
+    check(f"{_name} 범위가 올바르다 ({_lo}~{_hi}cm)",
+          isinstance(_lo, int) and isinstance(_hi, int) and 0 < _lo < _hi)
+
+# ⭐ 핵심 성질: 범위를 아무리 늘려도 1회 기댓값이 같아야 해요. `pieces_of`가 치수를
+#    **종 범위 안의 상대 위치**로 환산하기 때문이에요. 이게 깨지면 치수를 손볼 때마다
+#    발행량이 조용히 따라 움직여요.
+_base = _fd.expected_coin_per_cast()
+_orig_sizes = dict(_fd.SIZE_BY_KEY)
+try:
+    _fd.SIZE_BY_KEY = {k: (lo * 5, hi * 5) for k, (lo, hi) in _orig_sizes.items()}
+    _scaled = _fd.expected_coin_per_cast()
+
+    def _mc(seed):
+        _r = Random(seed)
+        _gs = list(_fd.GRADES)
+        _ws = [_fd.GRADES[g]["weight"] for g in _gs]
+        _ks = {g: [f["key"] for f in rows] for g, rows in _fd.FISH.items()}
+        _s = 0
+        for _ in range(60_000):
+            _g = _r.choices(_gs, weights=_ws, k=1)[0]
+            _k = _r.choice(_ks[_g])
+            _s += _fd.pieces_of(_k, _fd.roll_size(_k, _r))
+        return _s / 60_000 / _fd.COIN_PIECES
+
+    _mc_scaled = _mc(77)
+finally:
+    _fd.SIZE_BY_KEY = _orig_sizes
+_mc_base = _mc(77)
+
+check("⭐ 치수를 5배로 늘려도 기대값이 같다 (가격과 분리)",
+      abs(_scaled - _base) < 1e-9, f"{_base:.4f} vs {_scaled:.4f}")
+check("⭐ 실제 추첨으로도 같다", abs(_mc_scaled - _mc_base) < 0.02,
+      f"원래 {_mc_base:.4f} vs 5배 {_mc_scaled:.4f}")
+
+# 🚨 하한을 올리면 기존 치수가 **깎인다**는 걸 못 박아요. 이걸 모르고 lo를 올리면
+#    어항에 든 물고기 값이 조용히 내려가요(유저 손해). 2026-10-18 교정 때 그래서
+#    lo를 전부 "기존 최솟값 이하"로 잡았어요.
+_k2 = "f11"                                   # 무지개송어
+_lo2, _hi2 = _fd.SIZE_BY_KEY[_k2]
+_small = _fd.pieces_of(_k2, _lo2 - 10)        # 하한보다 작은 물고기
+check("🚨 하한보다 작으면 그 등급 **최저가**로 깎인다 (lo를 올릴 때의 대가)",
+      _small == _fd.GRADES[_fd.BY_KEY[_k2][0]]["pieces"][0],
+      f"{_small}조각")
+_big = _fd.pieces_of(_k2, _hi2 + 10)
+check("상한보다 크면 최고가 (상한을 내리는 건 안전)",
+      _big == _fd.GRADES[_fd.BY_KEY[_k2][0]]["pieces"][1], f"{_big}조각")
+
 print("\n" + "=" * 60)
 if failures:
     print(f"❌ 실패 {len(failures)}건")
