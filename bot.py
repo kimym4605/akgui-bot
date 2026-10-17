@@ -138,6 +138,60 @@ _BEAT_INTERVAL = 5.0
 _last_beat = time.monotonic()
 _watchdog_armed = False  # 로그인(READY) 전까지는 무장하지 않아요
 
+# 🩺 메모리 흔적 남기기
+#
+# 2026-10-17 사고: 05:02에 프로세스가 **조용히** SIGKILL로 죽었다(exit_code=-1,
+# 워치독 미발동, 트레이스백 없음). 원인을 메모리로 의심했지만 **확인할 방법이 없었다**:
+#   - `flyctl ssh console` : 차단
+#   - Fly Prometheus API   : 앱 스코프 토큰이라 401
+#   - 로그                 : 죽기 전 32분간 무음
+# 결국 "호스트 이벤트 같다"는 정황 추론으로 끝났다. 256MB로 버티는 봇에서 그건 매번
+# 반복될 질문이라, **봇이 스스로 남기게** 한다. 다음엔 추론이 아니라 숫자로 본다.
+#
+# 🚨 여기서도 `logging`을 쓰지 않고 `os.write(2, ...)`로 쓴다. 이 함수는 워치독
+#    스레드가 부르는데, 만약 멈춘 스레드가 logging 락을 쥔 채 굳었다면 로그를 찍으려는
+#    순간 **워치독까지 같이 멈춘다**. 하필 "모든 게 멈췄을 때 동작해야 하는 코드"다.
+#    (바로 아래 스택 덤프가 같은 이유로 락 없는 fd 쓰기를 쓴다.)
+MEM_REPORT_INTERVAL = 600.0     # 10분마다 한 줄 = 하루 144줄, 추세를 보기에 충분
+MEM_WARN_MB = 48.0              # 2026-09-06 실측 idle 여유가 68MB였다
+_last_mem_report = 0.0
+
+
+def _meminfo_mb() -> tuple[float, float] | None:
+    """`/proc/meminfo`에서 (MemAvailable, SwapFree)를 MB로. 리눅스가 아니면 None.
+
+    ⚠️ psutil을 쓰지 않아요 - `requirements.txt`는 `==`로 고정돼 있고, 진단용으로
+    의존성을 늘릴 이유가 없어요. /proc 읽기는 표준 라이브러리로 충분해요."""
+    try:
+        with open("/proc/meminfo", "rb") as fp:
+            raw = fp.read().decode("ascii", "replace")
+    except OSError:
+        return None                      # 윈도우 로컬 실행 등
+    out = {}
+    for line in raw.splitlines():
+        name, _, rest = line.partition(":")
+        if name in ("MemAvailable", "SwapFree"):
+            parts = rest.split()
+            if parts and parts[0].isdigit():
+                out[name] = int(parts[0]) / 1024.0      # kB -> MB
+    if "MemAvailable" not in out:
+        return None
+    return out["MemAvailable"], out.get("SwapFree", 0.0)
+
+
+def _report_memory() -> None:
+    """메모리 여유를 stderr에 한 줄 남겨요. 락을 쓰지 않아요(위 주석 참고)."""
+    info = _meminfo_mb()
+    if info is None:
+        return
+    avail, swap_free = info
+    mark = "🚨 여유 부족" if avail < MEM_WARN_MB else "🩺"
+    try:
+        os.write(2, f"{mark} 메모리: 여유 {avail:.0f}MB · 스왑여유 "
+                    f"{swap_free:.0f}MB\n".encode("utf-8", "replace"))
+    except OSError:
+        pass
+
 
 async def _beat_loop(bot: commands.Bot):
     """이벤트 루프가 살아있다는 걸 알리는 심장박동. 루프가 막히면 같이 멈춰요."""
@@ -157,8 +211,32 @@ async def _beat_loop(bot: commands.Bot):
 
 def _watchdog_thread():
     """이벤트 루프와 독립된 감시 스레드. 루프가 죽어도 이 스레드는 살아있어요."""
+    global _last_mem_report
+
+    # 🩺 기준선을 **지금 바로** 한 줄 남겨요. 기동 직후 수치가 있어야 나중에
+    #    "원래 이랬나 늘어난 건가"를 비교할 수 있어요. 10분을 기다리면 그 사이에
+    #    죽은 경우(= 제일 알고 싶은 경우) 아무 기록도 안 남아요.
+    #
+    # ⚠️ `_last_mem_report`를 0.0으로 두지 말고 `time.monotonic()`으로 맞춰요.
+    #    리눅스에서 `monotonic()`은 **부팅 후 경과초**라, 0.0 기준이면 첫 보고 시점이
+    #    "프로세스가 뜬 뒤 10분"이 아니라 "**VM이 부팅된 뒤** 10분"이 돼요. 머신을
+    #    재시작만 한 경우엔 즉시 찍히고, 새 머신이면 부팅 시각에 좌우돼요.
+    #    치명적이진 않지만 간격이 예측 가능해야 추세를 읽을 수 있어요.
+    _report_memory()
+    _last_mem_report = time.monotonic()
+
     while True:
         time.sleep(WATCHDOG_CHECK_INTERVAL)
+
+        # 🩺 메모리 흔적은 **무장 여부와 무관하게** 남겨요. 부팅 중(캐시 수집 등)이
+        #    제일 메모리를 많이 쓰는 구간인데, 무장 뒤로 미루면 그때를 놓쳐요.
+        #
+        # ⚠️ 이 스레드에서 찍는 이유: 이벤트 루프 위에 올리면 **루프가 막힌 순간
+        #    같이 멈춰서**, 정작 알고 싶은 "죽기 직전"이 기록되지 않아요.
+        now = time.monotonic()
+        if now - _last_mem_report >= MEM_REPORT_INTERVAL:
+            _last_mem_report = now
+            _report_memory()
 
         if not _watchdog_armed:
             continue
@@ -179,6 +257,11 @@ def _watchdog_thread():
             os.write(2, message.encode("utf-8", "replace"))
         except OSError:
             pass
+
+        # 🩺 멈춤의 단골 원인이 메모리 고갈이에요(스왑으로 밀려난 코드 페이지를 매번
+        #    디스크에서 다시 읽느라 기어가는 상태). 스택만 보면 "어디서 멈췄나"는
+        #    알아도 "왜"는 모르니, 죽기 직전 숫자를 같이 남겨요.
+        _report_memory()
 
         # 모든 스레드의 스택 = 다음 재발 때 원인을 잡을 유일한 단서.
         # faulthandler도 fd에 직접 쓰기 때문에 락에 걸리지 않아요.
