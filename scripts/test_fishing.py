@@ -770,9 +770,12 @@ print("\n[13] 🚨 3초 - 상호작용 토큰 만료")
 # ⭐ 고친 방식: **DB보다 `defer()`가 먼저.** 받아두면 그 뒤로는 15분짜리 웹훅
 #    토큰이라 DB가 얼마나 느리든 안전해요.
 
+# ⚠️ 2026-10-18에 `run_cast`가 **가드 껍데기**로 바뀌고 실제 진행은 `_run_cast`가
+#    맡게 됐어요(동시에 한 판만). 아래 3초 토큰 검사는 **던지는 쪽**을 봐야 하니
+#    안쪽 함수를 대상으로 해요.
 _run_fn = next(f for f in _tree.body
                if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))
-               and f.name == "run_cast")
+               and f.name == "_run_cast")
 _defer_line = next((n.lineno for n in _ast.walk(_run_fn)
                     if isinstance(n, _ast.Call)
                     and getattr(n.func, "attr", "") == "defer"), None)
@@ -791,6 +794,29 @@ _direct = [f"line {n.lineno}" for n in _ast.walk(_run_fn) if isinstance(n, _ast.
 check("첫 화면도 edit_original_response로 띄운다", not _direct,
       "response.send_message/edit_message가 남아 있어요: " + ", ".join(_direct)
       if _direct else "")
+
+# 🚨 **가드 껍데기(`run_cast`)는 DB를 건드리면 안 돼요.**
+#
+# 거절 경로는 `defer()` 없이 바로 `send_message`로 답해요. 그게 가능한 이유는
+# 메모리 dict만 보고 끝나기 때문이에요. 여기에 누가 Atlas 왕복(`fishing_store.*`,
+# `coin_wallet.*`)을 끼워 넣으면 **3초 토큰이 다시 터져요** — 그것도 "이미 던져뒀어요"
+# 라는 안내 한 줄 때문에요. 그래서 못 박아둬요.
+_guard_fn = next(f for f in _tree.body
+                 if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+                 and f.name == "run_cast")
+_guard_db = [f"line {n.lineno}: {getattr(n.func, 'attr', '?')}"
+             for n in _ast.walk(_guard_fn) if isinstance(n, _ast.Call)
+             and getattr(getattr(n.func, "value", None), "id", "")
+             in ("fishing_store", "coin_wallet", "mission_store")]
+check("🚨 동시 낚시 가드는 DB를 안 본다 (3초 토큰 재발 방지)", not _guard_db,
+      ", ".join(_guard_db) if _guard_db else "메모리 dict만 봐요")
+
+# 가드가 실제로 달려 있나 - 누가 지우면 병렬 낚시가 조용히 되살아나요.
+_has_guard = any(getattr(getattr(n, "value", None), "id", "") == "_casting"
+                 or getattr(n, "id", "") == "_casting"
+                 for n in _ast.walk(_guard_fn))
+check("🚨 `run_cast`에 동시 실행 가드가 있다", _has_guard,
+      "_casting을 참조해요" if _has_guard else "⚠️ _casting 참조가 사라졌어요")
 
 
 # 실제로 토큰이 죽은 상황을 흉내내요 - 낚시대가 깎이면 안 돼요.

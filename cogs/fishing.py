@@ -109,6 +109,33 @@ ROD_NOTE = "낚시대"
 
 BITE_MIN, BITE_MAX = 2.0, 8.0      # 입질까지 기다리는 시간
 BITE_WINDOW = 2.5                  # 입질 후 챔질 제한시간
+
+# ------------------------------------------------------------------
+# 🎣 한 사람당 **동시에 한 판만** (2026-10-18 사용자 결정)
+#
+# ## 왜 막는가
+#
+# `/낚시`를 연달아 쳐서 찌를 여러 개 띄워두고 기다리는 방법이 있었어요. 코인이
+# 복제되는 건 아니에요 - 내구도는 던질 때마다 정직하게 깎이니까요(`use_rod`는
+# 조건부 원자 차감이에요). 문제는 **속도**예요.
+#
+# 입질 대기(2~8초)가 낚시의 유일한 속도 제한인데, 병렬로 던지면 그게 사라져요.
+# 10-18 실측: 한 사람이 낚시대를 **중앙 2초 간격**으로 147개 사며 1,390캐스트를
+# 돌렸어요(서버 전체 캐스트의 47%). 같은 시기 정상 플레이어는 **129초 간격**이었고요.
+# 즉 방법을 아는 소수만 수십 배 빨리 벌고 있었어요. 낚시는 전체 발행의 70%고요.
+#
+# ## 어떻게 막는가
+#
+# 유저별로 "지금 한 판 돌고 있음"을 들고, 끝나면 `finally`로 지워요.
+#
+# ⚠️ **메모리 dict면 충분해요.** 봇이 단일 프로세스고, 재시작되면 진행 중이던 판은
+#    어차피 사라지니 플래그도 같이 사라지는 게 맞아요(`FishingView`와 같은 성격).
+# 🚨 **TTL이 안전장치예요.** `finally`가 어떤 이유로든 안 돌면 그 사람은 영영 낚시를
+#    못 하게 돼요. 뷰 타임아웃보다 넉넉한 시간이 지나면 저절로 풀리게 해뒀어요.
+# ⚠️ 기존 `CastAgainView._started`는 **같은 버튼의 연타**만 막아요(뷰 인스턴스 소유).
+#    서로 다른 `/낚시` 호출은 각자 새 뷰라 그걸로는 못 막아서 이 가드가 따로 필요해요.
+_casting: dict[int, float] = {}
+CAST_GUARD_TTL = BITE_MAX + BITE_WINDOW + 15.0
 WAIT_COLOR, BITE_COLOR = 0x2B6CB0, 0x38A169
 MISS_COLOR = 0x6B7280
 
@@ -305,6 +332,39 @@ class CastAgainView(discord.ui.View):
 
 
 async def run_cast(interaction: discord.Interaction, *, edit: bool) -> bool:
+    """한 판 돌리기. **동시에 한 판만** 허용하는 가드를 씌운 얇은 껍데기예요.
+
+    실제 진행은 `_run_cast`가 해요. 가드를 여기서 따로 떼어둔 이유는, 안쪽에서
+    무슨 일이 나든(예외·조기 return) `finally`가 **반드시** 플래그를 지우게 하려고요.
+    플래그가 남으면 그 사람은 낚시를 영영 못 해요.
+
+    이미 한 판이 돌고 있으면 거절하고 `False`를 줘요. `CastAgainView`는 `False`를
+    받으면 자기 연타 가드를 되돌리는데, 그게 맞아요 — 앞 판이 끝난 뒤에는 그 버튼이
+    다시 눌려야 하니까요(그때는 이 가드도 이미 풀려 있어요)."""
+    uid = interaction.user.id
+    now = time.monotonic()
+
+    started_at = _casting.get(uid)
+    if started_at is not None and now - started_at < CAST_GUARD_TTL:
+        try:
+            await interaction.response.send_message(
+                "🎣 이미 찌를 던져뒀어요. **그 판을 먼저 끝내주세요.**\n"
+                "-# 한 번에 한 판만 할 수 있어요. 결과 화면의 **다시 던지기**를 쓰면 편해요.",
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            # 이미 응답됐거나 토큰이 죽었어도 **던지지 않은 것**이 중요해요.
+            log.info("🎣 동시 낚시 거절 안내 실패 (user=%s)", uid)
+        return False
+
+    _casting[uid] = now
+    try:
+        return await _run_cast(interaction, edit=edit)
+    finally:
+        _casting.pop(uid, None)
+
+
+async def _run_cast(interaction: discord.Interaction, *, edit: bool) -> bool:
     """한 번 던지기. `/낚시`와 🎣 다시 던지기 버튼이 **같이** 써요.
 
     `edit=False`면 새 메시지를 띄우고(슬래시 명령), `edit=True`면 **지금 메시지를
