@@ -514,18 +514,14 @@ check("가중치가 등급이 높을수록 작다",
 
 # ==================================================================
 print("\n[10] 경제 리포트가 낚시 수입을 발행으로 세는가")
-import ast  # noqa: E402
-from pathlib import Path  # noqa: E402
+# ⚠️ 2026-10-18에 분류 규칙이 `scripts/report_economy.py` 안에서
+#    `utils/coin_ledger.py`로 옮겨졌어요(`/서버리포트`와 같은 규칙을 쓰려고).
+#    예전엔 스크립트를 AST로 뜯어 `classify`만 꺼내 썼는데, 이제 그냥 import해요.
+from pathlib import Path  # noqa: E402  (아래 [11]에서도 써요)
 
-tree = ast.parse(Path(os.path.join(BOT_DIR, "scripts/report_economy.py"))
-                 .read_text(encoding="utf-8"))
-keep = [n for n in tree.body
-        if (isinstance(n, ast.Assign)
-            and any(getattr(t, "id", "").endswith(("_SPEND", "_ADD")) for t in n.targets))
-        or (isinstance(n, ast.FunctionDef) and n.name == "classify")]
-ns = {}
-exec(compile(ast.Module(body=keep, type_ignores=[]), "rules", "exec"), ns)
-got = ns["classify"]({"kind": "add", "note": fishing.COIN_LOG_NOTE})
+from utils.coin_ledger import classify  # noqa: E402
+
+got = classify({"kind": "add", "note": fishing.COIN_LOG_NOTE})
 check("낚시판매가 '발행'으로 분류된다", got == "issue", f"-> {got}")
 check("note가 도박/카드뽑기와 안 겹친다",
       not fishing.COIN_LOG_NOTE.startswith(("도박", "카드뽑기", "내전베팅")))

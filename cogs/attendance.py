@@ -327,6 +327,7 @@ class Attendance(commands.Cog):
         app_commands.Choice(name="❓ 봇 매니저 (질문을 적으면 답해주는 채널)", value="assistant"),
         app_commands.Choice(name="🔔 경기 결과 자동 알림 (끄려면 지정하지 마세요)", value="match_feed"),
         app_commands.Choice(name="💡 건의함 (/건의, /건의목록)", value="suggestion"),
+        app_commands.Choice(name="📅 일정 (/일정, /일정목록)", value="event"),
     ])
     async def set_channel(
         self,
