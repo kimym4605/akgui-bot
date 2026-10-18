@@ -1,6 +1,7 @@
 """cog 로딩 + 슬래시 명령 정의 검증. 디스코드에 접속하지 않고 확인해요."""
 import asyncio
 import os
+import subprocess
 import sys
 
 BOT_DIR = r"C:\Users\user\Desktop\악귀봇프로젝트\discord-bot-starter-py"
@@ -211,6 +212,25 @@ async def main():
                       "(`python scripts/scan_interaction_latency.py`로 자세히)")
     else:
         print("  ✅ 걸린 핸들러 없음")
+
+    # ------------------------------------------------------------------
+    # 🚨 **만들었는데 아무도 안 부르는 저장소 함수.** 2026-10-18에 `fishing_week`를
+    #    만들고 `cogs/fishing.py`에 호출을 안 걸어서, 주간 낚시 대회가 멀쩡히 돌면서
+    #    영원히 "아무도 낚지 않았어요"를 발표할 상태로 **이 관문을 통과해 배포됐어요.**
+    #    기능별 테스트는 저장소를 직접 불러 검증하니 이 누락을 못 잡아요.
+    print("\n연결 안 된 저장소 함수:")
+    _orphan_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "scan_orphan_modules.py")
+    _proc = subprocess.run([sys.executable, _orphan_path],
+                           capture_output=True, text=True, encoding="utf-8")
+    if _proc.returncode != 0:
+        for line in (_proc.stdout or "").splitlines():
+            if line.strip().startswith(("-", "🚨", "❌")):
+                print(f"  {line.strip()}")
+        failed.append("연결 안 된 저장소 함수가 있어요 "
+                      "(`python scripts/scan_orphan_modules.py`로 자세히)")
+    else:
+        print("  ✅ 쓰기 함수가 전부 어딘가에서 불려요")
 
     print("\n" + "=" * 50)
     if failed:
