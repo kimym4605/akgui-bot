@@ -63,6 +63,17 @@ intents.members = True  # ⚠️ 특권 인텐트예요. 자동 역할 부여(on
 # ⚠️ Discord 개발자 포털 > Bot 탭 > Privileged Gateway Intents 에서
 #    "SERVER MEMBERS INTENT"를 반드시 켜주세요. 안 켜면 아래에서 에러가 나요.
 
+# ❓ 봇 매니저(cogs/assistant.py)가 전용 채널의 질문을 읽으려면 메시지 내용이 필요해요.
+#
+# 🚨 **이것도 특권 인텐트예요.** 포털에서 "MESSAGE CONTENT INTENT"를 켜지 않고 여기서만
+#    True로 두면 로그인 단계에서 PrivilegedIntentsRequired로 **봇이 아예 안 떠요.**
+#    그래서 기본은 꺼둬요. 순서를 지켜주세요.
+#      1. 포털 > Bot > Privileged Gateway Intents > MESSAGE CONTENT INTENT 켜기
+#      2. flyctl secrets set ASSISTANT_READ_MESSAGES=1
+#    (안 켜도 `/도움` 명령어는 그냥 돼요. 전용 채널 쪽만 안 듣는 거예요)
+if os.getenv("ASSISTANT_READ_MESSAGES", "").strip() in {"1", "true", "True", "yes"}:
+    intents.message_content = True
+
 # ------------------------------------------------------------------
 # 📦 기능별 Cog 그룹 — 여기서 어떤 기능이 있는지 한눈에 볼 수 있어요.
 #    새 기능을 추가하면 알맞은 그룹에 파일 이름만 추가하면 돼요.
@@ -103,6 +114,7 @@ COG_GROUPS: dict[str, list[str]] = {
         "betting",       # /베팅개설 - 내전 승부에 코인 걸기 (파리뮤추얼 정산)
     ],
     "🛠️ 커뮤니티/운영": [
+        "assistant",     # ❓ /도움 + 전용 채널 Q&A - 규칙 매칭 먼저, 못 잡으면 Claude(Haiku)
         "onboarding",    # 규칙 동의/온보딩
         "autorole",      # 자동 역할 부여
         "birthday",      # 생일 알림

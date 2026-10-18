@@ -20,6 +20,10 @@ cryptography==50.0.1
 # ⚠️ 이것만으로는 한글이 두부(□)로 나와요 - 폰트는 Dockerfile에서 fonts-nanum으로 따로 깔아요.
 Pillow==12.3.0
 
+# ❓ 봇 매니저(cogs/assistant.py)가 규칙으로 못 잡은 질문을 Claude(Haiku)에게 넘길 때 써요.
+# ⚠️ 이게 없거나 ANTHROPIC_API_KEY가 없어도 cog는 떠요 - 그때는 규칙 매칭만 돌아가요.
+anthropic==1.15.0
+
 # 📌 yt-dlp는 여기 없어요 — 일부러예요.
 #
 # 유튜브가 추출 방식을 수시로 바꿔서, yt-dlp는 **낡으면 노래방이 그냥 깨져요.**
