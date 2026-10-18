@@ -58,7 +58,8 @@ async def sync_role(member: discord.Member, level: int) -> str | None:
         if role is None:
             role = await guild.create_role(
                 name=target, colour=discord.Colour(0x5865F2),
-                hoist=False, mentionable=False,
+                # ⭐ 멤버 목록에 따로 띄워요. 코인을 안 주는 대신 보이는 게 보상이에요.
+                hoist=True, mentionable=False,
                 reason="음성 레벨 역할 자동 생성",
             )
         await member.add_roles(role, reason="음성 레벨 달성")

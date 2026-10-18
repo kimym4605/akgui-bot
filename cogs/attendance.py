@@ -328,6 +328,8 @@ class Attendance(commands.Cog):
         app_commands.Choice(name="🔔 경기 결과 자동 알림 (끄려면 지정하지 마세요)", value="match_feed"),
         app_commands.Choice(name="💡 건의함 (/건의, /건의목록)", value="suggestion"),
         app_commands.Choice(name="📅 일정 (/일정, /일정목록)", value="event"),
+        # ⚠️ 선택지는 디스코드 한도가 25개예요. 지금 21개.
+        app_commands.Choice(name="🏆 주간결산 (🏅 주간MVP · 🎣 낚시 대회 발표)", value="weekly"),
     ])
     async def set_channel(
         self,

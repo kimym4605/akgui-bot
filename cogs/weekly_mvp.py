@@ -40,8 +40,13 @@ KST = datetime.timezone(datetime.timedelta(hours=9))
 ROLE_NAME = "🏅 주간 MVP"
 ROLE_COLOR = discord.Color(0xFFD700)
 
-# 발표는 주간랭킹과 같은 채널(프로필·업적 그룹)에 해요.
-CHANNEL_GROUP = "profile"
+# 발표는 🏆 주간결산 채널에 해요. 월요일 발표가 둘(🏅 MVP 11:00 · 🎣 낚시 대회 11:30)이라
+# 흩어져 있으면 "월요일엔 여기 보면 된다"가 안 생겨요.
+# ⚠️ `fallback_group`은 **설정을 아직 안 했을 때의 보험**이에요. 그룹을 새로 쪼개면 그 사이에
+#    "채널 없음 = 발표 못 함"으로 조용히 멈춰요. 그때는 원래 자리(#프로필)에 그대로 올려요.
+CHANNEL_GROUP = "weekly"
+CHANNEL_ENV = "WEEKLY_CHANNEL_ID"
+CHANNEL_FALLBACK = "profile"
 
 # 월요일 아침에 지난주를 결산해요.
 SEND_AT = datetime.time(hour=11, minute=0, tzinfo=KST)
@@ -103,7 +108,9 @@ async def ensure_role(guild: discord.Guild) -> discord.Role | None:
         return await guild.create_role(
             name=ROLE_NAME,
             color=ROLE_COLOR,
-            hoist=False,
+            # ⭐ 멤버 목록에 따로 띄워요(`hoist`). 코인 대신 **명예로 주는 상**이라
+            #    보이지 않으면 상이 아니에요. 🎣 낚시왕·🎙️ 음성 레벨도 같이 띄워요.
+            hoist=True,
             mentionable=False,
             reason="주간 MVP 역할 자동 생성",
         )
@@ -157,11 +164,12 @@ class WeeklyMVP(commands.Cog):
 
         given = await hand_over_role(guild, member)
 
-        channel_id = get_allowed_channel_id(CHANNEL_GROUP)
+        channel_id = get_allowed_channel_id(
+            CHANNEL_GROUP, CHANNEL_ENV, fallback_group=CHANNEL_FALLBACK)
         channel = guild.get_channel(channel_id) if channel_id else None
         if channel is None:
             return (f"MVP는 **{member.display_name}** 님인데, 발표할 채널이 없어요. "
-                    "`/채널설정 프로필·업적`으로 정해주세요.")
+                    "`/채널설정`으로 🏆 주간결산 채널을 정해주세요.")
 
         embed = build_embed(winner_row, week, member.display_name, len(rows))
         await channel.send(content=f"🎉 {member.mention}", embed=embed)

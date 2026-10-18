@@ -124,7 +124,21 @@ asyncio.run(main())
 
 
 # ------------------------------------------------------------------
-print("\n⒟ 발표 시각")
+print("\n⒟ 발표 자리와 시각")
+from cogs import weekly_mvp  # noqa: E402
+
+# 🚨 **낚시터에 발표하면 안 된다.** 하루 66개 글(실측 2026-10-18)에 묻히고, 낚시터는
+#    이미 낚시하는 사람만 보는 채널이라 "수혜자 12명을 늘린다"는 목적에 안 닿는다.
+check("낚시터가 아니라 주간결산 채널에 발표한다",
+      contest.CHANNEL_GROUP == "weekly", contest.CHANNEL_GROUP)
+# 🚨 월요일 발표가 흩어지면 "월요일엔 여기 보면 된다"가 안 생긴다.
+check("🏅 주간 MVP와 **같은 채널**을 쓴다",
+      contest.CHANNEL_GROUP == weekly_mvp.CHANNEL_GROUP,
+      f"{contest.CHANNEL_GROUP} vs {weekly_mvp.CHANNEL_GROUP}")
+# ⚠️ 설정을 아직 안 했을 때 조용히 발표를 못 하는 걸 막는 보험.
+check("설정 전 보험(fallback_group)이 둘 다 있다",
+      bool(getattr(contest, "CHANNEL_FALLBACK", None))
+      and bool(getattr(weekly_mvp, "CHANNEL_FALLBACK", None)))
 check("월요일에 발표한다", contest.SEND_WEEKDAY == 0)
 check("🏅 주간 MVP(11:00)와 겹치지 않는다",
       (contest.SEND_AT.hour, contest.SEND_AT.minute) != (11, 0),

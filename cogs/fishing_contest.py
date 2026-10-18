@@ -38,9 +38,15 @@ KST = datetime.timezone(datetime.timedelta(hours=9))
 ROLE_BIG = "🎣 이주의 낚시왕"
 ROLE_COLOR = discord.Colour(0x3B82F6)
 
-# 낚시터 채널에 발표해요.
-CHANNEL_GROUP = "fishing"
-CHANNEL_ENV = "FISHING_CHANNEL_ID"
+# 🏆 주간결산 채널에 발표해요.
+#
+# 🚨 **낚시터에 발표하면 안 돼요.** 실측(2026-10-18) 하루 66개 글이 쏟아져서 월요일
+#    11:30 발표가 바로 묻혀요. 게다가 낚시터는 **이미 낚시하는 사람만** 보는 채널이라,
+#    "수혜자 12명을 늘린다"는 이 대회의 목적에 발표가 닿지 않아요.
+# ⚠️ `fallback_group`은 설정 전 보험이에요(없으면 조용히 발표를 못 해요).
+CHANNEL_GROUP = "weekly"
+CHANNEL_ENV = "WEEKLY_CHANNEL_ID"
+CHANNEL_FALLBACK = "fishing"
 
 # 월요일 낮. 🏅 주간 MVP(11:00)와 겹치지 않게 조금 뒤로 미뤄요.
 SEND_AT = datetime.time(hour=11, minute=30, tzinfo=KST)
@@ -95,7 +101,9 @@ async def hand_over_role(guild: discord.Guild, winner: discord.Member) -> bool:
     try:
         if role is None:
             role = await guild.create_role(
-                name=ROLE_BIG, colour=ROLE_COLOR, hoist=False, mentionable=False,
+                # ⭐ `hoist=True` — 멤버 목록에 따로 띄워요. 상금 대신 주는 명예라
+                #    보이지 않으면 상이 아니에요.
+                name=ROLE_BIG, colour=ROLE_COLOR, hoist=True, mentionable=False,
                 reason="주간 낚시왕 역할 자동 생성",
             )
         for member in list(role.members):
@@ -139,11 +147,12 @@ class FishingContest(commands.Cog):
                 given = f" · 역할은 **{champ.display_name}** 님께" if ok else \
                     "\n⚠️ 역할은 권한이 없어 못 줬어요."
 
-        channel_id = get_allowed_channel_id(CHANNEL_GROUP, CHANNEL_ENV)
+        channel_id = get_allowed_channel_id(
+            CHANNEL_GROUP, CHANNEL_ENV, fallback_group=CHANNEL_FALLBACK)
         channel = guild.get_channel(channel_id) if channel_id else None
         if channel is None:
             return ("대회 결과는 나왔는데 발표할 채널이 없어요. "
-                    "`/채널설정 🎣 낚시`로 정해주세요.")
+                    "`/채널설정`으로 🏆 주간결산 채널을 정해주세요.")
 
         await channel.send(embed=build_embed(wk, big, rich, names))
         return f"{channel.mention}에 발표했어요{given}"
