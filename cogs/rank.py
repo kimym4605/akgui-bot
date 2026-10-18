@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 import aiohttp
 
-from utils import agwi_weekly_store, henrik_api
+from utils import agwi_weekly_store, henrik_api, valorant_coach
 from utils.channel_check import restrict_to_channel
 from utils.rank_stats_store import get_kd_percentile, get_sample_size, record_stats
 from utils.riot_account_store import get_account, is_matching_account
@@ -723,6 +723,16 @@ class Rank(commands.Cog):
         embed = build_summary_embed(닉네임, 태그, tier_name, rr, stats, comp_count, used_fallback, effective_target)
         if tier_id is not None and tier_id in self.tier_icons:
             embed.set_thumbnail(url=self.tier_icons[tier_id])
+
+        # 🎯 AI 한 줄 평 (2026-10-18). 숫자를 "뭘 고치면 되는지"로 바꿔줘요.
+        #
+        # 🚨 **실패해도 전적은 그대로 나가야 해요.** `coach()`는 키가 없든 크레딧이
+        #    떨어졌든 **None을 줄 뿐 예외를 안 올려요**(`utils/ai.py` 참고). 그래서
+        #    여기선 if 하나면 충분하고, try로 감쌀 필요가 없어요.
+        # 💰 전적이 그대로면 캐시가 받아서 호출이 안 일어나요(연타해도 한 번만 과금).
+        coach_note = await valorant_coach.coach(stats, tier_name)
+        if coach_note:
+            embed.add_field(name="🎯 한 줄 평", value=coach_note, inline=False)
         if role_sync_note:
             embed.add_field(name="티어 역할", value=role_sync_note, inline=False)
         if position_sync_note:

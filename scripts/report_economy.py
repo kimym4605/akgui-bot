@@ -45,58 +45,17 @@ load_dotenv(os.path.join(BOT_DIR, ".env"))
 
 from utils.pokemon_store import _db  # noqa: E402
 
+# 🚨 분류 규칙은 `utils/coin_ledger.py` 한 곳에만 둬요.
+#    `/서버리포트`(cogs/ops_report.py)도 같은 모듈을 써요 — 규칙을 복제했더니 두 리포트가
+#    다른 소각률을 말하는 일이 실제로 있었어요(2026-10-18). 여기를 고치지 말고 거기를 고치세요.
+from utils.coin_ledger import (  # noqa: E402
+    GAMBLE_ADD, GAMBLE_SPEND, REDIST_ADD, REDIST_SPEND, REFUND_ADD,
+    WALLET_COLLECTIONS, classify, kst_of,
+)
+
 KST = timezone(timedelta(hours=9))
 TODAY = datetime.now(KST).date()
-# 나갔다가 그대로 돌아오는 재분배예요(파리뮤추얼). 총량이 안 바뀌니 발행·소각 양쪽에서 빼요.
-REDIST_SPEND = ("내전베팅",)
-REDIST_ADD = ("베팅정산",)
-# 나갔다가 일부만 돌아와요. 차액(하우스 몫)만 소각이에요.
-GAMBLE_SPEND = ("도박",)
-GAMBLE_ADD = ("도박 당첨", "도박 환불", "도박 버그 보상")
-# 🚨 되돌린 거래예요. 소각도 발행도 **아니에요** - 아예 없던 일로 쳐야 해요.
-#
-# 🎴 카드 뽑기는 저장이 밀리거나(동시 실행) 도중에 터지면 코인을 되돌려줘요. 그 환불은
-# kind가 `add`라서 그냥 두면 **출석·미션과 같은 "발행"으로 세어져** 발행량이 부풀어요.
-# (`카드뽑기` spend 10 + `카드뽑기:환불` add 10 → 소각 10·발행 10으로 잡히는데 실제로는
-#  아무 일도 안 일어났어요.) 그래서 둘 다 빼요.
-# 환불은 `burn`으로 잡힌 같은 금액의 spend를 상쇄해요 -> net_burn에서 빼요.
-REFUND_ADD = ("카드뽑기:환불",)
 
-
-def kst_of(oid):
-    """coin_log에는 시각 필드가 없어요. ObjectId 앞 4바이트에 생성시각이 들어있어요."""
-    return oid.generation_time.astimezone(KST)
-
-
-def classify(entry):
-    """로그 한 줄을 'issue(발행)/burn(소각)/gamble_bet/gamble_back/redist' 로 갈라요.
-
-    ⚠️ `도박 당첨`이 `도박`으로도 시작하니까, **add/spend를 먼저 보고** 판단해요.
-    """
-    note = entry["note"] or ""
-
-    # 🚨 유저 사이를 오간 코인은 **발행도 소각도 아니에요**(재분배). `/코인보내기`와
-    #    🎪 장터가 여기로 와요. `kind`가 add도 spend도 아니라서, 이 분기가 없으면
-    #    맨 아래 `return "burn"`으로 떨어져 **송금이 통째로 소각으로 집계**돼요.
-    #    (2026-10-17까지 실제로 그 상태였어요 - 송금 기록이 0건이라 안 드러났을 뿐이에요.)
-    if entry["kind"] == "transfer":
-        return "transfer"
-
-    if entry["kind"] == "add":
-        if note.startswith(GAMBLE_ADD):
-            return "gamble_back"
-        if note.startswith(REDIST_ADD):
-            return "redist"
-        # ⚠️ 환불은 반드시 `issue`보다 **먼저** 걸러요. 안 그러면 되돌린 코인이
-        #    출석·미션과 같은 발행으로 세어져 발행량이 부풀어요.
-        if note.startswith(REFUND_ADD):
-            return "refund"
-        return "issue"
-    if note.startswith(GAMBLE_SPEND):
-        return "gamble_bet"
-    if note.startswith(REDIST_SPEND):
-        return "redist"
-    return "burn"
 
 
 def bar(n, scale=1):
@@ -204,7 +163,7 @@ for day in sorted(daily):
 
 # ── 3. 지갑 분포 ────────────────────────────────────────────────────
 balances = []
-for col in ("trainers", "coin_reset_backup"):
+for col in WALLET_COLLECTIONS:
     balances += [int(d.get("coin") or 0) for d in _db[col].find({"coin": {"$exists": True}}, {"coin": 1})]
 balances = sorted(b for b in balances if b >= 0)
 if balances:

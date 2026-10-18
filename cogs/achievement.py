@@ -27,6 +27,7 @@ from utils import (
     scrim_record_store,
     tier_roles,
     valorant_maps,
+    weekly_recap,
 )
 from utils.channel_check import restrict_to_channel
 
@@ -376,6 +377,33 @@ class Achievement(commands.Cog):
                 value="아직 기록된 경기가 없어요. `/팀짜기` 후 결과 버튼을 눌러주세요.",
                 inline=False,
             )
+
+        # 🏆 AI 해설 (2026-10-18). 순위표를 이야기로 만들어줘요.
+        #
+        # 🚨 **모델에게 디스코드 ID를 넘기지 않아요.** 표시 이름만 넘기고 답변에도 이름만
+        #    쓰게 해요. 멘션을 지어내면 엉뚱한 사람을 부르게 돼요(멘션 달린 순위표는
+        #    바로 위에 이미 있어요).
+        # 🚨 실패해도 순위표는 그대로 나가야 해요 — `recap()`은 None을 줄 뿐 예외를
+        #    올리지 않아요(`utils/ai.py`).
+        if rows:
+            # 지난주 화면에서는 비교를 안 해요(그 전주까지 끌어오면 이야기가 헷갈려요).
+            last_rows: list[dict] = []
+            if not 지난주:
+                last_rows = await agwi_weekly_store.top(
+                    agwi_weekly_store.previous_week_key(), limit=10
+                )
+
+            names: dict[str, str] = {}
+            for row in list(rows) + list(last_rows):
+                uid = str(row.get("userId"))
+                if uid in names:
+                    continue
+                member = interaction.guild.get_member(int(uid)) if interaction.guild else None
+                names[uid] = member.display_name if member else "탈퇴한 사람"
+
+            note = await weekly_recap.recap(list(rows), list(last_rows), names, week)
+            if note:
+                embed.add_field(name="📝 이번 주 이야기", value=note, inline=False)
 
         embed.set_footer(text="악귀력은 /전적 을 돌린 사람만 집계돼요 · 내전은 /팀짜기 결과 보고 기준")
         await interaction.followup.send(embed=embed)
