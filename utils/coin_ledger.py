@@ -42,8 +42,34 @@ GAMBLE_ADD = ("도박 당첨", "도박 환불", "도박 버그 보상")
 REFUND_ADD = ("카드뽑기:환불",)
 
 # 지갑 잔액이 흩어져 있는 컬렉션. 🚨 `trainers`만 보면 절반도 안 세요
-# (2026-10-18 실측: trainers만 21개 / 실제 58개).
+# (2026-10-18 실측: trainers 21명 + coin_reset_backup 37명, 고유 유저 48명).
+#
+# ⚠️ **같은 유저가 양쪽에 있어요**(실측 10명). 그래서 이어붙이면 안 되고 유저별로
+#    합쳐야 해요 — 아래 `wallet_balances()`를 쓰세요. 직접 이어붙이지 말 것.
+# 🚨 겹칠 때 **현재값은 `trainers`**예요(`coin_reset_backup`은 리셋 전 스냅샷).
 WALLET_COLLECTIONS = ("trainers", "coin_reset_backup")
+
+# 겹쳤을 때 이기는 쪽(현재값).
+CURRENT_WALLET = "trainers"
+
+
+def wallet_balances(db) -> list[int]:
+    """지갑 잔액 목록. **유저별로 하나씩**이고 오름차순이에요.
+
+    🚨 2026-10-18까지 두 리포트가 두 컬렉션을 그냥 **이어붙여서 10명을 중복으로**
+    셌어요(지갑 58개 ← 실제 48명). 중복된 쪽은 백업 잔액이 거의 0이라 **중앙값이
+    5.5인데 3.5로 낮게** 나왔고, "중앙값이 안 움직인다"는 진단의 일부가 측정 탓이었어요.
+    그래서 집계 규칙을 여기 하나로 모아요(복제했다가 두 리포트가 95.6% vs 80.9%로
+    갈린 전례가 있어요).
+    """
+    by_user: dict[str, int] = {}
+    for name in WALLET_COLLECTIONS:
+        for doc in db[name].find({"coin": {"$exists": True}}, {"coin": 1}):
+            uid = str(doc["_id"])
+            # 순서에 기대지 않아요 — 현재값 컬렉션이면 무조건 덮어써요.
+            if name == CURRENT_WALLET or uid not in by_user:
+                by_user[uid] = int(doc.get("coin") or 0)
+    return sorted(v for v in by_user.values() if v >= 0)
 
 
 def classify(entry: dict) -> str:

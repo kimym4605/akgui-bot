@@ -66,14 +66,9 @@ def _collect_sync(days: int) -> dict:
         elif cls == "burn":
             burn_by[note] += amount
 
-    # 🚨 지갑은 **두 컬렉션에 흩어져** 있어요. `trainers`만 보면 절반도 안 세요.
-    wallets: list[int] = []
-    for name in coin_ledger.WALLET_COLLECTIONS:
-        wallets += [
-            int(d.get("coin") or 0)
-            for d in _db[name].find({"coin": {"$exists": True}}, {"coin": 1})
-        ]
-    wallets = [w for w in wallets if w >= 0]
+    # 🚨 지갑은 **두 컬렉션에 흩어져** 있고, **같은 유저가 양쪽에 있어요**(실측 10명).
+    #    이어붙이면 중복으로 세어져서 중앙값이 낮게 나와요. 규칙은 coin_ledger 하나뿐이에요.
+    wallets = coin_ledger.wallet_balances(_db)
 
     return {
         "days": days,

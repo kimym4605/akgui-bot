@@ -50,7 +50,7 @@ from utils.pokemon_store import _db  # noqa: E402
 #    다른 소각률을 말하는 일이 실제로 있었어요(2026-10-18). 여기를 고치지 말고 거기를 고치세요.
 from utils.coin_ledger import (  # noqa: E402
     GAMBLE_ADD, GAMBLE_SPEND, REDIST_ADD, REDIST_SPEND, REFUND_ADD,
-    WALLET_COLLECTIONS, classify, kst_of,
+    classify, kst_of, wallet_balances,
 )
 
 KST = timezone(timedelta(hours=9))
@@ -162,15 +162,33 @@ for day in sorted(daily):
     print(f"  {day}  {r['issue']:6d}{day_burn:6d}{gh:11d}{net:+8d}  {bar(max(net, 0), 2)}")
 
 # ── 3. 지갑 분포 ────────────────────────────────────────────────────
-balances = []
-for col in WALLET_COLLECTIONS:
-    balances += [int(d.get("coin") or 0) for d in _db[col].find({"coin": {"$exists": True}}, {"coin": 1})]
-balances = sorted(b for b in balances if b >= 0)
+#
+# 🚨 **유저별로 합치지 않으면 지갑이 두 번 세어져요.** 2026-10-18까지 두 컬렉션을
+#    그냥 이어붙여서, 양쪽에 다 있는 **10명이 중복**됐어요(`trainers` 21 + `backup` 37
+#    = 58인데 고유 유저는 **48명**). 중복된 쪽은 백업 잔액이 거의 0이라 **중앙값이
+#    5.5인데 3.5로 낮게** 보였어요 — "중앙값이 안 움직인다"는 진단의 일부가 측정 탓이었어요.
+# ⚠️ 같은 유저가 양쪽에 있으면 `trainers`가 **현재값**이에요(backup은 리셋 전 스냅샷).
+# 규칙은 `utils/coin_ledger.py` 하나뿐이에요 — 여기서 다시 짜면 또 갈려요.
+balances = wallet_balances(_db)
 if balances:
-    print(f"\n[3] 지갑 {len(balances)}개 / 총 {sum(balances)}코인")
-    print(f"  최대 {max(balances)} · 중앙값 {statistics.median(balances):.0f} · 평균 {sum(balances)/len(balances):.1f}")
+    print(f"\n[3] 지갑 {len(balances)}개 / 총 {sum(balances)}코인  (유저별 중복 제거)")
+    print(f"  최대 {max(balances)} · 중앙값 {statistics.median(balances):.1f} · 평균 {sum(balances)/len(balances):.1f}")
     for t in (5, 12, 15, 30):
         print(f"  {t:2d}코인 이상: {sum(1 for b in balances if b >= t):2d}명")
+
+    # 🚨 **집중도.** 총량이 회복돼도 한 사람이 다 갖고 있으면 아무 의미가 없어요.
+    top = sorted(balances, reverse=True)
+    total = sum(balances) or 1
+    print("  집중도: "
+          + " · ".join(f"상위{n}명 {sum(top[:n]) / total * 100:.0f}%" for n in (1, 3, 5)))
+
+    # 🎣 낚시는 발행의 70%가 넘는데, 진입에 낚시대값이 필요해요. **중앙값 지갑으로
+    #    살 수 없으면 최대 발행원에 아예 못 들어가요**(부익부가 구조로 굳어요).
+    from utils.fish_data import ROD_PRICE
+    poor = sum(1 for b in balances if b < ROD_PRICE)
+    print(f"  🎣 낚시대({ROD_PRICE}코인)를 못 사는 사람: {poor}명 "
+          f"({poor / len(balances) * 100:.0f}%)"
+          + ("   ← 최대 발행원에 진입 못 함" if poor > len(balances) / 2 else ""))
 
 # ── 4. 미션 완료 (429 수정 효과) ────────────────────────────────────
 print("\n[4] 미션 완료 — 발로(자동판정) vs 서버(대조군)")

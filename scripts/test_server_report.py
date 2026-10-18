@@ -123,13 +123,33 @@ try:
     check("소각이 같다", data["burned"] == direct["burned"],
           f"리포트 {data['burned']} vs 직접 {direct['burned']}")
 
-    wallets = []
-    for name in coin_ledger.WALLET_COLLECTIONS:
-        wallets += [int(d.get("coin") or 0)
-                    for d in _db[name].find({"coin": {"$exists": True}}, {"coin": 1})]
-    wallets = [w for w in wallets if w >= 0]
+    # 🚨 이 검사가 **틀린 쪽을 정답으로 박아두고 있었어요.** 두 컬렉션을 그냥
+    #    이어붙인 값(58개)과 맞는지 봤는데, 같은 유저가 양쪽에 있어서(실측 10명)
+    #    그게 곧 **중복**이었어요. 중복된 쪽은 백업 잔액이 거의 0이라 중앙값이
+    #    5.5인데 3.5로 낮게 나왔고, "중앙값이 안 움직인다"는 진단이 일부 오염됐어요.
+    wallets = coin_ledger.wallet_balances(_db)
     check("🚨 지갑을 두 컬렉션에서 모두 센다", data["wallet_count"] == len(wallets),
           f"리포트 {data['wallet_count']}개 vs 실제 {len(wallets)}개")
+
+    # 🚨 유저별 중복 제거가 실제로 되는지. 안 하면 10명이 두 번 세어져요.
+    raw = sum(_db[name].count_documents({"coin": {"$exists": True}})
+              for name in coin_ledger.WALLET_COLLECTIONS)
+    uniq = len({str(d["_id"])
+                for name in coin_ledger.WALLET_COLLECTIONS
+                for d in _db[name].find({"coin": {"$exists": True}}, {"_id": 1})})
+    check("🚨 같은 유저를 두 번 세지 않는다", len(wallets) == uniq,
+          f"집계 {len(wallets)}명 · 고유 {uniq}명 · 단순합 {raw}건")
+    if raw != uniq:
+        print(f"       ({raw - uniq}명이 두 컬렉션에 다 있어요 — 겹치면 trainers가 현재값)")
+
+    # 🚨 겹치는 유저는 **trainers(현재값)**를 써야 해요. backup은 리셋 전 스냅샷이라
+    #    그걸 쓰면 지금 614코인인 사람이 0으로 잡혀요.
+    trainers = {str(d["_id"]): int(d.get("coin") or 0)
+                for d in _db["trainers"].find({"coin": {"$exists": True}}, {"coin": 1})}
+    if trainers:
+        check("🚨 겹칠 때 trainers(현재값)를 쓴다",
+              max(wallets) == max(trainers.values()),
+              f"집계 최대 {max(wallets)} vs trainers 최대 {max(trainers.values())}")
 
     print(f"\n  📊 참고: 발행 {data['issued']} · 소각 {data['burned']} "
           f"· 소각률 {data['burn_rate']:.1f}% · 지갑 {data['wallet_count']}개")
