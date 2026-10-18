@@ -21,6 +21,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from cogs import voice_rank
 from cogs.rank import _extract_player_match_stats
 from utils import (
     coin_wallet,
@@ -162,6 +163,16 @@ class Mission(commands.Cog):
         await self._add_voice_minutes(member, channel, minutes)
 
     async def _add_voice_minutes(self, member: discord.Member, channel, minutes: int):
+        # 🎙️ 음성 레벨 적립 (2026-10-18)
+        #
+        # 🚨 **여기에 붙이는 이유**: 입·퇴장 감지와 5분 중간 정산, 혼자 접속 어뷰징 차단이
+        #    전부 이 cog에 이미 있어요. 레벨 쪽에서 또 추적하면 두 벌이 되어 어긋나요.
+        # 🚨 레벨 때문에 **코인 지급이 막히면 안 돼요.** 통째로 감싸요.
+        try:
+            await voice_rank.on_minutes_added(member, minutes, channel)
+        except Exception:  # noqa: BLE001
+            log.warning("🎙️ 음성 레벨 적립 중 오류 (user=%s)", member.id, exc_info=True)
+
         if await mission_store.progress(member.id, "voice_together", minutes):
             balance = await coin_wallet.add(
                 member.id, mission_store.REWARD_PER_MISSION, reason="미션:voice_together"
