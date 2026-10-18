@@ -22,6 +22,9 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(os.path.join(BOT_DIR, ".env"))
 
 from utils import faq_knowledge as fk  # noqa: E402
+from utils.achievement_data import TOTAL as ACHIEVEMENT_TOTAL  # noqa: E402
+from utils.attend_remind import MIN_STREAK as ATTEND_REMIND_STREAK  # noqa: E402
+from utils.notify_prefs import NOTIFY_KINDS  # noqa: E402
 from utils.card_data import TOTAL as CARD_SPECIES  # noqa: E402
 from utils.card_store import PITY_DRAWS, PULL_PRICE  # noqa: E402
 from utils.casino_store import DAILY_LIMIT, MAX_BET  # noqa: E402
@@ -56,7 +59,25 @@ CHECKS = [
     #    제한했는데 안내문을 안 고쳐서, 매니저가 옛 규칙으로 자신 있게 답하고 있었어요.
     ("fishing", "한 번에 한 판", "동시 1판 제한 안내"),
     ("record", "한 줄 평", "AI 코칭 안내"),
+    # 🚨 `/프로필` 안내가 "업적은 60개"라고 **거짓말을 하고 있었어요**(실제 50개).
+    #    손으로 적은 숫자라 업적을 줄일 때 같이 안 바뀌었어요.
+    ("profile", f"{ACHIEVEMENT_TOTAL}개", "업적 수"),
+    ("notify", f"{len(NOTIFY_KINDS)}가지", "알림 종류 수"),
+    ("attendance", f"연속 {ATTEND_REMIND_STREAK}일 이상", "출석 알림 최소 연속일"),
+    # 🚨 낚시 대회에 **상금을 주면** 안 돼요(발행 1위 기능이라 경제가 기울어요).
+    ("fishing_contest", "상금은 없어요", "상금 없음 명시"),
+    ("fishing_contest", "등급이 먼저", "최대어는 등급 우선"),
 ]
+
+# 🚨 알림이 새로 생겼는데 안내문이 모르는 경우. `/알림설정` 화면엔 뜨는데 매니저만
+#    옛 목록을 들고 있으면, 유저가 "그런 알림 없다"는 답을 받아요.
+notify_body = fk.TOPIC_BY_KEY["notify"].text()
+for key, info in NOTIFY_KINDS.items():
+    if info["title"] not in notify_body:
+        failed.append(f"알림 '{key}'({info['title']})가 안내문에 없어요")
+        print(f"  ❌ notify       {info['title']} 가 빠졌어요")
+    else:
+        print(f"  ✅ notify       {info['title']}")
 
 for key, needle, label in CHECKS:
     body = fk.TOPIC_BY_KEY[key].text()
@@ -147,6 +168,20 @@ MUST_HIT = [
     ("mvp 어떻게 뽑아?", "weekly_mvp"),
     # 그래서 /오상 쪽도 같이 지켜요(구체적인 말로 바꾼 뒤에도 잘 잡히는지).
     ("vp 충전 얼마나 해야 해?", "myshop"),
+    # 2026-10-18 v140 3종.
+    ("낚시대회 뭐야", "fishing_contest"),
+    ("주간 낚시 대회 어떻게 참여해", "fishing_contest"),
+    ("최대어 누가 1등이야", "fishing_contest"),
+    ("낚시대회 상금 있어?", "fishing_contest"),
+    # 🚨 "낚시대"가 **"낚시대회"에 걸렸어요**("vp"가 "mvp"에 걸린 것과 같은 사고예요).
+    #    그래서 낚시 쪽도 같이 지켜요 — 둘이 서로를 가져가면 안 돼요.
+    ("낚시대 얼마야", "fishing"),
+    ("낚시왕 뭐야", "fishing"),          # 누적 랭킹. 주간 대회가 아니에요
+    # 🚨 "알림"이 /알림설정으로 가져가 버려서 동점(무응답)이 됐어요. 붙은 말로 잡아요.
+    ("출석 끊겼는데 알림 안 와?", "attendance"),
+    ("출석 알림 꺼줘", "attendance"),
+    ("업적 몇 개야", "profile"),
+    ("다음에 깰 업적 알려줘", "profile"),
 ]
 
 for question, expected in MUST_HIT:

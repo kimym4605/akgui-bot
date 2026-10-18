@@ -60,6 +60,8 @@ from utils.fish_data import (
     ROD_PRICE,
     TOTAL_SPECIES as FISH_SPECIES,
 )
+from utils.achievement_data import TOTAL as ACHIEVEMENT_TOTAL
+from utils.attend_remind import MIN_STREAK as ATTEND_REMIND_STREAK
 from utils.inventory_store import PROTECT_MAX, PROTECT_PRICE
 from utils.mission_store import (
     DAILY_MISSION_COUNT,
@@ -68,6 +70,7 @@ from utils.mission_store import (
     REWARD_PER_MISSION,
 )
 from utils.event_store import REMIND_BEFORE_MINUTES as EVENT_REMIND_MINUTES
+from utils.notify_prefs import NOTIFY_KINDS
 from utils.pokemon_store import COIN_PER_ATTENDANCE
 from utils.profile_card import THEME_PRICE
 from utils.title_store import TITLE_DAYS, TITLE_PLANS
@@ -192,6 +195,9 @@ def _attendance() -> str:
 · 연속 {WEEKLY_BONUS_EVERY}일마다 {WEEKLY_BONUS_COIN}코인이 더 붙어요. **{WEEKLY_BONUS_EVERY}일마다 계속** 돌아와요.
 · 하루 빠지면 연속이 0으로 돌아가요. 🧊 **출석 보호권**({PROTECT_PRICE}코인 · `/악귀상점`)이 있으면
   하루치를 살려줘요(최대 {PROTECT_MAX}장까지 들고 있을 수 있어요 · 이틀 이상은 못 살려요).
+· ⏰ **끊기기 전에 알려드려요.** 연속 {ATTEND_REMIND_STREAK}일 이상 이어오셨는데 그날 아직
+  `/출석`을 안 하셨으면 밤에 DM이 한 번 가요(🧊 보호권이 있으면 그것도 같이 알려드려요).
+  번거로우면 `/알림설정`에서 꺼요.
 · 누가 제일 오래 왔는지는 `/출석순위`로 봐요."""
 
 
@@ -227,7 +233,23 @@ def _fishing() -> str:
 · **꽝은 없어요.** 타이밍만 맞히면 뭔가 나오고, 챔질을 놓치면 횟수를 돌려줘요.
 · 치수(cm)는 어종별 실제 크기에서 굴려요. 같은 어종도 치수가 값을 갈라요.
 · 더 자세한 건 `/낚시확률`에 전부 공개돼 있어요.
-· 누가 제일 많이 벌었는지는 `/낚시왕`으로 봐요."""
+· 누가 제일 많이 벌었는지는 `/낚시왕`으로 봐요(**누적** 기준이에요).
+· 주마다 따로 겨루는 🎣 **주간 낚시 대회**도 있어요(`/낚시대회`)."""
+
+
+def _fishing_contest() -> str:
+    return """🎣 주간 낚시 대회는 **매주 월요일 낮**에 지난주 기록을 결산해서 발표해요.
+
+종목이 **둘**이에요. 둘의 1등이 서로 다를 수 있어요.
+🏆 **최대어** — 그 주에 낚은 제일 대단한 물고기. 운이 섞여서 누구나 하루아침에 1등이 돼요.
+💰 **최다 수익** — 그 주에 `/물고기판매`로 번 코인. 꾸준히 하신 분 쪽이에요.
+
+· 🚨 최대어는 **등급이 먼저**예요. 전설 30cm가 일반 40cm보다 위예요.
+  같은 등급 안에서만 치수로 가려요.
+· 중간 순위는 `/낚시대회`로 아무 때나 봐요. 지난주 것이 아니라 **이번 주** 진행 상황이에요.
+· 최대어 1등에게 🎣 **이주의 낚시왕** 역할이 가요. 다음 주 우승자가 나오면 넘어가요.
+· **상금은 없어요.** 낚시가 이미 코인이 제일 많이 나오는 곳이라, 상은 역할(명예)로만 둬요.
+· `/낚시왕`은 누적 랭킹이라 이것과 달라요."""
 
 
 def _cards() -> str:
@@ -312,18 +334,26 @@ def _karaoke() -> str:
 
 
 def _profile() -> str:
-    return """🪪 `/프로필`은 내 정보를 그림 카드 한 장으로 보여줘요.
+    return f"""🪪 `/프로필`은 내 정보를 그림 카드 한 장으로 보여줘요.
 
 · 출석·코인·업적·내전 전적이 다 올라가요.
-· 업적은 60개가 있어요(`/업적`).
+· 업적은 {ACHIEVEMENT_TOTAL}개가 있어요(`/업적`).
+· 🎯 `/업적` 맨 위에 **조금만 더 하면 깨는 업적**이 떠요. 뭘 해야 할지 모를 때 거기부터 보세요.
 · 카드 모양은 🎨 **테마**를 사면 바꿀 수 있어요(`/악귀상점` · 영구)."""
 
 
 def _notify() -> str:
-    return """🔔 `/알림설정`으로 봇이 보내는 DM을 끄고 켜요.
+    # 🚨 종류를 여기에 적지 말 것 — 알림이 새로 생길 때마다 이 안내문이 썩어요.
+    kinds = "\n".join(
+        f"  {info['emoji']} {info['title']}" for info in NOTIFY_KINDS.values()
+    )
+    return f"""🔔 `/알림설정`으로 봇이 보내는 알림을 하나씩 끄고 켜요.
 
-· 미션 완료 알림, `/오상` 위시리스트 알림 등을 따로따로 조절해요.
-· 기본은 켜져 있어요. 시끄러우면 여기서 꺼요."""
+지금 조절할 수 있는 건 **{len(NOTIFY_KINDS)}가지**예요.
+{kinds}
+
+· 기본은 다 켜져 있어요. 시끄러운 것만 골라서 꺼요.
+· 끈 건 계속 꺼진 채로 있어요. 나중에 새 알림이 생기면 그건 켜진 상태로 시작해요."""
 
 
 def _adult() -> str:
@@ -458,7 +488,9 @@ TOPICS: tuple[Topic, ...] = (
     Topic(
         key="attendance",
         title="📅 출석",
-        strong=("출석", "개근", "보호권", "스트릭", "연속"),
+        # 🚨 "끊"만 strong으로 넣으면 "노래가 끊겨요"(🎤)를 가져가요. 붙은 말로만 잡아요.
+        strong=("출석", "개근", "보호권", "스트릭", "연속",
+                "출석끊", "연속끊", "출석알림"),
         weak=("매일", "하루", "빠지", "끊기", "끊겨"),
         body=_attendance,
         commands=("/출석", "/출석순위"),
@@ -475,11 +507,23 @@ TOPICS: tuple[Topic, ...] = (
         key="fishing",
         title="🎣 낚시",
         strong=(
-            "낚시", "낚시대", "물고기", "어항", "낚아", "낚는", "입질", "챔질", "어종",
+            # 🚨 "낚시대"를 넣지 말 것 — **"낚시대회"에 걸려요**(`"vp"`가 `"mvp"`에 걸렸던 것과
+            #    같은 사고예요). "낚시" 하나로 이미 잡히니 없어도 돼요.
+            "낚시", "물고기", "어항", "낚아", "낚는", "입질", "챔질", "어종",
         ),
         weak=("찌", "치수", "판매", "팔아", "팔기", "등급"),
         body=_fishing,
         commands=("/낚시", "/어항", "/물고기판매", "/낚시확률", "/낚시왕"),
+    ),
+    Topic(
+        key="fishing_contest",
+        title="🎣 주간 낚시 대회",
+        strong=(
+            "낚시대회", "대회", "최대어", "주간낚시", "이주의낚시왕",
+        ),
+        weak=("최다", "수익", "주간", "우승", "월요일"),
+        body=_fishing_contest,
+        commands=("/낚시대회",),
     ),
     Topic(
         key="cards",
