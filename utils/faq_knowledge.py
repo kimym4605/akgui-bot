@@ -67,9 +67,17 @@ from utils.mission_store import (
     REROLL_PRICE,
     REWARD_PER_MISSION,
 )
+from utils.event_store import REMIND_BEFORE_MINUTES as EVENT_REMIND_MINUTES
 from utils.pokemon_store import COIN_PER_ATTENDANCE
 from utils.profile_card import THEME_PRICE
 from utils.title_store import TITLE_DAYS, TITLE_PLANS
+from utils.voice_level import (
+    ROLE_TIERS as VOICE_ROLE_TIERS,
+    minutes_for_level as _voice_minutes_for_level,
+)
+
+# 🚨 숫자를 여기에 적지 말 것 — 전부 상수에서 끌어와요(이 파일 맨 위 설명 참고).
+VOICE_FIRST_LEVEL_MINUTES = _voice_minutes_for_level(1)
 
 log = logging.getLogger(__name__)
 
@@ -325,6 +333,67 @@ def _adult() -> str:
 · 바로 안 될 수 있어요(사람이 한 번 보는 단계가 있어서요)."""
 
 
+def _voice_level_topic() -> str:
+    tiers = "\n".join(
+        f"· **Lv.{lv}** 이상 → {name}" for lv, name in reversed(VOICE_ROLE_TIERS)
+    )
+    return f"""🎙️ 통화방에 머문 시간이 쌓여서 **레벨**이 올라가요.
+
+· `/음성레벨` — 내 레벨과 누적 시간을 봐요 (`유저:@이름`으로 남의 것도 볼 수 있어요)
+· `/음성랭킹` — 이번 주 / 누적 순위를 봐요
+· 혼자 있는 시간은 **안 세요.** 2명 이상일 때만 쌓여요.
+· 5분마다 정산돼요. 통화를 길게 켜놔도 중간중간 반영돼요.
+· 첫 레벨은 **{VOICE_FIRST_LEVEL_MINUTES}분**이면 올라가요.
+
+받을 수 있는 역할이에요.
+{tiers}
+
+⚠️ **코인은 안 줘요.** 레벨은 명예 지표라서, 코인은 출석·미션·낚시로 모으는 거예요."""
+
+
+def _event_topic() -> str:
+    return f"""📅 `/일정`으로 약속을 미리 잡아요. ("토요일 9시 내전" 같은 것)
+
+· `/일정 제목:내전 언제:토요일 21시` — 이렇게 적으면 돼요
+  └ `내일 9시` · `10/25 21:00` · `다음주 토요일 20시` 다 알아들어요
+  └ `인원`을 적으면 정원이 생겨요(비우면 제한 없음)
+· **✅ 간다 / ❌ 못 감** 버튼으로 참가를 알려요. 마음이 바뀌면 다시 눌러 취소해요.
+· 시작 **{EVENT_REMIND_MINUTES}분 전**에 참가한 사람들을 멘션해서 알려줘요.
+· 🚫 취소는 **만든 사람만** 할 수 있어요.
+· `/일정목록` — 앞으로 잡힌 일정을 모아 봐요."""
+
+
+def _suggestion_topic() -> str:
+    return """💡 `/건의`로 봇이나 서버에 바라는 점을 올려요.
+
+· 올리면 다른 사람이 **👍 👎 투표**할 수 있어요.
+· 운영진이 **✅ 채택 / 🎉 반영 완료 / 🙏 보류** 중 하나를 붙여줘요.
+· `/건의목록` — 지금까지 올라온 건의를 모아 봐요.
+· 무슨 말이든 괜찮아요. 작은 불편도 적어주시면 고칠 거리가 돼요."""
+
+
+def _match_feed_topic() -> str:
+    return """🔔 발로란트 경기가 끝나면 **전적 카드가 자동으로 올라와요.**
+
+· `/전적`을 치지 않아도 돼요. 봇이 알아서 올려줘요.
+· 맵 · 스코어 · KDA · ACS · ADR · 요원이 같이 나와요.
+· 🚨 **공개가 싫으면** `/알림설정`에서 **경기 결과 자동 공개**를 꺼주세요.
+· `/전적`에 계정이 등록돼 있어야 올라와요."""
+
+
+def _mvp_topic() -> str:
+    # ⚠️ 지연 import예요. `utils`가 `cogs`를 **모듈 최상단에서** 참조하면 순환 import가 나요
+    #    (cogs 쪽이 utils를 먼저 부르거든요). 숫자를 손으로 적지 않으려고 이렇게 끌어와요.
+    from cogs.weekly_mvp import MIN_MATCHES
+
+    return f"""🏅 매주 월요일, 지난주 **악귀력 1위**를 발표하고 역할을 드려요.
+
+· 그 주에 `/전적`을 돌린 사람 중에서 뽑아요.
+· 최소 **{MIN_MATCHES}경기**는 해야 후보가 돼요(한 판 운으로 뽑히지 않게요).
+· 역할은 다음 주 MVP가 나올 때까지 유지돼요.
+· 순위는 `/주간랭킹`에서 미리 볼 수 있어요."""
+
+
 def _ask_bot() -> str:
     """🚨 매니저가 **자기 자신**을 설명하는 주제예요.
 
@@ -467,7 +536,10 @@ TOPICS: tuple[Topic, ...] = (
         title="🛒 /오상 (개인 상점)",
         strong=(
             "오상", "개인 상점", "내 상점", "오늘의 상점", "쿠키", "라이엇 로그인",
-            "야시장", "위시리스트", "번들", "vp",
+            "야시장", "위시리스트", "번들",
+            # 🚨 그냥 "vp"로 두면 **"mvp"가 걸려요**(2026-10-18에 실제로 /주간mvp 질문이
+            #    /오상으로 갔어요). 앞뒤를 붙여 구체적으로 둬요.
+            "vp계산", "vp 계산", "vp 충전", "vp 가격", "vp 얼마", "vp가",
         ),
         weak=("상점", "로그인", "계정", "스킨"),
         body=_myshop,
@@ -524,6 +596,51 @@ TOPICS: tuple[Topic, ...] = (
         weak=("나이", "인증", "생년월일"),
         body=_adult,
         commands=("/성인인증",),
+    ),
+    Topic(
+        key="voice_level",
+        title="🎙️ 음성 활동 레벨",
+        strong=("음성레벨", "음성랭킹", "통화 레벨", "음성 레벨", "통화방 레벨",
+                "수다쟁이", "말동무", "터줏대감",
+                # 악귀봇에 '레벨'이라는 개념은 이것뿐이라 단독으로 둬도 안전해요.
+                "레벨"),
+        weak=("레벨", "통화", "음성", "랭킹", "역할"),
+        body=_voice_level_topic,
+        commands=("/음성레벨", "/음성랭킹"),
+    ),
+    Topic(
+        key="event",
+        title="📅 일정 예약",
+        strong=("일정", "약속", "약속 잡", "일정목록", "예약", "모임",
+                "언제 모여", "몇 시에 모여", "미리 잡"),
+        weak=("참가", "리마인더", "알림", "시간"),
+        body=_event_topic,
+        commands=("/일정", "/일정목록"),
+    ),
+    Topic(
+        key="suggestion",
+        title="💡 건의함",
+        strong=("건의", "건의목록", "제안", "요청하고 싶", "추천하고 싶", "바라는"),
+        weak=("투표", "의견", "불편"),
+        body=_suggestion_topic,
+        commands=("/건의", "/건의목록"),
+    ),
+    Topic(
+        key="match_feed",
+        title="🔔 경기 결과 자동 공개",
+        strong=("자동으로 올라", "전적이 올라", "경기 결과", "자동 공개", "경기 알림",
+                "전적 공개"),
+        weak=("자동", "공개", "알림", "전적"),
+        body=_match_feed_topic,
+        commands=("/알림설정", "/전적"),
+    ),
+    Topic(
+        key="weekly_mvp",
+        title="🏅 주간 MVP",
+        strong=("mvp", "주간mvp", "이주의", "주간 1위"),
+        weak=("주간", "1위", "역할"),
+        body=_mvp_topic,
+        commands=("/주간랭킹", "/전적"),
     ),
     Topic(
         key="ask_bot",

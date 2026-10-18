@@ -136,6 +136,17 @@ MUST_HIT = [
     ("봇한테 어떻게 물어봐?", "ask_bot"),
     ("도움말 어떻게 써?", "ask_bot"),
     ("낚시 왜 한 번만 돼?", "fishing"),
+    # 2026-10-18 신기능 5종. 기능을 더하면 여기도 같이 늘려주세요.
+    ("음성 레벨 어떻게 올려?", "voice_level"),
+    ("통화방 레벨이 뭐야", "voice_level"),
+    ("일정 어떻게 잡아?", "event"),
+    ("내전 약속 잡고 싶어", "event"),
+    ("건의하고 싶어", "suggestion"),
+    ("전적이 자동으로 올라오던데", "match_feed"),
+    # 🚨 이게 /오상으로 갔었어요 — myshop의 strong에 "vp"가 있어서 **"m-vp"에 걸렸어요.**
+    ("mvp 어떻게 뽑아?", "weekly_mvp"),
+    # 그래서 /오상 쪽도 같이 지켜요(구체적인 말로 바꾼 뒤에도 잘 잡히는지).
+    ("vp 충전 얼마나 해야 해?", "myshop"),
 ]
 
 for question, expected in MUST_HIT:
