@@ -52,6 +52,10 @@ CHECKS = [
     ("coin_spend", f"{PROTECT_PRICE}코인", "보호권 값"),
     ("mission", f"{DAILY_MISSION_COUNT}개", "하루 미션 수"),
     ("title", f"{TITLE_PLANS[30]}코인", "칭호 30일 값"),
+    # 🚨 규칙을 바꿨으면 안내문도 같이 바뀌어야 해요. 2026-10-18에 낚시를 "동시 한 판"으로
+    #    제한했는데 안내문을 안 고쳐서, 매니저가 옛 규칙으로 자신 있게 답하고 있었어요.
+    ("fishing", "한 번에 한 판", "동시 1판 제한 안내"),
+    ("record", "한 줄 평", "AI 코칭 안내"),
 ]
 
 for key, needle, label in CHECKS:
@@ -127,6 +131,11 @@ MUST_HIT = [
     ("프로필 카드 어떻게 봐", "profile"),
     ("생일 등록", "birthday"),
     ("성인인증 어떻게", "adult"),
+    # 🚨 기능을 바꾸면 여기도 같이 늘려주세요. 매니저가 **옛 규칙을 자신 있게 답하는** 게
+    #    제일 나쁜 경우예요(못 잡으면 Claude가 받아주지만, 틀린 확신은 안 받아줘요).
+    ("봇한테 어떻게 물어봐?", "ask_bot"),
+    ("도움말 어떻게 써?", "ask_bot"),
+    ("낚시 왜 한 번만 돼?", "fishing"),
 ]
 
 for question, expected in MUST_HIT:
