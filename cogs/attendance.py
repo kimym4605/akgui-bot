@@ -326,6 +326,7 @@ class Attendance(commands.Cog):
         app_commands.Choice(name="노래방 음성채널 (/재생 등) — 음성채널을 골라주세요", value="karaoke"),
         app_commands.Choice(name="❓ 봇 매니저 (질문을 적으면 답해주는 채널)", value="assistant"),
         app_commands.Choice(name="🔔 경기 결과 자동 알림 (끄려면 지정하지 마세요)", value="match_feed"),
+        app_commands.Choice(name="💡 건의함 (/건의, /건의목록)", value="suggestion"),
     ])
     async def set_channel(
         self,

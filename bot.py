@@ -122,6 +122,7 @@ COG_GROUPS: dict[str, list[str]] = {
         "adult_verify",  # 성인 인증(생년월일 자동 확인 + 매니저 승인)
         "notify",        # /알림설정 - 미션 완료·위시리스트 알림을 개인별로 끄고 켜기
         "ops_report",    # 📊 /서버리포트 + 매주 월요일 운영자 DM (AI 해설)
+        "suggestion",    # 💡 /건의 - 제안 + 👍👎 투표 (영속 뷰)
         "ping",          # 핑 테스트
     ],
 }
