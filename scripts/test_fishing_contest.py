@@ -37,7 +37,22 @@ def check(label, ok, detail=""):
 
 
 # ------------------------------------------------------------------
-print("⒜ 🚨 상으로 코인을 주지 않는다")
+# 🚨 2026-10-18에 실제로 밟은 사고: `utils/fishing_week.py`를 만들고 `cogs/fishing.py`에
+#    **호출을 안 걸었다.** 대회는 멀쩡히 돌면서 영원히 "아무도 낚지 않았어요"를 발표한다.
+#    아래 ⒞ 테스트가 문서를 직접 insert해서 검증했기 때문에 이 누락을 못 잡았다.
+#    → 저장소가 되는지 말고 **낚시 cog가 저장소를 부르는지**를 본다.
+print("⒠ 🚨 낚시 cog가 주간 기록을 실제로 적립하는가")
+fishing_src = open(os.path.join(BOT_DIR, "cogs", "fishing.py"), encoding="utf-8").read()
+check("fishing_week를 import한다", "fishing_week" in fishing_src)
+check("🚨 잡을 때 record_catch를 부른다", "fishing_week.record_catch(" in fishing_src)
+check("🚨 팔 때 add_sold를 부른다", "fishing_week.add_sold(" in fishing_src)
+# 🚨 등급을 안 넘기면 rank가 전부 0이 돼서 최대어가 **치수순으로 뒤집힌다.**
+check("record_catch에 등급(rank)을 넘긴다",
+      "GRADE_ORDER.index(" in fishing_src)
+
+
+# ------------------------------------------------------------------
+print("\n⒜ 🚨 상으로 코인을 주지 않는다")
 src = open(os.path.join(BOT_DIR, "cogs", "fishing_contest.py"), encoding="utf-8").read()
 src += open(os.path.join(BOT_DIR, "utils", "fishing_week.py"), encoding="utf-8").read()
 check("coin_wallet을 import하지 않는다", "coin_wallet" not in src)

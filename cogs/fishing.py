@@ -91,7 +91,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils import coin_wallet, fish_data, fishing_store
+from utils import coin_wallet, fish_data, fishing_store, fishing_week
 from utils.channel_check import restrict_to_channel
 from utils.fish_data import (
     BY_KEY, COIN_PIECES, FISH, GRADE_ORDER, GRADES, ROD_DURABILITY,
@@ -240,6 +240,16 @@ async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> 
         view.rod_left += 1
 
     await fishing_store.record_cast(interaction.user.id, key, size)
+
+    # 🎣 주간 대회 적립. `fish`는 누적만 담으니 주차별 기록은 따로 쌓아요.
+    # 🚨 `rank`는 **클수록 좋은 등급**이에요(`GRADE_ORDER`는 전설이 맨 앞).
+    #    최대어를 치수만으로 가리면 전설 30cm가 일반 40cm에 져요.
+    # ⚠️ 실패해도 예외를 안 올려요(낚시 본 흐름을 막으면 안 돼요).
+    await fishing_week.record_catch(
+        interaction.user.id, key, size,
+        (len(GRADE_ORDER) - GRADE_ORDER.index(BY_KEY[key][0])) if key else 0,
+    )
+
     state = await fishing_store.get(interaction.user.id)
     total = sum(len(v) for v in state["tank"].values())
 
@@ -652,6 +662,8 @@ class Fishing(commands.Cog):
             return
 
         await fishing_store.add_sold(interaction.user.id, coins)
+        # 🎣 주간 대회의 💰 최다 수익 종목. 여기도 실패해도 예외를 안 올려요.
+        await fishing_week.add_sold(interaction.user.id, coins)
 
         lines = []
         for grade in GRADE_ORDER:
