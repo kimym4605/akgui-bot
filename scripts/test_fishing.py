@@ -28,7 +28,8 @@ os.environ["MONGODB_DB_NAME"] = "agwi_fish_test"
 from utils import fish_data, fishing_store  # noqa: E402
 from utils.fish_data import (  # noqa: E402
     BY_KEY, COIN_PIECES, FISH, GRADE_ORDER, GRADES, ROD_DURABILITY, ROD_PER_DAY,
-    ROD_PRICE, SIZE_BY_KEY, pieces_of, roll_size,
+    ROD_PRICE, SIZE_BY_KEY, SMALL_ROD_DURABILITY, SMALL_ROD_PRICE,
+    pieces_of, roll_size,
 )
 
 failures = []
@@ -97,6 +98,30 @@ check("낚시가 '벌이'가 된다 (4차의 본전 구조에서 벗어났는지
       net > 2.0, f"{net:+.2f}코인")
 check("낚시대값이 총수입보다 싸다 (아니면 아무도 안 사요)",
       ROD_PRICE < day_gross, f"{ROD_PRICE} vs {day_gross:.1f}")
+
+# ------------------------------------------------------------------
+# ⭐ 🪝 입문용 소형 낚시대 (2026-10-18 · 분배 문제 대응)
+#
+# 🚨 **이 상품의 전부는 "비율이 같다"는 것이에요.** 횟수당 값이 같으면 발행 총량
+#    구조가 전혀 안 바뀌고 **진입 문턱만** 낮아져요(실측 31% → 71%가 살 수 있게 됨).
+#    비율을 깨면 그 순간 밸런스 변경이 되는데, 그건 사용자가 결정할 일이에요.
+#    → 근거는 `utils/fish_data.SMALL_ROD_PRICE` 주석 / 분배 실측은 report_economy.py
+print("\n[4-b] 🪝 소형 낚시대 — 비율이 큰 것과 같은가")
+big_ratio = ROD_PRICE / ROD_DURABILITY
+small_ratio = SMALL_ROD_PRICE / SMALL_ROD_DURABILITY
+check("🚨 횟수당 값이 큰 낚시대와 **똑같다** (발행 구조 불변)",
+      abs(big_ratio - small_ratio) < 1e-9,
+      f"큰 것 {big_ratio:.3f}코인/회 vs 소형 {small_ratio:.3f}코인/회")
+check("소형이 더 싸다 (진입용이니까)",
+      SMALL_ROD_PRICE < ROD_PRICE, f"{SMALL_ROD_PRICE} < {ROD_PRICE}")
+# ⚠️ 1회짜리로 쪼개면 "한 번 던지고 바로 팔기"가 되어 미니게임이 뽑기처럼 돼요.
+check("소형도 최소 2번은 던진다", SMALL_ROD_DURABILITY >= 2,
+      f"{SMALL_ROD_DURABILITY}번")
+small_net = measured * SMALL_ROD_DURABILITY - SMALL_ROD_PRICE
+print(f"  소형 1개: 수입 {measured * SMALL_ROD_DURABILITY:.1f} − 값 {SMALL_ROD_PRICE} "
+      f"= 순이익 {small_net:+.2f}코인 (큰 것은 {net:+.2f})")
+print(f"  -# 비율이 같으니 1코인당 순이익도 같아요 "
+      f"({small_net / SMALL_ROD_PRICE:+.3f} vs {net / ROD_PRICE:+.3f})")
 
 # 🚨 상한이 없다는 걸 **테스트가 알고 있게** 해둬요. 누가 `ROD_PER_DAY`를 되살리면
 #    여기서 눈에 띄고, 그때는 발행 걱정 없이 순이익을 더 키울 수 있어요.

@@ -37,18 +37,31 @@ def check(label, ok, detail=""):
 
 
 # ------------------------------------------------------------------
-# 🚨 2026-10-18에 실제로 밟은 사고: `utils/fishing_week.py`를 만들고 `cogs/fishing.py`에
-#    **호출을 안 걸었다.** 대회는 멀쩡히 돌면서 영원히 "아무도 낚지 않았어요"를 발표한다.
-#    아래 ⒞ 테스트가 문서를 직접 insert해서 검증했기 때문에 이 누락을 못 잡았다.
-#    → 저장소가 되는지 말고 **낚시 cog가 저장소를 부르는지**를 본다.
-print("⒠ 🚨 낚시 cog가 주간 기록을 실제로 적립하는가")
+# 🚨 2026-10-18에 **진단을 틀리고 버그를 만들었다.** `fishing_week` 컬렉션이 0건인 걸 보고
+#    "호출을 안 걸었다"고 단정했는데, 훅은 처음부터 `fishing_store` 안에 올바르게 있었다
+#    (0건의 진짜 이유는 배포 직후라 아무도 낚시를 안 한 것). 그걸 모르고 `cogs/fishing.py`에
+#    또 걸어서 **두 번 집계되는 버그**를 넣었다 — `caught`·`sold`가 2배가 되어 💰 최다 수익
+#    순위가 통째로 틀어진다.
+#
+# ⭐ 그래서 이 검사는 "어디서 부르는지"가 아니라 **"딱 한 번 부르는지"**를 본다.
+#    적립은 `fishing_store`(저장소 계층)가 책임지고, cog는 `record_cast`만 부른다.
+print("⒠ 🚨 주간 기록을 **딱 한 번** 적립하는가")
 fishing_src = open(os.path.join(BOT_DIR, "cogs", "fishing.py"), encoding="utf-8").read()
-check("fishing_week를 import한다", "fishing_week" in fishing_src)
-check("🚨 잡을 때 record_catch를 부른다", "fishing_week.record_catch(" in fishing_src)
-check("🚨 팔 때 add_sold를 부른다", "fishing_week.add_sold(" in fishing_src)
+store_src = open(os.path.join(BOT_DIR, "utils", "fishing_store.py"), encoding="utf-8").read()
+
+check("저장소가 잡을 때 record_catch를 부른다",
+      "fishing_week.record_catch(" in store_src)
+check("저장소가 팔 때 add_sold를 부른다",
+      "fishing_week.add_sold(" in store_src)
 # 🚨 등급을 안 넘기면 rank가 전부 0이 돼서 최대어가 **치수순으로 뒤집힌다.**
-check("record_catch에 등급(rank)을 넘긴다",
-      "GRADE_ORDER.index(" in fishing_src)
+check("record_catch에 등급(rank)을 넘긴다", "GRADE_ORDER.index(" in store_src)
+
+# 🚨 **cog가 또 부르면 2배로 세어진다.** `record_catch`는 `$inc: {caught: 1}`이고
+#    `add_sold`는 `$inc: {sold: n}`이라 멱등이 아니다.
+check("🚨 cog는 fishing_week를 직접 부르지 않는다 (2배 집계 방지)",
+      "fishing_week." not in fishing_src,
+      "cogs/fishing.py에서 직접 호출하면 저장소 경유와 합쳐 두 번이 돼요")
+check("cog는 저장소만 부른다", "fishing_store.record_cast(" in fishing_src)
 
 
 # ------------------------------------------------------------------

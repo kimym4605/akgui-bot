@@ -58,6 +58,8 @@ from utils.fish_data import (
     GRADES as FISH_GRADE_INFO,
     ROD_DURABILITY,
     ROD_PRICE,
+    SMALL_ROD_DURABILITY,
+    SMALL_ROD_PRICE,
     TOTAL_SPECIES as FISH_SPECIES,
 )
 from utils.achievement_data import TOTAL as ACHIEVEMENT_TOTAL
@@ -180,7 +182,7 @@ def _coin_earn() -> str:
 def _coin_spend() -> str:
     return f"""코인 쓰는 곳이에요.
 
-· 🛒 `/악귀상점` — 🎣 낚시대 {ROD_PRICE}코인 · 🎲 미션 리롤권 {REROLL_PRICE}코인 ·
+· 🛒 `/악귀상점` — 🎣 낚시대 {ROD_PRICE}코인(🪝 소형 {SMALL_ROD_PRICE}코인) · 🎲 미션 리롤권 {REROLL_PRICE}코인 ·
   🧊 출석 보호권 {PROTECT_PRICE}코인 · 🎨 프로필 카드 테마 {THEME_PRICE}코인
 · 🎴 `/카드뽑기` — {PULL_PRICE}코인에 {CARDS_PER_PULL}장
 · 🎰 `/도박` — 슬롯 · 하이로우 · 블랙잭
@@ -217,6 +219,8 @@ def _fishing() -> str:
     return f"""🎣 낚시는 이렇게 해요.
 
 1. `/악귀상점`에서 **낚시대**를 사요({ROD_PRICE}코인 · {ROD_DURABILITY}번 던질 수 있어요). 개수 제한은 없어요.
+   코인이 적으면 🪝 **소형 낚시대**({SMALL_ROD_PRICE}코인 · {SMALL_ROD_DURABILITY}번)로 시작해도 돼요.
+   **횟수당 값이 똑같아서** 손해가 아니에요 — 작게 사서 번 걸로 다시 사면 돼요.
 2. `/낚시`로 찌를 던지고, **입질이 오면 버튼을 눌러** 챔질해요.
 3. 잡은 건 `/어항`에서 보고, `/물고기판매`로 한꺼번에 팔아요.
 

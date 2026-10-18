@@ -91,11 +91,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils import coin_wallet, fish_data, fishing_store, fishing_week
+from utils import coin_wallet, fish_data, fishing_store
 from utils.channel_check import restrict_to_channel
 from utils.fish_data import (
     BY_KEY, COIN_PIECES, FISH, GRADE_ORDER, GRADES, ROD_DURABILITY,
-    ROD_PRICE, pieces_of, roll_size,
+    ROD_PRICE, SMALL_ROD_DURABILITY, SMALL_ROD_PRICE, pieces_of, roll_size,
 )
 
 log = logging.getLogger(__name__)
@@ -162,29 +162,47 @@ def roll_catch(rng: random.Random | None = None) -> str:
     return rng.choice(_GRADE_KEYS[grade])
 
 
-async def purchase_rod(user_id) -> tuple[bool, str]:
+async def purchase_rod(user_id, small: bool = False) -> tuple[bool, str]:
     """낚시대 한 개를 사요. (성공, 안내문). `/악귀상점`과 🎣 버튼이 **같이** 써요.
 
     🚨 **지급을 먼저, 차감을 나중에** 해요. 반대로 하면 차감 뒤 지급이 실패했을 때
     코인만 사라져요. 차감이 실패하면 `refund_rod`로 되돌려서 공짜 낚시대를 막아요.
-    (🎲 도박 한도 연장권과 같은 순서예요.)"""
+    (🎲 도박 한도 연장권과 같은 순서예요.)
+
+    `small=True`면 ⭐ **입문용 소형 낚시대**(3코인/3번)예요. 횟수당 값이 큰 것과
+    **똑같아서** 발행 구조는 안 바뀌고 진입 문턱만 낮아져요 — 자세한 이유는
+    `utils/fish_data.py`의 `SMALL_ROD_PRICE` 주석에 있어요.
+    ⚠️ **분기는 값 두 개뿐이에요.** 로직을 복사해서 두 함수로 만들면 지급→차감→환불
+    순서를 한쪽만 고치는 사고가 나요(이 저장소에서 반복된 사고예요)."""
+    price = SMALL_ROD_PRICE if small else ROD_PRICE
+    durability = SMALL_ROD_DURABILITY if small else ROD_DURABILITY
+    # 🚨 note를 갈라야 리포트에서 어느 쪽이 팔리는지 보여요. `낚시대`로 시작하니
+    #    `report_economy.py`의 🎣 낚시대 집계에는 **둘 다** 그대로 들어가요.
+    note = f"{ROD_NOTE}:소형" if small else ROD_NOTE
+    label = "🎣 소형 낚시대" if small else "🎣 낚시대"
+
     # ⚠️ 하루 제한이 없어서(2026-10-17 4차) 지급은 항상 성공해요. 그래도 순서는
     #    그대로 지급 -> 차감 -> 실패 시 환불이에요.
-    await fishing_store.buy_rod(user_id, ROD_DURABILITY)
+    await fishing_store.buy_rod(user_id, durability)
 
-    if not await coin_wallet.spend(user_id, ROD_PRICE, reason=ROD_NOTE):
-        await fishing_store.refund_rod(user_id, ROD_DURABILITY)
+    if not await coin_wallet.spend(user_id, price, reason=note):
+        await fishing_store.refund_rod(user_id, durability)
         balance = await coin_wallet.get_balance(user_id)
+        # ⭐ 큰 걸 못 사는 사람에게 **소형이 있다는 걸 알려줘요.** 이 안내가 없으면
+        #    문턱을 낮춰도 그런 상품이 있는 줄 모르고 끝나요(상점 3종이 그래서 0건이었어요).
+        hint = (f"\n-# 🎣 **소형 낚시대**는 **{SMALL_ROD_PRICE}코인**에 "
+                f"**{SMALL_ROD_DURABILITY}번**이에요. 그쪽은 지금 살 수 있어요."
+                if not small and balance >= SMALL_ROD_PRICE else
+                "\n-# `/출석` · `/미션` · `/업적`으로 모을 수 있어요.")
         return False, (
-            f"악귀코인이 부족해요. 낚시대는 **{ROD_PRICE}코인**인데 "
-            f"지금 **{balance}개** 있어요.\n"
-            "-# `/출석` · `/미션` · `/업적`으로 모을 수 있어요."
+            f"악귀코인이 부족해요. {label}는 **{price}코인**인데 "
+            f"지금 **{balance}개** 있어요.{hint}"
         )
 
     balance = await coin_wallet.get_balance(user_id)
-    log.info("🎣 낚시대 구매: %s %d코인", user_id, ROD_PRICE)
+    log.info("🎣 낚시대 구매(%s): %s %d코인", "소형" if small else "일반", user_id, price)
     return True, (
-        f"🎣 낚시대를 샀어요! **{ROD_DURABILITY}번** 던질 수 있어요.\n"
+        f"{label}를 샀어요! **{durability}번** 던질 수 있어요.\n"
         f"남은 악귀코인 **{balance}개** · `/낚시` 로 시작해보세요"
     )
 
@@ -205,11 +223,21 @@ class BuyRodView(discord.ui.View):
 
     @discord.ui.button(label="낚시대 사기", emoji="🎣", style=discord.ButtonStyle.success)
     async def buy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, small=False)
+
+    # ⭐ **코인이 모자란 사람이 막히는 바로 그 자리**에 소형을 같이 띄워요. 상점 진열만
+    #    해두면 발견이 안 돼요(리롤권·보호권·테마가 그래서 0건이에요).
+    @discord.ui.button(label="소형 낚시대", emoji="🪝", style=discord.ButtonStyle.secondary)
+    async def buy_small(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._buy(interaction, small=True)
+
+    async def _buy(self, interaction: discord.Interaction, *, small: bool) -> None:
         await interaction.response.defer(ephemeral=True)
-        button.disabled = True
-        ok, msg = await purchase_rod(interaction.user.id)
+        ok, msg = await purchase_rod(interaction.user.id, small=small)
         try:
-            await interaction.edit_original_response(content=msg, view=None)
+            # ⚠️ 실패했으면 뷰를 남겨둬요 — 큰 걸 못 사서 소형을 누를 수 있어야 해요.
+            await interaction.edit_original_response(
+                content=msg, view=None if ok else self)
         except discord.HTTPException:
             await interaction.followup.send(msg, ephemeral=True)
 
@@ -239,16 +267,9 @@ async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> 
         await fishing_store.give_back_rod(interaction.user.id)
         view.rod_left += 1
 
+    # 🎣 주간 대회 적립은 `fishing_store.record_cast` **안에서** 일어나요.
+    #    🚨 여기서 또 부르면 `caught`가 2배로 세어져요(2026-10-18에 실제로 그랬어요).
     await fishing_store.record_cast(interaction.user.id, key, size)
-
-    # 🎣 주간 대회 적립. `fish`는 누적만 담으니 주차별 기록은 따로 쌓아요.
-    # 🚨 `rank`는 **클수록 좋은 등급**이에요(`GRADE_ORDER`는 전설이 맨 앞).
-    #    최대어를 치수만으로 가리면 전설 30cm가 일반 40cm에 져요.
-    # ⚠️ 실패해도 예외를 안 올려요(낚시 본 흐름을 막으면 안 돼요).
-    await fishing_week.record_catch(
-        interaction.user.id, key, size,
-        (len(GRADE_ORDER) - GRADE_ORDER.index(BY_KEY[key][0])) if key else 0,
-    )
 
     state = await fishing_store.get(interaction.user.id)
     total = sum(len(v) for v in state["tank"].values())
@@ -661,9 +682,9 @@ class Fishing(commands.Cog):
                 "판매 중 문제가 생겼어요. **물고기는 어항에 그대로 있어요.**", ephemeral=True)
             return
 
+        # 🎣 주간 대회의 💰 최다 수익도 `fishing_store.add_sold` 안에서 같이 쌓여요.
+        #    🚨 여기서 또 부르면 `sold`가 2배가 돼요(수익 순위가 통째로 틀려져요).
         await fishing_store.add_sold(interaction.user.id, coins)
-        # 🎣 주간 대회의 💰 최다 수익 종목. 여기도 실패해도 예외를 안 올려요.
-        await fishing_week.add_sold(interaction.user.id, coins)
 
         lines = []
         for grade in GRADE_ORDER:

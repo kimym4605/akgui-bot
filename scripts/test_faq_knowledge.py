@@ -28,7 +28,9 @@ from utils.notify_prefs import NOTIFY_KINDS  # noqa: E402
 from utils.card_data import TOTAL as CARD_SPECIES  # noqa: E402
 from utils.card_store import PITY_DRAWS, PULL_PRICE  # noqa: E402
 from utils.casino_store import DAILY_LIMIT, MAX_BET  # noqa: E402
-from utils.fish_data import GRADES, ROD_DURABILITY, ROD_PRICE, TOTAL_SPECIES  # noqa: E402
+from utils.fish_data import (  # noqa: E402
+    GRADES, ROD_DURABILITY, ROD_PRICE, SMALL_ROD_PRICE, TOTAL_SPECIES,
+)
 from utils.inventory_store import PROTECT_PRICE  # noqa: E402
 from utils.mission_store import DAILY_MISSION_COUNT, REROLL_PRICE  # noqa: E402
 from utils.title_store import TITLE_PLANS  # noqa: E402
@@ -44,6 +46,11 @@ print("⒜ 안내문 숫자 ↔ 실제 상수 대조")
 CHECKS = [
     # (주제, 본문에 반드시 들어가야 하는 문구, 설명)
     ("fishing", f"{ROD_PRICE}코인", "낚시대 값"),
+    # ⭐ 입문용 소형 낚시대. 이 안내가 없으면 문턱을 낮춰도 **있는 줄 모르고** 끝나요
+    #    (리롤권·보호권·테마가 그래서 0건이에요).
+    ("fishing", f"{SMALL_ROD_PRICE}코인", "소형 낚시대 값"),
+    ("fishing", "횟수당 값이 똑같아서", "소형이 손해가 아니라는 안내"),
+    ("coin_spend", f"소형 {SMALL_ROD_PRICE}코인", "상점 목록의 소형 낚시대"),
     ("fishing", f"{ROD_DURABILITY}번", "낚시대 내구도"),
     ("fishing", f"{TOTAL_SPECIES}종", "어종 수"),
     ("cards", f"{PULL_PRICE}코인", "뽑기 값"),

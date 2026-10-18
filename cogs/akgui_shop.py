@@ -28,7 +28,9 @@ from utils import attend_service, coin_wallet, cosmetic_store, inventory_store, 
 from utils.interaction_ack import ack
 from utils.inventory_store import PROTECT_MAX, PROTECT_PRICE
 from utils.mission_store import MISSIONS, REROLL_LIMIT_PER_DAY, REROLL_PRICE
-from utils.fish_data import ROD_DURABILITY, ROD_PRICE
+from utils.fish_data import (
+    ROD_DURABILITY, ROD_PRICE, SMALL_ROD_DURABILITY, SMALL_ROD_PRICE,
+)
 from utils.profile_card import THEME_PRICE, THEMES
 from utils.title_store import TITLE_DAYS, TITLE_PLANS
 
@@ -56,9 +58,11 @@ def _shop_embed(balance: int, rerolls_left: int, owned: list[str], selected: str
         # ⚠️ "(하루 1개)"가 붙어 있었어요. 2026-10-17 4차에 하루 제한이 풀렸는데
         #    이 라벨만 안 고쳐져서, 실제로 10명이 88개를 산 뒤에도 "하루 1개"로 읽혔어요.
         #    🚨 제한을 다시 넣거나 뺄 땐 이 라벨도 같이 고칠 것.
-        name=f"🎣 낚시대 — {ROD_PRICE}코인",
+        name=f"🎣 낚시대 — {ROD_PRICE}코인 / 🪝 소형 — {SMALL_ROD_PRICE}코인",
         value=(
             f"**{ROD_DURABILITY}번** 던질 수 있어요. 다 쓰면 부서져요.\n"
+            f"　└ 🪝 **소형**은 {SMALL_ROD_PRICE}코인에 **{SMALL_ROD_DURABILITY}번** — "
+            "횟수당 값이 **똑같아요.** 코인이 적을 때 시작용이에요\n"
             "　└ 낚시는 낚시대가 있어야 해요 · 꽝 없이 **반드시 물고기가 나와요**\n"
             "　└ **몇 개든** 살 수 있어요 (하루 제한 없어요)\n"
             "　└ 잡은 건 `/어항`에 쌓였다가 `/물고기판매`로 한 번에 팔려요"
@@ -280,6 +284,22 @@ class ShopView(discord.ui.View):
         from cogs.fishing import purchase_rod
 
         _, msg = await purchase_rod(interaction.user.id)
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @discord.ui.button(label="소형 낚시대", emoji="🪝", style=discord.ButtonStyle.secondary)
+    async def buy_small_rod(self, interaction: discord.Interaction,
+                            button: discord.ui.Button):
+        """⭐ 입문용 소형 낚시대 (2026-10-18).
+
+        실측: 낚시가 **발행의 74%**인데 48명 중 **33명(69%)이 10코인이 없어서**
+        최대 발행원에 못 들어갔어요. 횟수당 값이 큰 것과 같아서 **발행 구조는
+        안 바뀌고** 진입만 31% → 71%로 넓어져요.
+        → 자세한 근거는 `utils/fish_data.SMALL_ROD_PRICE` 주석."""
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
+        from cogs.fishing import purchase_rod
+
+        _, msg = await purchase_rod(interaction.user.id, small=True)
         await interaction.followup.send(msg, ephemeral=True)
 
     @discord.ui.button(label="미션 리롤", emoji="🎲", style=discord.ButtonStyle.primary)
