@@ -22,7 +22,14 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from cogs.rank import _extract_player_match_stats
-from utils import coin_wallet, henrik_api, mission_store, notify_prefs, riot_account_store
+from utils import (
+    coin_wallet,
+    henrik_api,
+    match_feed,
+    mission_store,
+    notify_prefs,
+    riot_account_store,
+)
 from utils.channel_check import restrict_to_channel
 from utils.mission_store import MISSIONS, ONE_TIME_MISSIONS
 
@@ -266,6 +273,21 @@ class Mission(commands.Cog):
             return None  # 오늘 한 경기가 없을 뿐 - 정상이에요
 
         stats = [s for s in (_extract_player_match_stats(m, name, tag) for m in matches) if s]
+
+        # 🔔 경기 결과 자동 알림 (2026-10-18)
+        #
+        # 🚨 **여기에 붙이는 이유**: HenrikDev는 분당 30회를 키 하나로 나눠 써요. 알림을
+        #    위해 루프를 따로 돌리면 호출이 두 배가 돼서 429가 나요. 방금 가져온 `matches`를
+        #    그대로 넘겨서 **추가 호출 0회**로 끝내요.
+        # 🚨 알림이 터져도 **미션 판정은 계속돼야** 해요. 코인 지급이 부가 기능 때문에
+        #    막히면 안 되니 통째로 감싸요.
+        try:
+            await match_feed.post_new_matches(
+                self.bot, user_id, f"{name}#{tag}", matches,
+                lambda m: _extract_player_match_stats(m, name, tag),
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("🔔 경기 알림 중 오류 (user=%s)", user_id, exc_info=True)
 
         for key in keys:
             achieved = False
