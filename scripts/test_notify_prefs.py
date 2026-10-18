@@ -66,7 +66,9 @@ notify_prefs._prefs = fake
 
 print("1) 아무 설정도 안 한 사람은 전부 켜짐")
 states = asyncio.run(notify_prefs.get_all(1))
-check("알림 종류가 3개", len(states) == 3, str(sorted(states)))
+# 🚨 숫자를 박지 말 것 — 알림을 추가하면 여기서 거짓 실패가 나요(2026-10-18에 겪음).
+check(f"알림 종류가 {len(notify_prefs.NOTIFY_KINDS)}개",
+      len(states) == len(notify_prefs.NOTIFY_KINDS), str(sorted(states)))
 check("전부 True", all(states.values()), str(states))
 check("조회만으로 문서를 만들지 않는다", fake.writes == 0 and not fake.docs)
 
@@ -95,7 +97,9 @@ print("5) 알림 종류를 나중에 추가해도 기존 유저는 켜진 상태
 notify_prefs.NOTIFY_KINDS["새알림_테스트"] = {"emoji": "🆕", "title": "새 알림", "desc": "테스트용"}
 try:
     check("기존 유저도 새 알림은 켜짐", asyncio.run(notify_prefs.is_enabled(1, "새알림_테스트")) is True)
-    check("화면에도 4개가 뜬다", len(asyncio.run(notify_prefs.get_all(1))) == 4)
+    # 🚨 숫자를 박지 말 것 — 알림을 추가하면 거짓 실패가 나요(2026-10-18에 겪음).
+    check(f"화면에도 {len(notify_prefs.NOTIFY_KINDS)}개가 뜬다",
+          len(asyncio.run(notify_prefs.get_all(1))) == len(notify_prefs.NOTIFY_KINDS))
 finally:
     del notify_prefs.NOTIFY_KINDS["새알림_테스트"]
 
@@ -209,14 +213,15 @@ check("한 줄에 5개 이하", all(len(row.get("components", [])) <= 5 for row 
 labels = [c.get("label", "") for c in buttons]
 check("켠 것은 '켜짐'으로 보인다", any("켜짐" in label for label in labels), str(labels))
 check("끈 것은 '꺼짐'으로 보인다", any("꺼짐" in label for label in labels), str(labels))
-check(
-    "켜짐은 초록 / 꺼짐은 회색",
-    sorted(c["style"] for c in buttons) == sorted([
-        discord.ButtonStyle.success.value, discord.ButtonStyle.secondary.value,
-        discord.ButtonStyle.success.value,
-    ]),
-    str([c["style"] for c in buttons]),
-)
+# 🚨 스타일 목록을 손으로 적지 말 것 — 알림을 추가하면 거짓 실패가 나요.
+#    라벨에 '꺼짐'이 있으면 회색, 아니면 초록이어야 해요.
+_pairs = list(zip(labels, (c["style"] for c in buttons)))
+_mismatch = [
+    (label, style) for label, style in _pairs
+    if style != (discord.ButtonStyle.secondary.value if "꺼짐" in label
+                 else discord.ButtonStyle.success.value)
+]
+check("켜짐은 초록 / 꺼짐은 회색", not _mismatch, str(_mismatch or _pairs))
 
 embed = _build_embed(states)
 check("임베드 필드가 알림 종류 수만큼", len(embed.fields) == len(notify_prefs.NOTIFY_KINDS))

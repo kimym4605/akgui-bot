@@ -187,19 +187,25 @@ check("도박으로 시작하지 않는다 (리포트가 베팅으로 오인)", 
 check("환불 로그가 '카드뽑기:환불'", refund_reason == "카드뽑기:환불", refund_reason)
 
 sys.path.insert(0, os.path.join(BOT_DIR, "scripts"))
-# 리포트의 분류기를 직접 불러서 실제로 'refund'로 갈리는지 확인해요.
-import importlib.util  # noqa: E402
+# 분류기를 직접 불러서 실제로 'refund'로 갈리는지 확인해요.
+#
+# ⚠️ 2026-10-18에 분류 규칙이 `scripts/report_economy.py`에서 `utils/coin_ledger.py`로
+#    옮겨졌어요(`/서버리포트`가 같은 규칙을 쓰려고). 예전엔 스크립트 **소스 문자열**을
+#    뒤졌는데, 이제 진짜 함수를 불러서 확인해요(더 정확해요).
+from utils import coin_ledger  # noqa: E402
 
-spec = importlib.util.spec_from_file_location(
-    "_report_probe", os.path.join(BOT_DIR, "scripts", "report_economy.py")
-)
-# ⚠️ report_economy는 임포트하면 바로 DB에 붙어서 리포트를 찍어요. 그래서 모듈을 실행하지
-#    않고 **소스에서 분류 규칙만** 떼어내 확인해요.
-src = open(os.path.join(BOT_DIR, "scripts", "report_economy.py"), encoding="utf-8").read()
-check("리포트에 REFUND_ADD가 있다", "REFUND_ADD" in src)
-check("환불을 issue보다 먼저 거른다",
-      src.index("REFUND_ADD)") < src.index('return "issue"'))
-check("순소각에서 환불을 뺀다", 'total("burn") - refunded' in src)
+check("환불이 'refund'로 갈린다",
+      coin_ledger.classify({"kind": "add", "note": "카드뽑기:환불"}) == "refund")
+check("🚨 환불이 발행(issue)으로 안 센다",
+      coin_ledger.classify({"kind": "add", "note": "카드뽑기:환불"}) != "issue")
+check("일반 지급은 그대로 발행",
+      coin_ledger.classify({"kind": "add", "note": "출석"}) == "issue")
+# 🚨 환불은 짝이 되는 spend(소각)까지 지워야 해요. 안 그러면 발행·소각이 둘 다 부풀어요.
+_agg = coin_ledger.totals([
+    {"kind": "spend", "note": "카드뽑기", "amount": 10},
+    {"kind": "add", "note": "카드뽑기:환불", "amount": 10},
+])
+check("순소각에서 환불을 뺀다", _agg["burned"] == 0, f"소각 {_agg['burned']}")
 
 # ==================================================================
 print("\n[7][8] 결과 임베드 내용")

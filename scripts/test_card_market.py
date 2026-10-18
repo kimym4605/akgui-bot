@@ -308,17 +308,12 @@ check("실패하면 코인이 그대로", wallet.bal == before)
 
 # ==================================================================
 print("\n[11] 경제 리포트가 거래를 재분배로 분류하는가")
-import ast  # noqa: E402
-from pathlib import Path  # noqa: E402
+from pathlib import Path  # noqa: E402  (아래 리포트 본문 검사에서도 써요)
 
-tree = ast.parse(Path(os.path.join(BOT_DIR, "scripts/report_economy.py"))
-                 .read_text(encoding="utf-8"))
-keep = [n for n in tree.body
-        if (isinstance(n, ast.Assign)
-            and any(getattr(t, "id", "").endswith(("_SPEND", "_ADD")) for t in n.targets))
-        or (isinstance(n, ast.FunctionDef) and n.name == "classify")]
-ns = {}
-exec(compile(ast.Module(body=keep, type_ignores=[]), "rules", "exec"), ns)
+# ⚠️ 2026-10-18에 분류 규칙이 `scripts/report_economy.py` 안에서 `utils/coin_ledger.py`로
+#    옮겨졌어요(`/서버리포트`가 같은 규칙을 쓰려고). 예전엔 스크립트를 AST로 뜯어
+#    `classify`만 꺼내 썼는데, 이제 그냥 import해요.
+from utils.coin_ledger import classify  # noqa: E402
 
 for entry, want in [
     ({"kind": "transfer", "note": f"거래:{EPIC}"}, "transfer"),
@@ -327,13 +322,13 @@ for entry, want in [
     ({"kind": "spend", "note": "카드뽑기"}, "burn"),
     ({"kind": "add", "note": "출석"}, "issue"),
 ]:
-    got = ns["classify"](entry)
+    got = classify(entry)
     if got != want:
         failures.append(f"classify {entry}")
     print(f"  {'OK  ' if got == want else 'FAIL'} {entry['kind']:8s} "
           f"{entry['note'] or '(없음)':14s} -> {got}")
 check("🚨 거래가 소각으로 안 세어진다",
-      ns["classify"]({"kind": "transfer", "note": "거래:x"}) != "burn")
+      classify({"kind": "transfer", "note": "거래:x"}) != "burn")
 
 # 🚨 리포트의 **장터 집계 줄**도 새 note를 집어야 해요. classify만 맞고 여기가 틀리면
 #    거래 건수가 0으로 보여서 "아무도 거래 안 한다"고 오판해요(실제로 그럴 뻔했어요).
