@@ -27,7 +27,8 @@ from datetime import datetime, timedelta, timezone
 
 from pymongo import ReturnDocument
 
-from utils.fish_data import BY_KEY, COIN_PIECES, pieces_of
+from utils import fishing_week
+from utils.fish_data import BY_KEY, COIN_PIECES, GRADE_ORDER, pieces_of
 from utils.pokemon_store import _db
 
 log = logging.getLogger(__name__)
@@ -249,6 +250,13 @@ async def get(user_id) -> dict:
 async def record_cast(user_id, key: str | None, size: int | None = None) -> None:
     await asyncio.to_thread(_record_cast_sync, user_id, key, size)
 
+    # 🎣 주간 대회 집계 (2026-10-18). 기존 문서 구조는 그대로 두고 별도 컬렉션에만 쌓아요.
+    # 🚨 여기서 실패해도 낚시 본 흐름은 계속돼야 해요(fishing_week가 예외를 삼켜요).
+    if key is not None:
+        grade = BY_KEY.get(key, (None, None))[0]
+        rank = (len(GRADE_ORDER) - GRADE_ORDER.index(grade)) if grade in GRADE_ORDER else 0
+        await fishing_week.record_catch(user_id, key, size, rank)
+
 
 async def sell_all(user_id) -> tuple[dict[str, list[int]], int, int]:
     """(담겨있던 것, 지급 코인, 남은 조각)."""
@@ -261,6 +269,7 @@ async def restore(user_id, tank: dict[str, list[int]], dust: int = 0) -> None:
 
 async def add_sold(user_id, coins: int) -> None:
     await asyncio.to_thread(_add_sold_sync, user_id, coins)
+    await fishing_week.add_sold(user_id, coins)   # 🎣 주간 대회 집계
 
 
 async def leaderboard(limit: int = 10) -> list[tuple[str, int]]:

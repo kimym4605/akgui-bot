@@ -173,6 +173,23 @@ async def build_achievement_embed(
         color=0xFFD700 if total_unlocked else 0x4F545C,
     )
 
+    # 🎯 거의 다 온 업적을 맨 위에 (2026-10-18)
+    #
+    # 실측: 19명이 50개 중 **중앙값 8개**만 달성했어요. 목록을 쭉 늘어놓으면 눈에
+    # 안 들어와서, 이미 하고 있는 일 중 **조금만 더 하면 되는 것**을 집어줘요.
+    # ⚠️ 특정 분야만 보고 있을 땐 안 보여줘요(그 화면은 이미 좁혀진 목록이에요).
+    if category is None:
+        soon = achievement_data.next_candidates(stats, unlocked, limit=3)
+        if soon:
+            lines = []
+            for item in soon:
+                pct = item["ratio"] * 100
+                lines.append(
+                    f"{item['emoji']} **{item['name']}** — {item['have']}/{item['need']} "
+                    f"({pct:.0f}%)\n　└ {item['desc']}"
+                )
+            embed.add_field(name="🎯 거의 다 왔어요", value="\n".join(lines), inline=False)
+
     categories = [category] if category else list(achievement_data.CATEGORIES)
     for key in categories:
         items = achievement_data.BY_CATEGORY.get(key, [])

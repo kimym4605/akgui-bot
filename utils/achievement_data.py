@@ -151,3 +151,31 @@ def progress_of(achievement: dict, stats: dict) -> tuple[int, int]:
 def is_unlocked(achievement: dict, stats: dict) -> bool:
     have, need = progress_of(achievement, stats)
     return have >= need
+
+
+# ------------------------------------------------------------------
+# 🎯 "다음에 깰 만한 업적" 고르기 (2026-10-18)
+#
+# 실측: 19명이 평균적으로 50개 중 **중앙값 8개**만 달성했어요. 이미 만들어둔 콘텐츠의
+# 60%가 안 보이고 있다는 뜻이에요. 목록을 쭉 늘어놓으면 눈에 안 들어오니까,
+# **지금 거의 다 온 것**만 골라서 앞에 보여줘요.
+#
+# 🚨 아직 0인 업적은 추천하지 않아요. "0/50"을 보여주는 건 동기가 안 되고,
+#    이미 하고 있는 일을 조금만 더 하면 된다는 쪽이 훨씬 잘 먹혀요.
+# ------------------------------------------------------------------
+def next_candidates(stats: dict, unlocked: set | list, limit: int = 3) -> list[dict]:
+    """못 깬 업적 중 **진행률이 높은 순**으로. 각 항목에 have/need/ratio를 붙여 돌려줘요."""
+    done = set(unlocked or ())
+    rows = []
+    for achievement in ACHIEVEMENTS:
+        if achievement["key"] in done:
+            continue
+        have, need = progress_of(achievement, stats)
+        if need <= 0 or have <= 0:
+            continue              # 시작도 안 한 건 추천하지 않아요
+        if have >= need:
+            continue              # 조건은 찼는데 아직 기록 안 된 것 (곧 열려요)
+        rows.append({**achievement, "have": have, "need": need,
+                     "ratio": have / need})
+    rows.sort(key=lambda r: -r["ratio"])
+    return rows[:limit]

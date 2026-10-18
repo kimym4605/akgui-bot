@@ -46,6 +46,11 @@ NOTIFY_KINDS: dict[str, dict] = {
         "title": "위시리스트 DM",
         "desc": "새벽 4시에 위시리스트 스킨이 상점에 떴으면 알려주는 DM이에요.",
     },
+    "attend_remind": {
+        "emoji": "⏰",
+        "title": "출석 끊기기 전 알림",
+        "desc": "연속 출석이 걸려 있는데 그날 아직 안 하셨으면 밤에 한 번 알려드려요.",
+    },
     "match_feed": {
         "emoji": "🔔",
         "title": "경기 결과 자동 공개",
