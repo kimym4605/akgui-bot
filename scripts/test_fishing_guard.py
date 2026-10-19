@@ -142,7 +142,7 @@ async def main():
 
     # ── ⒡ TTL이 한 판 길이보다 넉넉한가 ────────────────────────────────
     print("\n⒢ TTL 길이 점검")
-    one_round = fishing.BITE_MAX + fishing.BITE_WINDOW
+    one_round = fishing.BITE_MAX + fishing.STRIKE_WAIT
     check("TTL이 한 판 최대 길이보다 길다", fishing.CAST_GUARD_TTL > one_round,
           f"TTL {fishing.CAST_GUARD_TTL:.0f}초 > 한 판 최대 {one_round:.1f}초")
     check("TTL이 과하게 길지 않다 (갇혀도 1분 안에 풀림)", fishing.CAST_GUARD_TTL <= 60,

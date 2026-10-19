@@ -35,7 +35,7 @@
 
 1. `/낚시` -> 내구도 1 소모 + "찌를 던졌어요" + **🎣 챔질 버튼**
 2. 2~8초 뒤 메시지가 "🐟 입질이 왔어요!"로 바뀌어요
-3. 그때부터 **2.5초 안에** 버튼을 눌러야 잡혀요
+3. 그 뒤에 버튼을 누르면 **언제 눌렀든 잡혀요** (아래 '늦었다는 없어요')
 4. 결과 화면에 **🎣 다시 던지기** 버튼이 붙어요 (내구도가 남아 있으면)
 
 ⭐ **한 번 던지기는 `run_cast()` 하나예요.** `/낚시`는 `edit=False`로, 다시던지기 버튼은
@@ -43,11 +43,17 @@
 규칙이 전부 여기 들어있어서, 복사본은 반드시 한쪽만 고쳐지고 어긋나요.
 
 - 입질 전에 누르면 **성급** (놓침 → 횟수 돌려줌)
-- 늦게 누르면 **놓침** (횟수 돌려줌)
-- 제때 누르면 **반드시** 물고기가 나와요 (꽝 없음)
+- 입질 뒤에 누르면 **반드시** 물고기가 나와요 (꽝도 없고 '늦었다'도 없어요)
+- 아무것도 안 누르면 **방치** (놓침 → 횟수 돌려줌)
 
-🚨 **제한시간 시계는 메시지를 보낸 뒤에 시작해요.** 전엔 보내기 전에 찍어서, 유저가
-"입질!"을 보기도 전에 2.5초가 흐르기 시작했어요(왕복 지연 100~300ms를 통째로 손해).
+🚨 **'늦었다' 판정은 없어요**(2026-10-19 사용자 결정). 전엔 입질 후 2.5초를 넘기면
+놓침이었는데, 그 측정에는 **클릭이 봇까지 오는 시간**이 섞여 있어요. 모바일에서 제때
+눌러도 늦게 도착해 놓치는 일이 생겨서 아예 없앴어요. 클라이언트가 **언제 눌렀는지**는
+디스코드가 알려주지 않으니, 받은 시각으로 재는 건 결국 회선 속도를 재는 거예요.
+→ `FishingView.strike`의 주석에 자세히 적어뒀어요. 되돌리지 말 것.
+
+🚨 **그래도 시계는 메시지를 보낸 뒤에 찍어요.** 되돌리면 입질 메시지가 뜨기 전에
+`bite_at` 깃발이 서서, 아직 아무것도 못 본 사람의 클릭이 '성급'을 면해버려요.
 
 ⭐ **놓치면 횟수를 돌려줘요**(2026-10-17). 처음엔 소모시켰는데, 디스코드 왕복 지연 탓에
 실력과 무관하게 놓치는 경우가 있어서 그 몫까지 물릴 수는 없어요. 덕분에 낚시대 1개가
@@ -108,7 +114,11 @@ COIN_LOG_NOTE = "낚시판매"
 ROD_NOTE = "낚시대"
 
 BITE_MIN, BITE_MAX = 2.0, 8.0      # 입질까지 기다리는 시간
-BITE_WINDOW = 2.5                  # 입질 후 챔질 제한시간
+# 🚨 **입질 후에는 "늦었다"가 없어요**(2026-10-19 사용자 결정).
+#    이건 "제한시간"이 아니라 **챔질을 기다려주는 시간**이에요. 이 안에 클릭이
+#    도착하면 **언제 도착했든 성공**이고, 아무것도 안 오면 방치로 끝내요.
+#    왜 바꿨는지는 `STRIKE_WAIT`를 쓰는 자리의 주석에 적어뒀어요.
+STRIKE_WAIT = 6.0                  # 입질 후 챔질을 기다려주는 시간
 
 # ------------------------------------------------------------------
 # 🎣 한 사람당 **동시에 한 판만** (2026-10-18 사용자 결정)
@@ -135,7 +145,7 @@ BITE_WINDOW = 2.5                  # 입질 후 챔질 제한시간
 # ⚠️ 기존 `CastAgainView._started`는 **같은 버튼의 연타**만 막아요(뷰 인스턴스 소유).
 #    서로 다른 `/낚시` 호출은 각자 새 뷰라 그걸로는 못 막아서 이 가드가 따로 필요해요.
 _casting: dict[int, float] = {}
-CAST_GUARD_TTL = BITE_MAX + BITE_WINDOW + 15.0
+CAST_GUARD_TTL = BITE_MAX + STRIKE_WAIT + 15.0
 WAIT_COLOR, BITE_COLOR = 0x2B6CB0, 0x38A169
 MISS_COLOR = 0x6B7280
 
@@ -290,9 +300,11 @@ async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> 
     else:
         # ⚠️ 이제 **못 잡는 경우는 타이밍 실패뿐**이에요(꽝 제거, 2026-10-17 2차).
         #    운이 아니라 내 실수라서, 사유를 분명히 알려줘요.
+        # 🚨 "늦었어요"는 없어요(2026-10-19). 남은 건 **입질 전에 누른 것**과
+        #    **아예 안 누른 것** 둘뿐이에요. → `FishingView.strike`의 주석
         reason = {
             "early": "너무 일찍 챘어요. 미끼만 날아갔네요.",
-            "late": "늦었어요. 물고기가 도망갔어요.",
+            "afk": "챔질을 하지 않아서 물고기가 그냥 갔어요.",
         }.get(view.result, "놓쳤어요.")
         embed = discord.Embed(
             title="💨 놓쳤어요",
@@ -482,20 +494,23 @@ async def _run_cast(interaction: discord.Interaction, *, edit: bool) -> bool:
         except discord.HTTPException:
             log.info("입질 표시 실패 (메시지가 사라졌을 수 있어요)")
 
-        # 🚨 제한시간 시계는 **메시지를 보낸 뒤에** 시작해요.
+        # 🚨 시계는 **메시지를 보낸 뒤에** 시작해요.
         #
         # 전에는 `edit_original_response` **앞**에서 찍었는데, 그 호출이 디스코드까지
-        # 다녀오는 데 100~300ms가 걸려요. 즉 유저가 "입질!"을 보기도 전에 제한시간이
-        # 흐르기 시작해서, 체감 2.5초가 실제로는 2초 남짓이었어요. 못 잡는 게
-        # 실력이 아니라 **지연 때문**이었던 거예요(2026-10-17 사용자 신고).
+        # 다녀오는 데 100~300ms가 걸려요. 즉 유저가 "입질!"을 보기도 전에 시간이
+        # 흐르기 시작했어요(2026-10-17 사용자 신고).
         #
-        # ⚠️ 돌아오는 길(클릭 -> 봇)은 여전히 포함돼요. 그건 클라이언트 시각을
-        #    받을 수 없어서 어쩔 수 없고, 대신 창을 넉넉히 잡아 상쇄해요.
+        # ⚠️ `bite_at`은 이제 **판정에 안 쓰여요**(늦었다를 없앴으니까요). '입질이
+        #    왔다'를 표시하는 깃발일 뿐이라, 입질 전에 누른 걸 가려내는 데만 써요.
+        #    그래도 순서는 그대로 지켜요 — 되돌리면 입질 메시지가 뜨기 **전에**
+        #    깃발이 서서, 아직 아무것도 못 본 사람의 클릭이 '성급'을 면해버려요.
         view.bite_at = time.monotonic()
         try:
-            await asyncio.wait_for(view.done.wait(), timeout=BITE_WINDOW + 1.0)
+            await asyncio.wait_for(view.done.wait(), timeout=STRIKE_WAIT)
         except asyncio.TimeoutError:
-            view.result = "late"
+            # ⭐ 여기까지 왔으면 클릭이 **아예 안 온** 거예요(= 방치). 늦게 눌러서가
+            #    아니에요 — 늦은 클릭은 위 `wait_for`가 받아서 성공으로 처리해요.
+            view.result = "afk"
             view.done.set()
 
     view.stop()
@@ -525,11 +540,11 @@ class FishingView(discord.ui.View):
     재시작되면 그 판은 그냥 없던 일이 되는 게 맞아요(뽑기 버튼과는 성격이 달라요)."""
 
     def __init__(self, user_id: int):
-        super().__init__(timeout=BITE_MAX + BITE_WINDOW + 10)
+        super().__init__(timeout=BITE_MAX + STRIKE_WAIT + 10)
         self.user_id = user_id
-        self.bite_at: float | None = None     # 입질이 온 시각 (None = 아직)
+        self.bite_at: float | None = None     # 입질이 왔다는 깃발 (None = 아직)
         self.done = asyncio.Event()
-        self.result: str | None = None        # "early" | "late" | "ok"
+        self.result: str | None = None        # "early" | "afk" | "ok"
         self.caught: str | None = None
         self.size: int | None = None          # 📏 잡힌 물고기의 치수(cm)
         self.rod_left = 0                     # 이번 캐스트 뒤 남은 내구도
@@ -557,10 +572,25 @@ class FishingView(discord.ui.View):
         if not self.done.is_set():
             if self.bite_at is None:
                 # 🚨 입질 전에 누른 경우. 버튼을 처음부터 눌리게 둔 이유가 이걸 잡기 위해서예요.
+                #
+                # ⭐ 지연은 이쪽을 **느슨하게** 만들어요(클릭이 늦게 도착하면 입질 뒤가
+                #    되니까요). 그래서 '성급'은 지연과 무관하게 진짜 실수뿐이에요.
                 self.result = "early"
-            elif time.monotonic() - self.bite_at > BITE_WINDOW:
-                self.result = "late"
             else:
+                # 🚨 **입질 뒤에 눌렀으면 언제 눌렀든 성공이에요**(2026-10-19 사용자 결정).
+                #
+                # 전엔 `monotonic() - bite_at > BITE_WINDOW`면 "늦었어요"로 돌렸어요.
+                # 그런데 그 뺄셈에는 **클릭이 봇까지 오는 시간이 섞여 있어요.** 모바일은
+                # 앱이 백그라운드였거나 망이 느리면 그게 초 단위로 벌어져요. 즉 유저가
+                # 제때 눌러도 **봇에게는 늦게 도착**해서, 실력이 아니라 기기·회선 탓으로
+                # 놓치는 판이 생겼어요(사용자가 모바일에서 직접 확인했어요).
+                #
+                # 클라이언트가 **언제 눌렀는지**는 알 방법이 없어요(디스코드가 클릭 시각을
+                # 안 줘요). 받은 시각으로 재는 건 결국 지연을 재는 거예요. 그래서 판정을
+                # 없앴어요 — 챔질이 **도착하기만 하면** 잡혀요.
+                #
+                # ⚠️ 그래도 미니게임은 남아요: 입질 전에 누르면 여전히 '성급'이고,
+                #    아무것도 안 누르면 방치로 끝나요(`STRIKE_WAIT` 참고).
                 self.result = "ok"
                 self.caught = roll_catch()
                 # 📏 치수는 잡힌 **그 순간** 정해져요. 나중에 굴리면 같은 물고기가
@@ -575,8 +605,10 @@ class FishingView(discord.ui.View):
             log.info("🎣 챔질 defer 실패 (판정은 완료, user=%s)", interaction.user.id)
 
     async def on_timeout(self):
+        # ⚠️ 여기까지 오면 `run_cast`의 `STRIKE_WAIT`가 이미 지난 거예요(뷰 타임아웃이
+        #    10초 더 길어요). 그래서 사실상 안 불리지만, 불리더라도 **방치**예요.
         if not self.done.is_set():
-            self.result = "late"
+            self.result = "afk"
             self.done.set()
 
 
@@ -796,8 +828,10 @@ class Fishing(commands.Cog):
         )
         embed.add_field(
             name="꽝은 없어요",
-            value=("타이밍만 맞히면 **반드시 뭔가 나와요.**\n"
-                   "　└ 챔질을 놓쳐도 **횟수를 돌려드려요** — 운이 아니라 실수니까요"),
+            value=("**입질이 온 뒤에 누르면 반드시 뭔가 나와요.**\n"
+                   "　└ 늦게 눌러도 괜찮아요 — **'늦었다'는 판정이 없어요**\n"
+                   "　└ 입질 전에 누르거나 아예 안 누르면 놓치지만, "
+                   "그때도 **횟수를 돌려드려요**"),
             inline=False,
         )
         embed.set_footer(text="/어항 에서 지금 가치를 확인해보세요")

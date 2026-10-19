@@ -235,6 +235,25 @@ class FakeFish:
 
 fake = FakeFish()
 fishing_store._fish = fake
+
+# 🚨 주간 대회 훅도 가짜로 바꿔요(2026-10-19에 발견).
+#
+# 2026-10-18에 `record_cast` 끝에 `fishing_week.record_catch`가 붙었는데, 가짜는
+# `_fish` 컬렉션만 갈아끼우고 있었어요. 그래서 이 테스트가 **그날부터 조용히 깨져**
+# 있었어요 - 캐스트마다 진짜 Atlas(없으면 localhost)로 붙으려 해서 [8a]에서 몇 분씩
+# 멈추거나 ServerSelectionTimeoutError로 죽었어요.
+#
+# ⚠️ 적립이 **딱 한 번** 불리는지는 `scripts/test_fishing_contest.py`가 봐요
+#    (여기서 세면 가짜가 진짜를 대신한 셈이라 의미가 없어요).
+_week_calls = []
+
+
+async def _fake_record_catch(*a, **k):
+    _week_calls.append(a)
+
+
+fishing_store.fishing_week.record_catch = _fake_record_catch
+
 U = "777"
 
 COMMON = FISH["일반"][0]["key"]
@@ -942,8 +961,8 @@ for _k, _fn in _store_patch.items():
     setattr(fishing.fishing_store, _k, _mk(_fn, 0.05 if _k == "use_rod" else 0.0))
 
 # 찌·입질 대기를 짧게 줄여요(테스트가 몇 초씩 멈추지 않게).
-_saved_timing = (fishing.BITE_MIN, fishing.BITE_MAX, fishing.BITE_WINDOW)
-fishing.BITE_MIN, fishing.BITE_MAX, fishing.BITE_WINDOW = 0.01, 0.02, 0.01
+_saved_timing = (fishing.BITE_MIN, fishing.BITE_MAX, fishing.STRIKE_WAIT)
+fishing.BITE_MIN, fishing.BITE_MAX, fishing.STRIKE_WAIT = 0.01, 0.02, 0.01
 try:
     _rec = []
     _ok2 = asyncio.run(fishing.run_cast(_RecInter(_rec), edit=True))
@@ -963,7 +982,7 @@ try:
 finally:
     for _k, _v in _saved.items():
         setattr(fishing.fishing_store, _k, _v)
-    fishing.BITE_MIN, fishing.BITE_MAX, fishing.BITE_WINDOW = _saved_timing
+    fishing.BITE_MIN, fishing.BITE_MAX, fishing.STRIKE_WAIT = _saved_timing
 
 # ==================================================================
 print("\n[14] 🎣 /낚시확률 - 공개하는 숫자가 실제와 같나")
@@ -1117,6 +1136,117 @@ _big = _fd.pieces_of(_k2, _hi2 + 10)
 check("상한보다 크면 최고가 (상한을 내리는 건 안전)",
       _big == _fd.GRADES[_fd.BY_KEY[_k2][0]]["pieces"][1], f"{_big}조각")
 
+# ==================================================================
+print("\n[16] 🚨 '늦었다' 판정이 없다 (2026-10-19)")
+# ------------------------------------------------------------------
+# 🚨 사용자 신고(2026-10-19): **모바일에서 판정이 느리게 될 때가 있다.**
+#
+# 전엔 `monotonic() - bite_at > BITE_WINDOW`로 늦음을 쟀는데, 그 뺄셈에는 클릭이
+# 봇까지 **오는 시간**이 섞여 있어요. 모바일은 앱이 백그라운드였거나 망이 느리면
+# 그게 초 단위로 벌어져서, 제때 눌러도 놓치는 판이 생겼어요. 디스코드는 클라이언트가
+# 언제 눌렀는지를 안 알려주니 받은 시각으로 재는 건 결국 회선 속도를 재는 거예요.
+#
+# 그래서 **입질 뒤 클릭은 언제 도착했든 성공**이에요. 이 테스트는 그 규칙을 못 박아요.
+# 되돌아가면(= 시간 비교를 다시 넣으면) 여기가 FAIL이에요.
+import asyncio as _aio2                                      # noqa: E402
+import time as _time2                                        # noqa: E402
+
+from cogs import fishing as _fish_cog                        # noqa: E402
+
+
+class _StrikeInter:
+    """챔질 버튼 하나만 받아주는 최소 상호작용."""
+
+    def __init__(self, uid):
+        class _R:
+            async def defer(self_inner, *a, **k):
+                pass
+        self.user = type("U", (), {"id": uid})()
+        self.response = _R()
+
+
+def _press(bite_ago: float | None):
+    """입질이 `bite_ago`초 전에 왔다고 두고 버튼을 누른 뒤 판정을 돌려줘요.
+
+    `None`이면 아직 입질이 안 온 상태(= 성급)예요."""
+    view = _fish_cog.FishingView(7)
+    view.bite_at = None if bite_ago is None else _time2.monotonic() - bite_ago
+    _aio2.run(view.strike.callback(_StrikeInter(7)))
+    return view.result
+
+
+# ⭐ 핵심: 옛 제한시간(2.5초)을 한참 넘겨도 잡혀야 해요.
+for _ago in (0.0, 2.4, 2.6, 5.0, 30.0, 600.0):
+    _res = _press(_ago)
+    check(f"입질 {_ago:g}초 뒤에 눌러도 잡힌다", _res == "ok", f"판정 '{_res}'")
+
+_v_late = _fish_cog.FishingView(7)
+_v_late.bite_at = _time2.monotonic() - 99.0
+_aio2.run(_v_late.strike.callback(_StrikeInter(7)))
+check("늦은 챔질에도 어종과 치수가 둘 다 들어온다",
+      _v_late.caught is not None and _v_late.size is not None,
+      f"어종 {_v_late.caught} · 치수 {_v_late.size}")
+
+# ⚠️ 미니게임은 **남아 있어야** 해요. '늦었다'만 없앤 거예요.
+check("🚨 입질 **전**에 누르면 여전히 성급이다 (지연과 무관한 진짜 실수)",
+      _press(None) == "early", f"판정 '{_press(None)}'")
+
+# ⭐ 소스에서 '늦음' 비교가 사라졌는지도 확인해요. 위 동작 테스트만으로는
+#    상수를 키우는 식으로 되돌려도 통과해버려요(그건 완화지 제거가 아니에요).
+#
+# 🚨 **AST로 봐요.** 처음엔 문자열로 `"bite_at >" not in 본문`을 봤는데, 바로 위에
+#    적어둔 **설명 주석**("전엔 `monotonic() - bite_at > ...`였다")에 걸려서 FAIL이
+#    났어요. 주석은 AST에 없으니 이 방식이 맞아요.
+import ast as _ast16                                         # noqa: E402
+
+_src16 = _Path(os.path.join(BOT_DIR, "cogs/fishing.py")).read_text(encoding="utf-8")
+_strike_node = next(
+    n for n in _ast16.walk(_ast16.parse(_src16))
+    if isinstance(n, _ast16.AsyncFunctionDef) and n.name == "strike")
+
+
+def _mentions_bite_at(node) -> bool:
+    return any(isinstance(x, _ast16.Attribute) and x.attr == "bite_at"
+               for x in _ast16.walk(node))
+
+
+# `bite_at`을 쓰는 건 **`is None` 하나**만 허용해요(입질이 왔는지 깃발 확인).
+#   - 뺄셈(`monotonic() - bite_at`)이 있으면 경과시간을 재는 거예요
+#   - `<`/`>` 비교가 있으면 제한시간 판정이에요
+_bad_ops = [
+    x for x in _ast16.walk(_strike_node)
+    if _mentions_bite_at(x) and (
+        (isinstance(x, _ast16.BinOp) and isinstance(x.op, _ast16.Sub))
+        or (isinstance(x, _ast16.Compare)
+            and not all(isinstance(o, (_ast16.Is, _ast16.IsNot)) for o in x.ops)))
+]
+check("🚨 챔질 판정에 bite_at 경과시간 비교가 없다", not _bad_ops,
+      f"시간 비교 {len(_bad_ops)}건이 돌아왔어요 — 모바일 지연이 다시 놓침이 돼요"
+      if _bad_ops else "is None 깃발 확인만 남아 있어요")
+check("🚨 결과 판정에 'late'가 남아 있지 않다", '"late"' not in _src16,
+      "'늦었어요' 판정이 되살아났어요" if '"late"' in _src16 else "")
+
+# 방치(아무것도 안 누름)는 여전히 놓침이에요 — 사유 문구가 '늦었다'가 아니어야 해요.
+# ⚠️ `'"afk"' in 소스`로만 보면 약해요 — 결과 문구 표에 키만 남아 있어도 통과해버려요
+#    (실제로 `result = "late"`로 되돌려 봤을 때 이 검사만 혼자 통과했어요).
+#    **대입하는 자리**가 둘 다(run_cast의 타임아웃·on_timeout) 있는지를 봐요.
+_afk_assigns = _src16.count('result = "afk"')
+check("방치를 'afk'로 두는 자리가 둘 다 있다 (run_cast 타임아웃 · on_timeout)",
+      _afk_assigns == 2, f"{_afk_assigns}곳 (기대 2)")
+check("방치 안내 문구가 있다", '"afk": "챔질을 하지 않아서' in _src16)
+check("방치 안내가 '늦었다'가 아니다", "늦었어요. 물고기가 도망갔어요." not in _src16)
+
+# ⏱ 기다려주는 시간이 왕복 지연을 넉넉히 덮는가
+check("입질 후 기다려주는 시간이 옛 제한시간(2.5초)보다 길다",
+      _fish_cog.STRIKE_WAIT > 2.5, f"{_fish_cog.STRIKE_WAIT}초")
+check("가드 TTL이 한 판 최대 길이보다 길다 (연타 가드가 먼저 안 풀리게)",
+      _fish_cog.CAST_GUARD_TTL > _fish_cog.BITE_MAX + _fish_cog.STRIKE_WAIT,
+      f"TTL {_fish_cog.CAST_GUARD_TTL:.0f}초")
+
+# ==================================================================
+# 🚨 요약은 **반드시 파일 맨 끝**에 있어야 해요. 여기보다 위에 두면 그 뒤에 추가한
+#    섹션의 실패가 집계되지도, 종료코드에 반영되지도 않아요(2026-10-19에 실제로
+#    [16]을 이 블록 **뒤에** 붙여서 조용히 통과했어요). 새 섹션은 이 위에.
 print("\n" + "=" * 60)
 if failures:
     print(f"❌ 실패 {len(failures)}건")
