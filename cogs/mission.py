@@ -39,7 +39,9 @@ log = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 
 VOICE_FLUSH_MINUTES = 5   # 통화 중이어도 5분마다 중간 정산해요
-MATCH_FETCH_SIZE = 10     # 전적은 최근 10경기만 봐요 (오늘 것만 걸러서 씀)
+# 전적은 최근 10경기만 봐요. 미션 판정은 여기서 **오늘 것만** 다시 걸러 쓰고,
+# 🔔 경기 알림은 **안 걸러진 전체**를 받아요(자정 유실 방지 — `utils/match_feed.py`).
+MATCH_FETCH_SIZE = 10
 DEFAULT_REGION = "kr"
 
 # ── 발로란트 미션 자동 판정 ────────────────────────────────────────────────
@@ -228,10 +230,17 @@ class Mission(commands.Cog):
     # ------------------------------------------------------------------
     # 3. 발로란트 전적 판정
     # ------------------------------------------------------------------
-    async def _fetch_today_matches(
+    async def _fetch_recent_matches(
         self, name: str, tag: str
     ) -> tuple[list[dict] | None, int | None]:
-        """(오늘 플레이한 경기, 응답 상태코드). 조회 실패면 경기는 None이에요.
+        """(최근 경기 전체, 응답 상태코드). 조회 실패면 경기는 None이에요.
+
+        🚨 **여기서 날짜로 걸러내지 않아요**(2026-10-19). 전엔 `_fetch_today_matches`로
+        "오늘(KST)"만 돌려줬는데, 그 목록을 🔔 경기 알림이 그대로 받아 써서 **자정을
+        넘긴 경기가 영구히 유실**됐어요(루프가 30분마다 도니까, 23:30~24:00 경기는
+        다음 실행 때 이미 '오늘'이 아니에요). 실측으로 `피카츄#PXG1` 님의 10-18
+        23:28·23:55 **승리 2건**이 그렇게 날아갔어요(그날 실제 3승 3패 → 채널엔 1승 3패).
+        날짜 필터는 **그걸 필요로 하는 미션 판정 쪽에만** 둬요.
 
         상태코드까지 돌려주는 건 **404(그런 계정 없음)와 나머지 실패를 갈라야** 하기 때문이에요.
         404는 몇 번을 다시 불러도 똑같아서(이름·태그가 바뀐 계정), 자동 확인 루프가 그날은
@@ -262,34 +271,37 @@ class Mission(commands.Cog):
             log.info("전적 조회 실패 (%s#%s status=%s)", name, tag, status)
             return None, status
 
-        matches = payload.get("data") or []
-        return [
-            m for m in matches
-            if m and _is_today_kst((m.get("metadata") or {}).get("game_start"))
-        ], status
+        return [m for m in (payload.get("data") or []) if m], status
 
     async def _check_valorant(self, user_id: int, keys: list[str], channel) -> str | None:
-        """발로란트 미션들을 오늘 전적으로 판정해요. 조회를 못 하면 사유 문구를 돌려줘요."""
+        """🔔 경기 알림을 올리고, `keys`에 든 발로란트 미션을 **오늘** 전적으로 판정해요.
+        조회를 못 하면 사유 문구를 돌려줘요.
+
+        🚨 **`keys`가 비어 있어도 불러야 해요.** 알림이 이 함수 안에 있어서, 미션이
+        다 끝났다고 호출을 건너뛰면 **알림도 같이 멈춰요**(2026-10-19 신고된 버그).
+        그게 "패배만 올라온다"로 보였어요 — `val_win`(승리하기)이 배정돼 있으면
+        **이기는 순간** 발로 미션이 끝나서, 그 뒤의 경기(대개 승리)가 안 올라갔어요.
+        → `_auto_check_one`은 이제 `pending`이 비어도 이 함수를 불러요."""
         account = riot_account_store.get_account(user_id)
         if account is None:
             return NOT_LINKED_NOTE
 
         name, tag = account
-        matches, status = await self._fetch_today_matches(name, tag)
+        matches, status = await self._fetch_recent_matches(name, tag)
         if matches is None:
             if status == 404:
                 return ACCOUNT_NOT_FOUND_NOTE
             return "전적을 불러오지 못했어요. 잠시 뒤에 다시 시도해주세요."
         if not matches:
-            return None  # 오늘 한 경기가 없을 뿐 - 정상이에요
-
-        stats = [s for s in (_extract_player_match_stats(m, name, tag) for m in matches) if s]
+            return None  # 최근 경기가 없을 뿐 - 정상이에요
 
         # 🔔 경기 결과 자동 알림 (2026-10-18)
         #
         # 🚨 **여기에 붙이는 이유**: HenrikDev는 분당 30회를 키 하나로 나눠 써요. 알림을
         #    위해 루프를 따로 돌리면 호출이 두 배가 돼서 429가 나요. 방금 가져온 `matches`를
         #    그대로 넘겨서 **추가 호출 0회**로 끝내요.
+        # ⭐ **날짜로 안 걸러진 목록**을 줘요(자정 유실 방지). 오래된 경기가 되살아나지
+        #    않게 하는 건 `match_feed`가 자기 쪽 시간 가드로 해요.
         # 🚨 알림이 터져도 **미션 판정은 계속돼야** 해요. 코인 지급이 부가 기능 때문에
         #    막히면 안 되니 통째로 감싸요.
         try:
@@ -299,6 +311,19 @@ class Mission(commands.Cog):
             )
         except Exception:  # noqa: BLE001
             log.warning("🔔 경기 알림 중 오류 (user=%s)", user_id, exc_info=True)
+
+        if not keys:
+            return None  # 알림만 올리러 들어온 경우예요 (미션은 다 깼거나 배정이 없어요)
+
+        # ⚠️ 미션은 **오늘 것만**으로 판정해요. 일일 미션이라 어제 경기로 깨지면 안 돼요.
+        matches = [
+            m for m in matches
+            if _is_today_kst((m.get("metadata") or {}).get("game_start"))
+        ]
+        if not matches:
+            return None  # 오늘 한 경기가 없을 뿐 - 정상이에요
+
+        stats = [s for s in (_extract_player_match_stats(m, name, tag) for m in matches) if s]
 
         for key in keys:
             achieved = False
@@ -368,7 +393,15 @@ class Mission(commands.Cog):
     ) -> tuple[int | None, bool]:
         """한 사람 몫이에요. (이번에 깬 미션 수, 전적을 실제로 불러왔는지).
 
-        확인할 미션이 없으면 (None, False) — API를 아예 안 불러요.
+        🚨 **미션이 다 끝나도 조회해요**(2026-10-19). 전엔 `pending`이 비면 여기서 바로
+        돌아가 API를 안 불렀는데, 🔔 경기 알림이 `_check_valorant` 안에 있어서
+        **알림까지 같이 멈췄어요.** `val_win`이 배정돼 있으면 **이기는 순간** 발로 미션이
+        끝나니, 그 뒤의 경기가 안 올라가서 "패배만 올라온다"로 보였어요.
+        실측(10-19): `che0ngi1#0101` 님이 `val_play`·`val_comp`를 다 깨서 그 상태였어요.
+
+        📉 호출량: 사람당 30분에 **최대 1회로 전과 같아요**(늘어나는 건 미션을 다 깬
+        사람 몫뿐이에요). 연동 17명이면 분당 +0.6회고 한도는 키당 30회/분이에요.
+        🚨 그래도 **루프를 따로 돌리진 말 것** — 그러면 사람당 2회가 되어 429가 나요.
 
         `ensure_today`를 여기서 부르는 건, 미션 문서가 `/미션`을 쳐야 생기기 때문이에요.
         문서가 없으면 자동 판정 대상에서 빠져버려요. 뽑히는 미션은 `user_id:날짜` 시드로
@@ -383,11 +416,9 @@ class Mission(commands.Cog):
             key for key in (doc.get("picks") or [])
             if key in valorant_keys and key not in done
         ]
-        if not pending:
-            return None, False
-
         # note가 None이면 정상 조회예요(오늘 경기가 없었을 뿐인 경우도 포함).
         # 문구가 돌아오면 전적을 못 불러온 거예요.
+        # ⭐ `pending`이 비어 있어도 부르고, 그때는 🔔 알림만 올라가요(위 주석 참고).
         note = await self._check_valorant(user_id, pending, None)  # 알림은 아래에서 묶어 보내요
         fetched = note is None
 

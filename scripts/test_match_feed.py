@@ -14,6 +14,7 @@
 import asyncio
 import os
 import sys
+import time
 import types
 
 BOT_DIR = os.path.join(os.path.dirname(__file__), "..")
@@ -59,10 +60,16 @@ class FakeBot:
 
 
 # ── 가짜 경기 데이터 (HenrikDev v3 모양) ─────────────────────────────
-def make_match(mid: str, won=True, mode="competitive", map_name="Ascent"):
+#
+# 🚨 `game_start`는 **상대 시각**이어야 해요. 전엔 `1791035008`(2026-10-03)로 박혀
+#    있었는데, 2026-10-19에 `FEED_MAX_AGE_HOURS` 가드가 들어오자 **모든 픽스처가
+#    "너무 오래된 경기"가 됐어요.** 고정 타임스탬프 + 시간 가드는 날짜가 지나면
+#    저절로 터지는 조합이에요. 그래서 "지금으로부터 N시간 전"으로 만들어요.
+def make_match(mid: str, won=True, mode="competitive", map_name="Ascent",
+               age_hours: float = 0.5):
     return {
         "metadata": {"matchid": mid, "map": map_name, "mode": mode,
-                     "game_start": 1791035008},
+                     "game_start": time.time() - age_hours * 3600},
         "teams": {
             "red": {"has_won": won, "rounds_won": 13 if won else 9,
                     "rounds_lost": 9 if won else 13},
@@ -197,8 +204,158 @@ async def main():
     check("패배면 제목에 패배", "패배" in lose.title, lose.title)
     check("패배 스코어가 뒤집힌다", "9 : 13" in lose.title, lose.title)
 
+    # ── ⒤ 🚨 자정 유실 방지 — 날짜가 아니라 '경과 시간'으로 본다 ──────
+    #
+    # 2026-10-19 신고("패배만 올라온다")의 원인 둘 중 하나예요. 전엔 미션용
+    # "오늘(KST)" 필터가 알림 범위까지 정해서, 23:30~24:00 경기는 다음 실행(30분 뒤)
+    # 때 이미 '오늘'이 아니라 **영구히 사라졌어요.** 실측으로 `피카츄#PXG1` 님의
+    # 23:28·23:55 승리 2건이 그렇게 날아갔어요.
+    print("\n⒤ 🚨 자정을 넘긴 경기도 올라간다 (경과 시간 기준)")
+    match_feed.notify_prefs = types.SimpleNamespace(is_enabled=enabled)  # type: ignore
+    match_feed.get_allowed_channel_id = lambda *a, **k: 999  # type: ignore
+
+    store3 = FakeStore()
+    store3.db[str(USER)] = ["baseline"]       # 기준선은 이미 있음
+    match_feed.match_feed_store = store3      # type: ignore[assignment]
+    ch = FakeChannel()
+    # ⭐ 어제 23:40에 한 경기를 오늘 00:10에 처리하는 상황 = 30분 전 경기예요.
+    #    날짜로 걸렀다면 0건이 나와요.
+    n = await match_feed.post_new_matches(
+        FakeBot(ch), USER, RIOT, [make_match("midnight", age_hours=0.5)], stats_of)
+    check("⭐ 30분 전 경기는 올린다 (날짜가 바뀌었어도)", n == 1, f"{n}건")
+
+    # 그래도 **옛 경기 부활**은 막아야 해요 (seen 기록이 몇 건뿐인 기존 유저 보호)
+    ch = FakeChannel()
+    too_old = match_feed.FEED_MAX_AGE_HOURS + 1
+    n = await match_feed.post_new_matches(
+        FakeBot(ch), USER, RIOT, [make_match("ancient", age_hours=too_old)], stats_of)
+    check(f"{match_feed.FEED_MAX_AGE_HOURS}시간보다 오래된 경기는 안 올린다",
+          n == 0 and not ch.sent, f"{n}건 ({too_old:g}시간 전)")
+
+    # ⚠️ 시각을 모르면 막지 않아요 (영원히 재시도되는 걸 피해요)
+    ch = FakeChannel()
+    no_ts = make_match("nots")
+    no_ts["metadata"].pop("game_start")
+    n = await match_feed.post_new_matches(FakeBot(ch), USER, RIOT, [no_ts], stats_of)
+    check("game_start가 없으면 막지 않는다", n == 1, f"{n}건")
+
 
 asyncio.run(main())
+
+
+# ==================================================================
+# ⒥ 🚨 알림이 미션에 종속되지 않는다 (2026-10-19)
+# ------------------------------------------------------------------
+# "패배만 올라온다"의 **주원인**이에요. `cogs/mission.py`가 그날 발로 미션을 다 깨면
+# `_check_valorant`를 안 불렀고, 알림이 그 안에 있어서 같이 멈췄어요. `val_win`이
+# 배정돼 있으면 **이기는 순간** 미션이 끝나니 그 뒤 경기(대개 승리)가 안 올라갔어요.
+#
+# ⭐ 그래서 검사는 "**남은 미션이 0일 때도 알림이 불리는가**"예요.
+print("\n⒥ 🚨 미션을 다 깬 사람도 알림은 올라간다")
+
+from cogs import mission as mission_cog  # noqa: E402
+
+_posted: list[str] = []
+
+
+async def _fake_post(bot, user_id, riot_id, matches, stats_of):
+    _posted.append(riot_id)
+    _got_matches.clear()
+    _got_matches.extend(matches)
+    return len(matches)
+
+
+_completed: list[str] = []
+_got_matches: list[dict] = []
+
+
+async def _one(pending_keys, match=None):
+    """`_check_valorant`를 실제로 돌려요. 남은 미션만 바꿔 끼워요.
+
+    🚨 **`_fetch_recent_matches`는 가짜로 바꾸지 않아요.** 처음엔 그걸 통째로
+    스텁했는데, 그러면 **자정 유실의 진짜 원인**(그 함수 안의 날짜 필터)을 되살려도
+    테스트가 통과해버렸어요 — 일부러 깨 보고 알았어요. 그래서 **API 응답만** 가짜로
+    주고 함수 본문은 실제로 돌려요."""
+    _posted.clear()
+    _completed.clear()
+    # ⚠️ 이것도 비워야 해요. 알림이 아예 안 불린 경우에 **이전 실행의 잔값**이 남아서
+    #    실패 메시지가 엉뚱한 경기를 가리켰어요(일부러 깨 보다가 발견).
+    _got_matches.clear()
+    cog = mission_cog.Mission.__new__(mission_cog.Mission)   # __init__ 건너뜀
+    cog.bot = None
+    cog._account_missing = {}
+    payload = {"data": [match or make_match("m-feed", age_hours=0.2)]}
+
+    async def fake_request(_session, _path, **_kw):
+        return 200, payload
+
+    async def complete(_uid, key, _channel):
+        _completed.append(key)
+
+    os.environ.setdefault("HENRIKDEV_API_KEY", "test-key")
+    mission_cog.henrik_api = types.SimpleNamespace(request=fake_request)  # type: ignore
+    # aiohttp 세션은 쓰지 않아요 (요청 자체를 가로챘으니까요).
+    cog._get_session = lambda: asyncio.sleep(0, result=None)  # type: ignore[assignment]
+    # ⚠️ 미션 완료는 DB를 건드려요. 여기선 알림 도달만 볼 거라 가짜로 막아요.
+    cog._complete = complete                                 # type: ignore[assignment]
+    mission_cog.riot_account_store = types.SimpleNamespace(   # type: ignore
+        get_account=lambda _uid: ("피카츄", "PXG1"))
+    mission_cog.match_feed = types.SimpleNamespace(post_new_matches=_fake_post)  # type: ignore
+    mission_cog._extract_player_match_stats = lambda *_a: make_stat()  # type: ignore
+    return await cog._check_valorant(USER, pending_keys, None)
+
+
+asyncio.run(_one([]))
+check("⭐ 남은 미션이 0이어도 알림이 올라간다", _posted == [RIOT], f"호출 {_posted}")
+
+asyncio.run(_one(["val_win"]))
+check("남은 미션이 있을 때도 당연히 올라간다", _posted == [RIOT], f"호출 {_posted}")
+# ⭐ 미션 판정이 죽지 않았는지도 같이 봐요 — 알림을 떼어내다 미션을 끊으면 코인이 안 나가요.
+check("⭐ 미션 판정도 그대로 돈다 (승리 미션이 깨진다)", _completed == ["val_win"],
+      f"완료 {_completed}")
+
+# 🚨 소스에서도 못 박아요. 동작 테스트만으로는 `_auto_check_one` 쪽에 조기 반환이
+#    되살아나도 통과해버려요(알림은 `_check_valorant` 안에 있으니까요).
+import ast as _ast  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+_src = _Path(os.path.join(BOT_DIR, "cogs/mission.py")).read_text(encoding="utf-8")
+_fn = next(n for n in _ast.walk(_ast.parse(_src))
+           if isinstance(n, _ast.AsyncFunctionDef) and n.name == "_auto_check_one")
+# `pending`을 보고 바로 return 하는 if 문이 있으면 알림이 다시 막혀요.
+_guards = [
+    n for n in _ast.walk(_fn)
+    if isinstance(n, _ast.If)
+    and any(isinstance(x, _ast.Name) and x.id == "pending" for x in _ast.walk(n.test))
+    and any(isinstance(x, _ast.Return) for x in _ast.walk(n))
+]
+check("🚨 pending이 비면 바로 돌아가는 조기 반환이 없다", not _guards,
+      f"{len(_guards)}곳 — 알림이 다시 미션에 묶였어요" if _guards
+      else "알림까지 항상 도달해요")
+
+# ── ⒦ 🚨 미션 쪽이 알림에 넘기는 목록을 날짜로 걸러선 안 된다 ──────────
+#
+# ⒤가 `post_new_matches`를 직접 불러서 보는 거라, **그 앞단**(mission.py)에
+# `_is_today_kst` 필터가 되살아나도 ⒤는 통과해버려요. 자정 유실의 진짜 원인이
+# 거기였으니 여기서 따로 못 박아요.
+print("\n⒦ 🚨 어제 경기도 알림까지 전달된다 (미션 쪽 날짜 필터 금지)")
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+_KST = timezone(timedelta(hours=9))
+_yesterday = (datetime.now(_KST) - timedelta(days=1)).replace(hour=23, minute=40)
+_late = make_match("late-night")
+_late["metadata"]["game_start"] = _yesterday.timestamp()
+
+asyncio.run(_one([], match=_late))
+check("⭐ 어제 23:40 경기가 알림까지 도달한다",
+      [((m.get('metadata') or {}).get('matchid')) for m in _got_matches] == ["late-night"],
+      f"전달된 경기 {[(m.get('metadata') or {}).get('matchid') for m in _got_matches]}")
+
+# ⚠️ 반대로 **미션**은 오늘 것만 봐야 해요 (일일 미션이 어제 경기로 깨지면 안 돼요)
+asyncio.run(_one(["val_win"], match=_late))
+check("🚨 그래도 미션은 어제 경기로 안 깨진다", _completed == [],
+      f"완료 {_completed} — 일일 미션이 어제 전적으로 깨졌어요")
 
 print()
 if failures:

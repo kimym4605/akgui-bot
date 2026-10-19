@@ -17,12 +17,31 @@ HenrikDev는 분당 30회를 키 하나로 나눠 써요(`utils/henrik_api.py`).
 - `/채널설정`으로 알림 채널을 안 정했으면 → 아무 데도 안 올려요
 - 그 사람이 `/알림설정`에서 껐으면 → 안 올려요
 - 이미 올린 경기면 → 안 올려요(`utils/match_feed_store.py`)
+- `FEED_MAX_AGE_HOURS`보다 오래된 경기 → 안 올려요
 - 🚨 그 사람을 **처음 보는 경우**도 안 올려요. 기능을 켜는 순간 등록된 전원의 오늘 경기가
   한꺼번에 쏟아지는 걸 막아요(21명 × 10경기 = 200개).
+
+## 🚨 "패배만 올라온다" — 2026-10-19에 고친 두 가지
+
+사용자 신고였고, 둘 다 **승패와 무관한 누락**이 승리에 더 많이 걸린 거예요.
+
+1. **알림이 미션에 종속돼 있었어요.** `cogs/mission.py`가 그날 발로 미션을 다 깨면
+   `_check_valorant`를 **안 불렀고**, 알림이 그 안에 있어서 같이 멈췄어요.
+   `val_win`(승리하기)이 배정돼 있으면 **이기는 순간** 미션이 끝나니, 그 뒤의
+   경기(대개 승리)가 영영 안 올라갔어요. → 이제 `pending`이 비어도 부르고 알림만 올려요.
+2. **자정을 넘긴 경기가 유실됐어요.** 미션용 "오늘(KST)" 필터가 알림 범위까지 정하고
+   있었거든요. 루프가 30분마다 도니 23:30~24:00 경기는 다음 실행 때 이미 '오늘'이
+   아니었어요. 실측으로 `피카츄#PXG1` 님의 23:28·23:55 **승리 2건**이 날아갔어요
+   (그날 실제 3승 3패 → 채널엔 1승 3패). → 이제 날짜가 아니라 `FEED_MAX_AGE_HOURS`로 봐요.
+
+⚠️ 남겨둔 것: 팀이 `red`/`blue`가 아닌 신규 모드(예: `Gauntlet: Glitched`는 `Team_6`)는
+`cogs/rank._extract_player_match_stats`가 승패를 못 가려서 **조용히 빠져요.** 그 모드엔
+승패 개념을 매길 수가 없어서 일부러 뒀어요.
 """
 from __future__ import annotations
 
 import logging
+import time
 
 import discord
 
@@ -38,7 +57,20 @@ NOTIFY_KEY = "match_feed"
 WIN_COLOR, LOSE_COLOR, DRAW_COLOR = 0x22C55E, 0xEF4444, 0x9BA3AF
 
 # 한 번에 너무 많이 올리면 채널이 묻혀요. 밀린 게 많아도 최신 것만 올려요.
-MAX_POST_PER_RUN = 2
+# 🚨 2 였는데 4로 올렸어요(2026-10-19). 2면 한 사람이 연달아 세 판 하면 한 판이 다음
+#    실행으로 밀리고, 그게 쌓이다가 **유실**됐어요(옛 날짜 필터와 겹쳐서).
+MAX_POST_PER_RUN = 4
+
+# ⏱ 이 시간보다 오래된 경기는 안 올려요.
+#
+# 🚨 **이게 자정 유실의 대체물이에요**(2026-10-19). 전엔 미션용 "오늘(KST)" 필터가
+#    알림의 범위까지 정하고 있어서, 23:30~24:00 경기는 다음 실행(30분 뒤) 때 이미
+#    '오늘'이 아니라 **영구히 사라졌어요**. 이제 알림은 날짜가 아니라 **경과 시간**으로
+#    봐요 — 자정을 넘겨도 멀쩡합니다.
+# ⚠️ 가드가 아예 없으면 안 돼요. `seen` 기록이 몇 건뿐인 기존 유저에게 API 창(최근
+#    10경기)에 남아 있던 **며칠 전 경기가 되살아나** 쏟아져요.
+# ⚠️ 봇이 이 시간보다 길게 죽어 있었다면 그 사이 경기는 포기해요(묻히는 것보다 나아요).
+FEED_MAX_AGE_HOURS = 12
 
 
 def _mode_label(mode: str | None) -> str:
@@ -109,6 +141,18 @@ def build_embed(
     return embed
 
 
+def _recent_enough(match: dict) -> bool:
+    """`FEED_MAX_AGE_HOURS` 안에 시작한 경기인가. 왜 필요한지는 그 상수 주석에 있어요.
+
+    ⚠️ `game_start`가 없으면 **올려요**(막지 않아요). 못 올린 건 `seen`에 안 남아서
+    30분마다 영원히 다시 시도되는데, 판단할 수 없는 걸 그렇게 두면 로그만 쌓여요.
+    v3 응답에는 사실상 항상 있어요."""
+    started = (match.get("metadata") or {}).get("game_start")
+    if not started:
+        return True
+    return (time.time() - float(started)) <= FEED_MAX_AGE_HOURS * 3600
+
+
 async def post_new_matches(
     bot, user_id: int, riot_id: str, matches: list[dict], stats_of
 ) -> int:
@@ -143,7 +187,8 @@ async def post_new_matches(
 
     already = await match_feed_store.seen(user_id)
     fresh = [m for m in matches
-             if ((m.get("metadata") or {}).get("matchid")) not in already]
+             if ((m.get("metadata") or {}).get("matchid")) not in already
+             and _recent_enough(m)]
     if not fresh:
         return 0
 
