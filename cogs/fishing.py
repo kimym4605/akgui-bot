@@ -1,21 +1,28 @@
 """🎣 낚시 - 찌를 던져 물고기를 낚고, 어항에 모았다가 팔아 코인을 벌어요.
 
-## 🚨 발행 상한이 **없어요** (2026-10-17 5차)
+## ⭐ 하루 상한 + 값 x1.5 (2026-10-20 6차 · 사용자 결정)
 
 낚시하려면 `/악귀상점`에서 **낚시대**를 사야 해요(`ROD_PRICE`코인 · 내구도 10회).
-**몇 개든 살 수 있어요** - 하루 제한을 풀었거든요(4차, 사용자 결정).
+개수는 **몇 개든** 살 수 있지만, 던지는 건 **하루 `DAILY_CAST_CAP`번까지**예요.
 
-    낚시대 1개: 수입 14.13코인 − 값 10코인 = 순이익 **+4.13**
+    1캐스트: 기댓값 2.1코인 − 낚시대값 1코인 = 순이익 **+1.1코인**
+    하루 20번을 다 쓰면: 수입 42코인 − 낚시대값 20코인 = **+22코인**
 
-4차까지는 무제한을 **"1개당 순이익 ≈ 0"**(+0.21)으로 버텼어요. 5차에서 사용자가
-"가격이 짜다"고 해서 일반 0.5~1.0 → **0.8~1.5**, 희귀 1.5~3.0 → **2.0~3.8**로
-올렸고, 그 결과 **안전장치가 없어졌어요.** 실측 기준 9명이 하루 1개씩만 써도
-+37코인/일이고 상한은 "쓸 수 있는 시간"뿐이에요.
+### 왜 상한이 생겼나 (사용자가 짚은 문제)
 
-⚠️ **이건 숫자를 보여드리고 사용자가 고른 거예요** — 발행 증가를 수용하고 보상 체감을
-택했어요. 그러니 "0으로 되돌리는 게 맞다"고 판단해 조용히 깎지 말고 **먼저 물어보세요.**
+5차까지는 **캐스트 수 = 수입**이라 시간을 쓸 수 있는 사람만 벌었어요. 사용자가
+"시간이 없는 사람들은 코인을 벌기 어렵다"고 짚었고, 실측이 그걸 확인했어요:
 
-### 설계가 다섯 번 바뀐 이유 (같은 실수를 반복하지 않게)
+    하루 최다 캐스트 1,360회 → 그날 수입 1,403코인 (같은 날 꼴찌는 13코인)
+    전체 캐스트 중 상위 1명 몫 50% · 하루 20캐스트로 끊으면 총량이 13%로 줄어듦
+
+그래서 **상한을 걸고 그 안에서 버는 양을 늘렸어요**(둘은 꼭 같이 가야 해요 —
+상한만 걸면 보상이 짜지고, 값만 올리면 격차가 더 벌어져요).
+
+🚨 **라이트 유저는 안 깎여요.** 하루 10~20캐스트가 평범한 범위라 20이 그 바로
+위예요. 깎인 건 9명 중 상위 몇 명뿐이에요.
+
+### 설계가 여섯 번 바뀐 이유 (같은 실수를 반복하지 않게)
 
 1. **상한 없음 + 꽝 60%** → 꽝 확률은 1회당 수익만 낮출 뿐 **총 발행량을 못 막아요**
    (작정하면 하루 189코인). 출석 3~5코인이 무의미해졌어요.
@@ -23,13 +30,20 @@
 3. **치수 시스템** → 고정가를 범위로. 같은 어종도 큰 놈이 비싸요.
 4. **제한 해제 + 순이익 ≈ 0** → 무제한이어도 안전했지만, 평균이 본전이라 **"벌이가
    안 된다"**는 체감이 남았어요. 그게 5차를 부른 이유예요.
-5. **값 인상(+4.13/개)** ← 지금. 보상 체감을 택하고 발행 증가를 받아들였어요.
+5. **값 인상(+4.13/개)** → 보상 체감을 택하고 발행 증가를 받아들였어요. 그런데
+   상한이 없으니 **시간 부자에게만** 닿았어요 — 그게 6차를 부른 이유예요.
+6. **하루 캐스트 상한 + 값 x1.5** ← 지금. 상한이 **횟수**에 걸려요.
 
-🚨 발행을 잡아야 하면 손잡이는 둘이에요: `ROD_PRICE`를 14로 올리면 순이익이 -0.29로
-4차 수준으로 돌아가고, `ROD_PER_DAY`를 1로 되살리면 1인 하루 +4.13이 상한이 돼요.
+🚨 **상한은 낚시대 개수가 아니라 던진 횟수에 걸어요.** 개수로 걸면 🪝소형(3회)을
+쓰는 하위권이 하루 3캐스트에 막혀요 — 진입을 넓히려 만든 상품이 불리해져요.
+→ 자세한 이유는 `utils/fish_data.py`의 `DAILY_CAST_CAP` 주석.
 
-📉 ⚠️ **소각은 안 늘었어요.** 낚시대값(10코인)이 유일한 소각인데 수입만 40% 늘었어요.
-경제 소각률이 6.5%였으니, 다음에 손댈 건 가격이 아니라 **소비처**예요.
+🚨 **「낚시 한도 연장권」은 만들지 마세요.** 🎲 도박 연장권이 소각의 9할인 건 도박이
+**발행원이 아니기** 때문이에요. 낚시는 발행원이라, 연장권이 추가 캐스트의 기대
+순이익(+1.1코인)보다 싸면 **코인 복사기**가 되고 비싸면 死상품이에요.
+
+📉 ⚠️ **소각은 상한과 **같이** 줄어요.** 낚시대값이 유일한 소각이라, 캐스트가 줄면
+소각도 비례해서 줄어요(소각률 지표가 떨어져 보이는 건 정상이에요 — 순발행은 줄어요).
 
 ## 찌타임 미니게임
 
@@ -100,8 +114,9 @@ from discord.ext import commands
 from utils import coin_wallet, fish_data, fishing_store
 from utils.channel_check import restrict_to_channel
 from utils.fish_data import (
-    BY_KEY, COIN_PIECES, FISH, GRADE_ORDER, GRADES, ROD_DURABILITY,
-    ROD_PRICE, SMALL_ROD_DURABILITY, SMALL_ROD_PRICE, pieces_of, roll_size,
+    BY_KEY, COIN_PIECES, DAILY_CAST_CAP, FISH, GRADE_ORDER, GRADES,
+    ROD_DURABILITY, ROD_PRICE, SMALL_ROD_DURABILITY, SMALL_ROD_PRICE,
+    pieces_of, roll_size,
 )
 
 log = logging.getLogger(__name__)
@@ -159,10 +174,9 @@ def roll_catch(rng: random.Random | None = None) -> str:
     1차엔 꽝 60%로 발행을 조절했는데, 꽝 확률은 1회당 수익만 낮출 뿐 **총 발행량을
     못 막아요**. 발행 조절은 `fish_data.ROD_PRICE`가 해요.
 
-    🚨 **상한은 이제 없어요.** 4차에 낚시대 하루 1개 제한이 풀리고 5차에 물고기 값을
-    올렸으니, 낚시대를 몇 개든 사는 만큼 발행이 늘어나요(실측 개당 순 +3.5코인).
-    "낚시대가 상한을 건다"고 적혀 있었는데 그건 3차까지의 이야기예요 — 지금 코드를
-    읽고 상한이 있다고 착각하면 발행량 추정이 통째로 틀려요.
+    🚨 **발행 상한은 `fish_data.DAILY_CAST_CAP`(하루 던진 횟수)에 있어요**(6차).
+    낚시대 **개수**는 무제한이라, 개수로 발행량을 추정하면 통째로 틀려요. 1인 하루
+    상한은 `fish_data.max_daily_net_issue()`가 알려줘요.
 
     못 잡는 경우는 이제 **타이밍 실패뿐**이고, 그건 내 실수지 운이 아니에요."""
     rng = rng or random
@@ -211,9 +225,23 @@ async def purchase_rod(user_id, small: bool = False) -> tuple[bool, str]:
 
     balance = await coin_wallet.get_balance(user_id)
     log.info("🎣 낚시대 구매(%s): %s %d코인", "소형" if small else "일반", user_id, price)
+
+    # ⭐ 하루 상한(2026-10-20 6차)을 **산 직후에 알려줘요.** 오늘 횟수가 다 찼거나
+    #    내구도보다 적게 남았으면 "내일 이어서 쓴다"를 분명히 해야 해요 — 모르고
+    #    사면 "코인만 날렸다"로 읽혀요(코인이 사라지는 건 아니지만 체감이 그래요).
+    used, cap = await fishing_store.cast_quota(user_id)
+    tail = "`/낚시` 로 시작해보세요"
+    if cap:
+        today_left = max(0, cap - used)
+        if today_left == 0:
+            tail = (f"⏳ **오늘 {cap}번을 이미 다 썼어요** — 이 낚시대는 "
+                    "내일 자정부터 쓸 수 있어요")
+        elif today_left < durability:
+            tail = (f"⏳ 오늘은 **{today_left}번**만 더 던질 수 있어요 "
+                    f"(나머지 {durability - today_left}번은 내일 이어서)")
     return True, (
         f"{label}를 샀어요! **{durability}번** 던질 수 있어요.\n"
-        f"남은 악귀코인 **{balance}개** · `/낚시` 로 시작해보세요"
+        f"남은 악귀코인 **{balance}개** · {tail}"
     )
 
 
@@ -267,8 +295,11 @@ async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> 
     # 유저가 물게 되는 건 맞지 않아요.
     #
     # ⭐ 경제적으로도 이쪽이 더 깔끔해요. 낚시대 1개가 **항상 10마리**를 주니
-    #    순이익이 실력과 무관하게 고정돼요(5차 기준 +4.13). 전엔 못 하는 사람만 손해를
-    #    봤는데, 무제한 구매 구조에서 그건 "못하면 벌칙"이 돼요.
+    #    순이익이 실력과 무관하게 고정돼요. 전엔 못 하는 사람만 손해를 봤는데,
+    #    그건 "못하면 벌칙"이 돼요.
+    #
+    # 🚨 **하루 횟수도 같이 돌려줘요**(`give_back_rod` 안에서). 안 그러면 놓친 판이
+    #    하루 상한만 깎아먹어서, 상한이 생긴 6차에서는 벌칙이 두 배가 돼요.
     #
     # ⚠️ 그래도 **던지기 전 선차감**은 그대로예요. 돌려주는 건 결과가 난 뒤라,
     #    미니게임 도중에 `/낚시`를 여러 번 쳐서 한 개로 여러 판을 돌리는 건 여전히
@@ -315,14 +346,36 @@ async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> 
     embed.add_field(name="🎣 낚시대",
                     value=(f"**{view.rod_left}번** 남음" if view.rod_left
                            else "**부서졌어요**"), inline=True)
+
+    # ⭐ 하루 상한을 **매 판 보여줘요**(2026-10-20 6차). 안 보여주면 20번째에서
+    #    갑자기 막혀서 "버그 아니냐"가 돼요. 🎲 도박 한도도 같은 이유로 매번 띄워요.
+    used, cap = await fishing_store.cast_quota(interaction.user.id)
+    today_left = max(0, cap - used) if cap else None
+    if cap:
+        embed.add_field(name="오늘 남은 횟수",
+                        value=(f"**{today_left}/{cap}번**" if today_left
+                               else "**다 썼어요** (내일 자정에 채워져요)"),
+                        inline=True)
+
     embed.set_footer(
-        text=("/어항 으로 확인하고 /물고기판매 로 한 번에 팔아요" if view.rod_left
-              else f"{ROD_PRICE}코인으로 새 낚시대를 사면 이어서 던질 수 있어요"))
+        text=("/어항 으로 확인하고 /물고기판매 로 한 번에 팔아요"
+              if view.rod_left and today_left != 0
+              else (f"오늘은 {cap}번을 다 썼어요 · /물고기판매 로 팔아두세요"
+                    if today_left == 0
+                    else f"{ROD_PRICE}코인으로 새 낚시대를 사면 이어서 던질 수 있어요")))
 
     # 🎣 횟수가 남았으면 **바로 다시 던질 수 있게**, 없으면 **살 수 있게**.
     #    매번 `/낚시`를 치게 하면 10회짜리 낚시대가 고역이에요.
-    next_view = (CastAgainView(interaction.user.id, view.rod_left) if view.rod_left
-                 else BuyRodView(interaction.user.id))
+    #
+    # 🚨 **하루 상한을 다 썼으면 둘 다 안 띄워요.** 다시던지기는 눌러도 거절되고,
+    #    낚시대 구매는 오늘 못 쓰는 걸 사게 돼요(상한에 걸린 사람에게 파는 건
+    #    🎲 "하루 한도를 넘는 1회 연장"과 같은 死상품이에요).
+    if today_left == 0:
+        next_view = None
+    elif view.rod_left:
+        next_view = CastAgainView(interaction.user.id, view.rod_left, today_left)
+    else:
+        next_view = BuyRodView(interaction.user.id)
     try:
         await interaction.edit_original_response(embed=embed, view=next_view)
     except discord.HTTPException:
@@ -342,11 +395,14 @@ class CastAgainView(discord.ui.View):
     ⚠️ 같은 ephemeral 메시지를 **재사용**해요(`edit=True`). 새 메시지를 띄우면
     던질 때마다 쌓여서 어느 게 지금 찌인지 알 수 없어져요."""
 
-    def __init__(self, user_id: int, rod_left: int):
+    def __init__(self, user_id: int, rod_left: int, today_left: int | None = None):
         super().__init__(timeout=300)
         self.user_id = user_id
         self._started = False
-        self.again.label = f"다시 던지기 ({rod_left}번 남음)"
+        # ⭐ 둘 중 **먼저 바닥나는 쪽**을 라벨에 적어요. 낚시대가 8번 남았는데 오늘
+        #    2번만 남았으면 "8번 남음"은 거짓이에요(눌러보고 나서 막히면 혼란스러워요).
+        left = rod_left if today_left is None else min(rod_left, today_left)
+        self.again.label = f"다시 던지기 ({left}번 남음)"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
@@ -450,14 +506,43 @@ async def _run_cast(interaction: discord.Interaction, *, edit: bool) -> bool:
 
     # 🚨 **내구도를 먼저 깎고** 시작해요. 던지고 나서 깎으면, 미니게임 도중에
     #    여러 번 `/낚시`를 쳐서 내구도 1개로 여러 판을 돌릴 수 있어요.
-    left = await fishing_store.use_rod(uid)
-    if left is None:
+    #
+    # 🚨 **반환이 튜플이에요**(2026-10-20 6차). `if left is None:`으로 받으면 튜플은
+    #    항상 참이라 상한도 품절도 안 걸리고 그냥 던져져요.
+    left, blocked = await fishing_store.use_rod(uid)
+
+    if blocked == "cap":
+        # ⭐ 하루 상한. **낚시대는 안 깎였어요** — 남은 횟수를 같이 알려줘서
+        #    "낚시대가 사라진 게 아니다"를 분명히 해요.
+        # 🚨 여기서 낚시대 구매 버튼을 띄우면 **오늘 못 쓰는 걸 사게 돼요.**
+        await show(
+            content=(f"🎣 오늘은 **{DAILY_CAST_CAP}번**을 다 던졌어요. "
+                     f"내일 자정(한국 시간)에 다시 채워져요.\n"
+                     f"-# 🎣 낚시대는 그대로 있어요"
+                     + (f" (**{left}번** 남음)" if left else "")
+                     + f" · 하루 {DAILY_CAST_CAP}번이면 평균 "
+                     f"**{fish_data.max_daily_income():.0f}코인**쯤 벌려요\n"
+                     "-# `/어항` 으로 확인하고 `/물고기판매` 로 팔아두세요"),
+            embed=None,
+            view=None,
+        )
+        return True
+
+    if blocked == "no_rod":
+        quota_hint = ""
+        used, cap = await fishing_store.cast_quota(uid)
+        if cap:
+            # ⚠️ 낚시대를 사라고 하기 **전에** 오늘 몇 번 남았는지 알려줘요. 상한이
+            #    1~2번만 남았는데 10회짜리를 사면 나머지는 내일로 넘어가거든요.
+            quota_hint = f"\n-# 오늘 남은 횟수는 **{max(0, cap - used)}번**이에요"
         await show(
             content=(f"🎣 낚시대가 없어요. **{ROD_PRICE}코인**으로 하나 사면 "
                      f"**{ROD_DURABILITY}번** 던질 수 있어요.\n"
-                     # ⚠️ 전엔 "평균적으로는 본전"이라고 적어뒀는데 5차(값 인상)로
-                     #    **거짓이 됐어요.** 이제 1개당 평균 +4코인쯤 남아요.
-                     "-# 몇 개든 살 수 있어요. 10번 던지면 평균 **14코인**쯤 벌려요."),
+                     # 🚨 숫자를 손으로 적지 마세요. 6차에서 값이 x1.5가 됐는데
+                     #    여기 "평균 14코인"이 박혀 있었어요(5차 값).
+                     f"-# 10번 던지면 평균 "
+                     f"**{fish_data.expected_coin_per_day():.0f}코인**쯤 벌려요"
+                     + quota_hint),
             # ⚠️ 메시지를 재사용하니 이전 임베드를 **명시적으로 지워야** 해요.
             embed=None,
             view=BuyRodView(uid),
@@ -675,6 +760,16 @@ class Fishing(commands.Cog):
                else f"없어요 (`/악귀상점` {ROD_PRICE}코인)")
         embed.add_field(name="🎣 낚시대", value=rod, inline=True)
 
+        # ⭐ 하루 상한(2026-10-20 6차). 낚시대 남은 횟수와 **별개**라 따로 보여줘요 —
+        #    "낚시대는 8번 남았는데 왜 못 던지냐"를 막는 자리예요.
+        used, cap = await fishing_store.cast_quota(interaction.user.id)
+        if cap:
+            embed.add_field(
+                name="오늘 남은 횟수",
+                value=(f"**{max(0, cap - used)}/{cap}번**" if used < cap
+                       else "**다 썼어요**\n-# 내일 자정(한국 시간)에 채워져요"),
+                inline=True)
+
         hit = f"{data['caught']}/{data['casts']}" if data["casts"] else "0/0"
         embed.add_field(name="챔질 성공률", value=f"{hit}", inline=True)
         if data.get("best"):
@@ -795,18 +890,37 @@ class Fishing(commands.Cog):
         embed.add_field(
             name="🎣 낚시대",
             value=(f"`/악귀상점`에서 **{ROD_PRICE}코인** · 한 개로 **{ROD_DURABILITY}번**\n"
-                   "　└ **몇 개든** 살 수 있어요 (하루 제한 없어요)"),
+                   f"　└ 🪝 **소형**은 {SMALL_ROD_PRICE}코인에 "
+                   f"**{SMALL_ROD_DURABILITY}번** — 횟수당 값이 **똑같아요**\n"
+                   "　└ **몇 개든** 살 수 있어요 (개수 제한은 없어요)"),
             inline=False,
         )
         per_cast = fish_data.expected_coin_per_cast()
         per_rod = fish_data.expected_coin_per_day()
         net = fish_data.net_issue_per_rod()
+        # ⭐ 하루 상한을 **"평균 얼마 벌리나"보다 먼저** 보여줘요. 벌이만 보고 기대를
+        #    키웠다가 상한을 뒤늦게 발견하면 속은 기분이 들어요.
+        if DAILY_CAST_CAP:
+            embed.add_field(
+                name="⏳ 하루 던질 수 있는 횟수",
+                value=(f"하루 **{DAILY_CAST_CAP}번**까지예요 "
+                       "(한국 시간 자정에 채워져요)\n"
+                       "　└ ⭐ 상한에 걸려도 **낚시대는 안 없어져요** — 남은 횟수는 "
+                       "다음 날 이어서 써요\n"
+                       f"　└ 어떤 낚시대를 쓰든 상한은 같아요 "
+                       f"(🪝 소형도 하루 {DAILY_CAST_CAP}번 중 한 번이에요)"),
+                inline=False,
+            )
         embed.add_field(
             name="⭐ 평균 얼마 벌리나",
             value=(f"한 번 던지면 평균 **{per_cast:.1f}코인** → 낚시대 하나로 "
                    f"약 **{per_rod:.0f}코인**\n"
                    f"　└ 낚시대값 {ROD_PRICE}코인을 빼면 **{net:+.0f}코인**쯤 남아요\n"
-                   "　└ ⚠️ 판매는 **내림**이에요(1코인 = 10조각) — 남는 조각은 "
+                   + (f"　└ 🏁 하루 {DAILY_CAST_CAP}번을 다 쓰면 "
+                      f"**{fish_data.max_daily_income():.0f}코인**쯤 벌리고, "
+                      f"낚시대값을 빼면 **{fish_data.max_daily_net_issue():+.0f}코인**"
+                      "이 남아요\n" if DAILY_CAST_CAP else "")
+                   + "　└ ⚠️ 판매는 **내림**이에요(1코인 = 10조각) — 남는 조각은 "
                    "다음 판매로 넘어가요"),
             inline=False,
         )

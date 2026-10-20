@@ -2,7 +2,12 @@
 
 `fish` 컬렉션에 사람당 문서 하나예요.
 
-    {_id: uid, tank: {어종key: 마리수}, casts: 총 던진 횟수, caught: 잡은 수, sold: 판 코인}
+    {_id: uid, tank: {어종key: [치수...]}, casts: 총 던진 횟수, caught: 잡은 수,
+     sold: 판 코인, dust: 남은 조각, rod: 남은 내구도,
+     cast_date: "YYYY-MM-DD", casts_today: 그날 던진 횟수}
+
+🚨 **`_id`가 유저 ID예요** — `userId` 필드는 없어요. 조회 스크립트를 짤 때
+`{"userId": ...}`로 찾으면 조용히 0건이 나와요.
 
 ## 왜 바로 코인을 안 주고 어항에 담나
 
@@ -28,7 +33,9 @@ from datetime import datetime, timedelta, timezone
 from pymongo import ReturnDocument
 
 from utils import fishing_week
-from utils.fish_data import BY_KEY, COIN_PIECES, GRADE_ORDER, pieces_of
+from utils.fish_data import (
+    BY_KEY, COIN_PIECES, DAILY_CAST_CAP, GRADE_ORDER, pieces_of,
+)
 from utils.pokemon_store import _db
 
 log = logging.getLogger(__name__)
@@ -41,13 +48,20 @@ def _uid(user_id) -> str:
 
 
 # ------------------------------------------------------------------
-# 🎣 낚시대 (2026-10-17 2차 설계)
+# 🎣 낚시대 (2026-10-17 2차 설계 · 2026-10-20 6차에 하루 상한 추가)
 #
-# 문서에 `rod`(남은 내구도)와 `rod_date`(마지막으로 산 날짜)를 둬요.
-# 하루 1개 제한은 `rod_date`로, 10회 제한은 `rod`로 걸려요.
+# 문서에 네 개를 둬요:
+#   `rod`         남은 내구도 (낚시대 1개 = 10, 소형 = 3)
+#   `rod_date`    마지막으로 산 날짜 (제한에 안 쓰고 이상 패턴 볼 때만)
+#   `cast_date`   하루 상한을 세는 기준 날짜 (KST)
+#   `casts_today` 그날 던진 횟수
 #
-# 🚨 **둘 다 조건부 update 한 번으로** 처리해요. "읽고 → 확인하고 → 쓰기"로 하면 빠르게
-#    두 번 누를 때 하루에 두 개를 사거나 내구도가 음수가 돼요.
+# 🚨 **전부 조건부 update 한 번으로** 처리해요. "읽고 → 확인하고 → 쓰기"로 하면 빠르게
+#    두 번 누를 때 상한을 넘겨 던지거나 내구도가 음수가 돼요.
+#
+# ⚠️ `casts`(누적)와 `casts_today`(그날)는 **다른 값이에요.** 누적은 `record_cast`가
+#    결과가 난 뒤에 세고, 그날 횟수는 `use_rod`가 던지기 **전에** 세요. 놓치면
+#    그날 횟수만 되돌아가니(`give_back_rod`) 둘이 안 맞는 게 정상이에요.
 # ------------------------------------------------------------------
 KST = timezone(timedelta(hours=9))
 
@@ -87,25 +101,91 @@ def _refund_rod_sync(user_id, durability: int) -> None:
     _fish.update_one({"_id": _uid(user_id)}, {"$inc": {"rod": -durability}})
 
 
-def _use_rod_sync(user_id) -> int | None:
-    """내구도를 1 깎고 **남은 수**를 돌려줘요. 낚시대가 없으면 None.
+def _quota_sync(user_id) -> tuple[int, int]:
+    """(오늘 던진 횟수, 하루 상한). 상한이 0이면 무제한이에요.
 
-    ⚠️ 조건부 차감(`$gte: 1`)이라 동시에 여러 번 눌러도 음수가 안 돼요."""
+    🚨 `cast_date`가 오늘이 아니면 **0으로 봐요.** 어제 숫자를 그대로 읽으면
+    자정이 지나도 "상한 다 썼어요"가 떠요(리셋은 실제 차감 때 일어나요)."""
+    doc = _fish.find_one(
+        {"_id": _uid(user_id)}, {"cast_date": 1, "casts_today": 1}) or {}
+    used = int(doc.get("casts_today", 0) or 0) if doc.get("cast_date") == today_iso() else 0
+    return used, DAILY_CAST_CAP
+
+
+def _use_rod_sync(user_id) -> tuple[int | None, str | None]:
+    """내구도를 1 깎고 하루 횟수를 1 세요. **(남은 내구도, 막힌 이유)**를 줘요.
+
+    이유는 성공이면 `None`, 낚시대가 없으면 `"no_rod"`, 하루 상한에 걸리면 `"cap"`
+    이에요. 상한에 걸렸을 땐 내구도를 **안 깎아요**(낚시대가 그대로 남아요).
+
+    🚨 **내구도와 하루 횟수를 한 번의 update로 같이** 움직여요. "읽고 → 확인하고 →
+    쓰기"로 하면 빠르게 두 번 누를 때 상한을 넘겨 던지거나 내구도가 음수가 돼요.
+    (같은 이유로 `_buy_rod_sync`도 조건부 update 하나로 돼 있어요.)
+
+    ⚠️ 쿼리가 **두 개**인 건 날짜 리셋 때문이에요. 하나로 합칠 방법이 없어요 —
+    "오늘자 카운터를 늘린다"와 "날짜가 바뀌었으니 1로 리셋한다"는 서로 다른 조건과
+    서로 다른 연산(`$inc` vs `$set`)이라서요. 순서는 **반드시 오늘자 먼저**예요.
+    반대로 두면 날짜가 바뀐 첫 캐스트가 아니라 **매번** 리셋 쪽에 걸려요.
+
+    🚨 `{"cast_date": {"$ne": today}}`는 **필드가 없는 문서에도 걸려요**(MongoDB의
+    `$ne`는 missing을 포함해요). 그래서 낚시를 처음 하는 사람도 2번 쿼리가 받아줘요."""
+    today = today_iso()
+    uid = _uid(user_id)
+
+    # 1) 오늘 이미 던진 적이 있고 상한에 안 걸렸으면 → 둘 다 원자적으로
+    cond: dict = {"_id": uid, "rod": {"$gte": 1}, "cast_date": today}
+    if DAILY_CAST_CAP:
+        cond["casts_today"] = {"$lt": DAILY_CAST_CAP}
     doc = _fish.find_one_and_update(
-        {"_id": _uid(user_id), "rod": {"$gte": 1}},
-        {"$inc": {"rod": -1}},
+        cond,
+        {"$inc": {"rod": -1, "casts_today": 1}},
         return_document=ReturnDocument.AFTER,
     )
-    return None if doc is None else int(doc.get("rod", 0) or 0)
+    if doc is not None:
+        return int(doc.get("rod", 0) or 0), None
+
+    # 2) 날짜가 바뀌었거나 오늘이 첫 캐스트면 → 카운터를 1로 리셋하면서 차감
+    doc = _fish.find_one_and_update(
+        {"_id": uid, "rod": {"$gte": 1}, "cast_date": {"$ne": today}},
+        {"$inc": {"rod": -1}, "$set": {"cast_date": today, "casts_today": 1}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if doc is not None:
+        return int(doc.get("rod", 0) or 0), None
+
+    # 3) 둘 다 안 걸렸으면 **왜** 막혔는지 알려줘요.
+    #
+    # ⚠️ 여기는 읽기만 해요. 위 두 쿼리가 이미 "안 던졌다"를 확정했으니, 이 읽기가
+    #    경쟁 상태에 져도 **안내문이 조금 틀릴 뿐** 횟수나 코인은 안 틀려요.
+    # ⭐ 낚시대가 없으면서 상한도 찼으면 **상한을 먼저** 알려줘요 — 그 사람에게
+    #    "낚시대를 사라"고 하면 오늘은 못 쓰는 걸 사게 돼요.
+    doc = _fish.find_one({"_id": uid}, {"rod": 1, "cast_date": 1, "casts_today": 1}) or {}
+    rod = int(doc.get("rod", 0) or 0)
+    used = int(doc.get("casts_today", 0) or 0) if doc.get("cast_date") == today else 0
+    if DAILY_CAST_CAP and used >= DAILY_CAST_CAP:
+        return rod, "cap"
+    return None, "no_rod"
 
 
 def _give_back_rod_sync(user_id) -> None:
-    """내구도 1을 돌려줘요 (챔질을 놓쳤을 때).
+    """내구도 1과 **하루 횟수 1**을 돌려줘요 (챔질을 놓쳤을 때).
 
     ⚠️ `_refund_rod_sync`와 다른 함수예요. 이쪽은 **1회분**만 돌려주고, 저쪽은
     구매가 실패했을 때 **방금 준 한 세트**를 통째로 뺄 때 써요. 헷갈려서 섞어 쓰면
-    내구도가 10씩 왔다 갔다 해요."""
-    _fish.update_one({"_id": _uid(user_id)}, {"$inc": {"rod": 1}}, upsert=True)
+    내구도가 10씩 왔다 갔다 해요.
+
+    🚨 **하루 횟수도 같이 돌려줘야** 해요. 놓친 판은 안 던진 것으로 치니까요
+    (내구도만 돌려주면 "놓치면 상한만 깎인다"가 돼서 오히려 벌칙이 돼요).
+
+    🚨 단 **오늘자 카운터일 때만** 깎아요. 자정을 넘겨 돌려주는 경우에 조건 없이
+    `$inc: -1`을 하면 어제 놓친 몫으로 **오늘 한 번을 공짜로** 더 던지게 돼요.
+    그래서 `cast_date`와 `casts_today >= 1`을 둘 다 확인해요."""
+    uid = _uid(user_id)
+    _fish.update_one({"_id": uid}, {"$inc": {"rod": 1}}, upsert=True)
+    _fish.update_one(
+        {"_id": uid, "cast_date": today_iso(), "casts_today": {"$gte": 1}},
+        {"$inc": {"casts_today": -1}},
+    )
 
 
 def _normalize_tank(raw: dict) -> dict[str, list[int]]:
@@ -238,9 +318,20 @@ async def give_back_rod(user_id) -> None:
     await asyncio.to_thread(_give_back_rod_sync, user_id)
 
 
-async def use_rod(user_id) -> int | None:
-    """내구도 1 소모. 남은 수를 돌려주고, 낚시대가 없으면 None."""
+async def use_rod(user_id) -> tuple[int | None, str | None]:
+    """내구도 1 + 하루 횟수 1 소모. **(남은 내구도, 막힌 이유)**를 줘요.
+
+    이유는 성공 `None` · 낚시대 없음 `"no_rod"` · 하루 상한 `"cap"`이에요.
+
+    🚨 **반환값이 2026-10-20에 단일값에서 튜플로 바뀌었어요.** 예전처럼
+    `if left is None:`으로 받으면 튜플은 항상 참이라 **상한도 품절도 안 걸리고
+    그냥 던져져요.** 호출부를 고칠 때 이 주석을 지우지 마세요."""
     return await asyncio.to_thread(_use_rod_sync, user_id)
+
+
+async def cast_quota(user_id) -> tuple[int, int]:
+    """(오늘 던진 횟수, 하루 상한). 안내문에 쓰라고 따로 뺀 읽기예요."""
+    return await asyncio.to_thread(_quota_sync, user_id)
 
 
 async def get(user_id) -> dict:

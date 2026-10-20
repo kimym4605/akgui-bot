@@ -184,11 +184,32 @@ if balances:
 
     # 🎣 낚시는 발행의 70%가 넘는데, 진입에 낚시대값이 필요해요. **중앙값 지갑으로
     #    살 수 없으면 최대 발행원에 아예 못 들어가요**(부익부가 구조로 굳어요).
-    from utils.fish_data import ROD_PRICE
-    poor = sum(1 for b in balances if b < ROD_PRICE)
-    print(f"  🎣 낚시대({ROD_PRICE}코인)를 못 사는 사람: {poor}명 "
-          f"({poor / len(balances) * 100:.0f}%)"
+    #
+    # 🚨 **진입 기준은 `SMALL_ROD_PRICE`예요**(2026-10-20에 고침). 2026-10-18에
+    #    🪝소형(3코인)이 나왔는데 이 지표가 계속 10코인으로 재서 **진입 장벽을 과대
+    #    평가**했어요(10-19에 "30명 62%"로 찍혔는데 실제로 못 들어가는 건 그보다 적어요).
+    #    큰 낚시대 기준도 같이 보여줘요 — 둘의 간격이 소형이 메우는 몫이에요.
+    from utils.fish_data import DAILY_CAST_CAP, ROD_PRICE, SMALL_ROD_PRICE
+    poor = sum(1 for b in balances if b < SMALL_ROD_PRICE)
+    poor_big = sum(1 for b in balances if b < ROD_PRICE)
+    print(f"  🎣 낚시를 **아예 못 하는** 사람: {poor}명 "
+          f"({poor / len(balances) * 100:.0f}%) — 🪝소형({SMALL_ROD_PRICE}코인)도 못 삼"
           + ("   ← 최대 발행원에 진입 못 함" if poor > len(balances) / 2 else ""))
+    print(f"     └ 큰 낚시대({ROD_PRICE}코인)를 못 사는 사람: {poor_big}명 "
+          f"({poor_big / len(balances) * 100:.0f}%) "
+          f"— 이 중 {poor_big - poor}명은 소형으로 시작할 수 있어요")
+
+    # ⏳ 하루 상한(2026-10-20 6차)이 생겨서 **1인 발행에 천장이 있어요.** 이제
+    #    "며칠이면 따라잡나"를 셀 수 있어요 — 전엔 시간이 유일한 상한이라 불가능했어요.
+    if DAILY_CAST_CAP:
+        from utils.fish_data import max_daily_net_issue
+        cap_net = max_daily_net_issue()
+        med = statistics.median(balances)
+        print(f"  ⏳ 낚시 하루 상한 {DAILY_CAST_CAP}회 = 1인 최대 순발행 "
+              f"{cap_net:+.1f}코인/일")
+        if cap_net > 0:
+            print(f"     └ 중앙값({med:.1f}코인)인 사람이 상위권(최대 {max(balances)}코인)을 "
+                  f"따라잡는 데 {(max(balances) - med) / cap_net:.0f}일")
 
 # ── 4. 미션 완료 (429 수정 효과) ────────────────────────────────────
 print("\n[4] 미션 완료 — 발로(자동판정) vs 서버(대조군)")

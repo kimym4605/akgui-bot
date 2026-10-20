@@ -29,7 +29,8 @@ from utils.interaction_ack import ack
 from utils.inventory_store import PROTECT_MAX, PROTECT_PRICE
 from utils.mission_store import MISSIONS, REROLL_LIMIT_PER_DAY, REROLL_PRICE
 from utils.fish_data import (
-    ROD_DURABILITY, ROD_PRICE, SMALL_ROD_DURABILITY, SMALL_ROD_PRICE,
+    DAILY_CAST_CAP, ROD_DURABILITY, ROD_PRICE, SMALL_ROD_DURABILITY,
+    SMALL_ROD_PRICE,
 )
 from utils.profile_card import THEME_PRICE, THEMES
 from utils.title_store import TITLE_DAYS, TITLE_PLANS
@@ -58,14 +59,19 @@ def _shop_embed(balance: int, rerolls_left: int, owned: list[str], selected: str
         # ⚠️ "(하루 1개)"가 붙어 있었어요. 2026-10-17 4차에 하루 제한이 풀렸는데
         #    이 라벨만 안 고쳐져서, 실제로 10명이 88개를 산 뒤에도 "하루 1개"로 읽혔어요.
         #    🚨 제한을 다시 넣거나 뺄 땐 이 라벨도 같이 고칠 것.
+        #    🚨 그래서 2026-10-20 6차부터는 **숫자를 손으로 적지 않아요** —
+        #       `DAILY_CAST_CAP`을 그대로 끼워 넣어서 상수만 바꾸면 따라와요.
         name=f"🎣 낚시대 — {ROD_PRICE}코인 / 🪝 소형 — {SMALL_ROD_PRICE}코인",
         value=(
             f"**{ROD_DURABILITY}번** 던질 수 있어요. 다 쓰면 부서져요.\n"
             f"　└ 🪝 **소형**은 {SMALL_ROD_PRICE}코인에 **{SMALL_ROD_DURABILITY}번** — "
             "횟수당 값이 **똑같아요.** 코인이 적을 때 시작용이에요\n"
             "　└ 낚시는 낚시대가 있어야 해요 · 꽝 없이 **반드시 물고기가 나와요**\n"
-            "　└ **몇 개든** 살 수 있어요 (하루 제한 없어요)\n"
-            "　└ 잡은 건 `/어항`에 쌓였다가 `/물고기판매`로 한 번에 팔려요"
+            + (f"　└ ⏳ 던지는 건 **하루 {DAILY_CAST_CAP}번**까지예요 "
+               "(낚시대 개수는 제한 없어요 · 남은 횟수는 다음 날로 넘어가요)\n"
+               if DAILY_CAST_CAP else
+               "　└ **몇 개든** 살 수 있어요 (하루 제한 없어요)\n")
+            + "　└ 잡은 건 `/어항`에 쌓였다가 `/물고기판매`로 한 번에 팔려요"
         ),
         inline=False,
     )

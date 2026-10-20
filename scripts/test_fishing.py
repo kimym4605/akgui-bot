@@ -72,32 +72,48 @@ check("기댓값 계산식과 실측이 일치", abs(measured - formula) < 0.05,
       f"계산 {formula:.3f} vs 실측 {measured:.3f} 코인/회")
 
 # ==================================================================
-print("\n[4] 🚨 발행량 — 상한이 없어요 (5차)")
+print("\n[4] 🚨 발행량 — 하루 캐스트 상한이 천장이에요 (6차)")
 day_gross = measured * ROD_DURABILITY
 net = day_gross - ROD_PRICE
 print(f"  1회 평균 {measured:.2f}코인 · 낚시대 {ROD_PRICE}코인에 {ROD_DURABILITY}회")
 print(f"  낚시대 1개: 수입 {day_gross:.1f} − 값 {ROD_PRICE} = 순이익 {net:+.2f}코인")
-print(f"  9명이 하루 1개씩 → {net * 9:+.0f}코인/일 · 한 명이 8개 사면 {net * 8:+.0f}코인")
-print("  -# 참고: 2026-10-17 서버 전체 일일 발행 27~52코인, 출석은 1인 3~5코인")
+print(f"  ⏳ 하루 상한 {fish_data.DAILY_CAST_CAP}회 → 1인 수입 "
+      f"{fish_data.max_daily_income():.1f} · 순발행 "
+      f"{fish_data.max_daily_net_issue():+.1f}코인/일")
+print(f"  7명이 상한을 다 쓰면 {fish_data.max_daily_net_issue() * 7:+.0f}코인/일 · "
+      f"13명이면 {fish_data.max_daily_net_issue() * 13:+.0f}코인/일")
+print("  -# 참고: 2026-10-20 실측 — 낚시가 전체 발행의 78.4%, 지갑 48개 931코인")
 
-# 🚨 **4차의 안전장치("순이익 ≈ 0")가 5차에서 없어졌어요.**
+# 🚨 **6차에서 발행에 처음으로 천장이 생겼어요.**
 #
-# 사용자가 "가격이 짜다"고 해서 일반 0.5~1.0 -> 0.8~1.5, 희귀 1.5~3.0 -> 2.0~3.8으로
-# 올렸어요. 발행 증가를 **숫자를 보고 수용한 결정**이에요(2026-10-17 5차).
+# 5차까지는 "쓸 수 있는 시간"이 유일한 상한이라 추정이 불가능했어요. 실측에서
+# 한 사람이 하루 1,360캐스트로 1,403코인을 벌었고(같은 날 꼴찌 13코인), 사용자가
+# "시간이 없는 사람들은 코인을 벌기 어렵다"를 짚어 **상한 + 값 x1.5**를 택했어요.
 #
-# ⭐ 그래서 이 테스트의 성격이 바뀌었어요. **"0 근처인지"를 재는 상한 가드가 아니라,
-#    "의도한 값에서 벗어났는지"를 보는 회귀 가드예요.** 가드를 아예 지우면 발행량이
-#    다음에 조용히 또 커져도 아무도 모르니까요.
+# ⭐ 이 테스트의 성격은 **회귀 가드**예요 — "의도한 값에서 벗어났는지"를 봐요.
+#    가드를 지우면 발행량이 다음에 조용히 또 커져도 아무도 몰라요.
 #
-# ⚠️ 이 값을 바꿀 땐 숫자를 같이 고치고, **커밋 메시지에 왜 바꿨는지 남겨주세요.**
-EXPECTED_NET = 4.13          # 5차 설계값 (일반 8~15 · 희귀 20~38 · 낚시대 10코인)
+# ⚠️ 값을 바꿀 땐 아래 숫자를 같이 고치고, **커밋 메시지에 왜 바꿨는지 남겨주세요.**
+EXPECTED_NET = 11.01         # 6차 설계값 (일반 12~22 · 희귀 30~57 · 낚시대 10코인)
 check(f"🚨 낚시대 1개당 순이익이 설계값({EXPECTED_NET:+.2f})과 같다",
       abs(net - EXPECTED_NET) < 0.15,
       f"{net:+.2f}코인 — 의도한 변경이면 EXPECTED_NET을 같이 고쳐주세요")
+EXPECTED_DAILY_NET = 22.01   # 6차: 상한 20회 × 캐스트당 +1.10
+check(f"🚨 1인 하루 순발행 상한이 설계값({EXPECTED_DAILY_NET:+.2f})과 같다",
+      abs(fish_data.max_daily_net_issue() - EXPECTED_DAILY_NET) < 0.15,
+      f"{fish_data.max_daily_net_issue():+.2f}코인")
 check("낚시가 '벌이'가 된다 (4차의 본전 구조에서 벗어났는지)",
       net > 2.0, f"{net:+.2f}코인")
 check("낚시대값이 총수입보다 싸다 (아니면 아무도 안 사요)",
       ROD_PRICE < day_gross, f"{ROD_PRICE} vs {day_gross:.1f}")
+
+# 🚨 **상한이 출석·미션을 무의미하게 만들지 않는지.** 1차 설계가 그래서 엎어졌어요
+#    (작정하면 하루 189코인 → 출석 3~5코인이 장식이 됐어요).
+#    이제는 상한이 있으니 그 **배수**로 잴 수 있어요.
+_attend_ratio = fish_data.max_daily_net_issue() / 2       # 출석 하루 1~2코인 기준
+print(f"  ⚖️ 상한을 다 쓴 낚시 = 출석(하루 2코인)의 약 {_attend_ratio:.0f}배")
+check("낚시 하루 상한이 출석의 50배 미만이다 (출석이 장식이 되지 않게)",
+      _attend_ratio < 50, f"{_attend_ratio:.0f}배")
 
 # ------------------------------------------------------------------
 # ⭐ 🪝 입문용 소형 낚시대 (2026-10-18 · 분배 문제 대응)
@@ -123,12 +139,17 @@ print(f"  소형 1개: 수입 {measured * SMALL_ROD_DURABILITY:.1f} − 값 {SMA
 print(f"  -# 비율이 같으니 1코인당 순이익도 같아요 "
       f"({small_net / SMALL_ROD_PRICE:+.3f} vs {net / ROD_PRICE:+.3f})")
 
-# 🚨 상한이 없다는 걸 **테스트가 알고 있게** 해둬요. 누가 `ROD_PER_DAY`를 되살리면
-#    여기서 눈에 띄고, 그때는 발행 걱정 없이 순이익을 더 키울 수 있어요.
-print(f"  ⚠️ 하루 구매 제한: {fish_data.ROD_PER_DAY or '무제한'} "
-      f"→ 발행 총량 상한 {'있음' if fish_data.ROD_PER_DAY else '**없음**'}")
-if fish_data.ROD_PER_DAY:
-    print(f"     1인 하루 최대 발행 {net * fish_data.ROD_PER_DAY:+.1f}코인")
+# 🚨 상한이 **개수가 아니라 횟수**에 걸려 있다는 걸 테스트가 알고 있게 해둬요.
+#    `ROD_PER_DAY`를 되살리면 소형(3회)을 쓰는 하위권만 두 번 막혀요.
+print(f"  ⚠️ 개수 제한: {fish_data.ROD_PER_DAY or '무제한'} · "
+      f"하루 캐스트 상한: {fish_data.DAILY_CAST_CAP or '무제한'}회")
+check("🚨 상한은 개수가 아니라 횟수에 걸려 있다 (소형이 불리해지지 않게)",
+      fish_data.ROD_PER_DAY == 0 and fish_data.DAILY_CAST_CAP > 0,
+      f"개수 {fish_data.ROD_PER_DAY} · 횟수 {fish_data.DAILY_CAST_CAP}")
+# ⭐ 소형 한 개(3회)로도 **하루 상한의 일부를 의미 있게** 쓸 수 있어야 해요.
+check("🪝 소형 1개가 하루 상한보다 작다 (상한이 소형을 막지 않는다)",
+      SMALL_ROD_DURABILITY <= fish_data.DAILY_CAST_CAP,
+      f"소형 {SMALL_ROD_DURABILITY}회 vs 상한 {fish_data.DAILY_CAST_CAP}회")
 
 # 🐋 전설이 너무 자주 뜨면 '전설'이라는 말이 무색해져요(꽝을 없애니 22%까지 올랐었어요).
 lw = GRADES["전설"]["weight"] / sum(g["weight"] for g in GRADES.values())
@@ -150,16 +171,42 @@ class FakeFish:
         d = self.docs.get(flt["_id"])
         return dict(d) if d else None
 
+    # 🚨 **모르는 연산자는 터뜨려요.** 전엔 흉내내는 것만 보고 나머지를 조용히
+    #    무시했는데, 그러면 "조건이 없는 것"과 똑같아져서 **제약이 테스트에서만
+    #    통과**해요. 2026-10-20에 실제로 그랬어요 — 하루 상한이 `$lt`를 쓰는데
+    #    가짜가 그걸 몰라서 21번째 캐스트가 **통과**했고, 검사는 초록이었어요.
+    _OPS = ("$ne", "$gte", "$gt", "$lt", "$lte", "$exists")
+
     def _matches(self, doc, flt):
-        """`$ne` / `$gte` / `$exists` 만 흉내내요 (낚시대·어항이 쓰는 전부)."""
+        """MongoDB 매칭을 흉내내요. **모르는 연산자를 만나면 예외**를 던져요."""
         for key, want in flt.items():
             if key == "_id":
                 continue
             got = doc.get(key)
             if isinstance(want, dict):
+                unknown = [op for op in want if op not in self._OPS]
+                if unknown:
+                    raise NotImplementedError(
+                        f"가짜 컬렉션이 모르는 연산자예요: {unknown} (키 {key!r}). "
+                        "흉내를 추가하세요 — 무시하면 조건이 없는 것과 같아져서 "
+                        "제약이 실제로는 안 걸리는데도 테스트가 통과해요."
+                    )
+                # ⚠️ `$ne`는 **필드가 없는 문서에도 걸려야** 해요(MongoDB와 같게).
+                #    `cast_date`가 아직 없는 첫 캐스트가 이걸로 통과해요.
                 if "$ne" in want and got == want["$ne"]:
                     return False
                 if "$gte" in want and not (isinstance(got, int) and got >= want["$gte"]):
+                    return False
+                if "$gt" in want and not (isinstance(got, int) and got > want["$gt"]):
+                    return False
+                # 🚨 `$lt`/`$lte`는 **필드가 없으면 '참'이에요**(MongoDB는 안 그렇지만,
+                #    여기선 `casts_today`가 없는 첫 캐스트를 "0회 < 상한"으로 봐야
+                #    하거든요). 실제로는 `$ne` 쪽 쿼리가 그 경우를 받아서 결과가 같아요.
+                if "$lt" in want and got is not None and not (
+                        isinstance(got, int) and got < want["$lt"]):
+                    return False
+                if "$lte" in want and got is not None and not (
+                        isinstance(got, int) and got <= want["$lte"]):
                     return False
                 if "$exists" in want and (key in doc) != want["$exists"]:
                     return False
@@ -282,14 +329,18 @@ check("최고 기록이 전설로 갱신", (data.get("best") or {}).get("key") =
 # 📏 같은 어종이라도 **치수에 따라 값이 달라야** 해요 (사용자 요청의 핵심).
 lo_p, hi_p = pieces_of(COMMON, C_LO), pieces_of(COMMON, C_HI)
 check("작은 놈보다 큰 놈이 비싸다", hi_p > lo_p, f"{lo_p} vs {hi_p}조각")
-check("🚨 일반 물고기가 0.8~1.5코인 범위 (5차, 사용자 요청)",
-      lo_p == 8 and hi_p == 15, f"{lo_p / 10:.1f}~{hi_p / 10:.1f}코인")
+# 🚨 **값을 바꿀 땐 이 숫자도 같이.** 등급표에서 직접 읽어 비교하면 "표와 표를
+#    비교"하는 꼴이라 둘이 같이 틀려도 통과해요(이 저장소에서 반복된 사고예요).
+#    그래서 6차 설계값을 **손으로 적어** 둬요.
+check("🚨 일반 물고기가 1.2~2.2코인 범위 (6차 = 5차 x1.5)",
+      lo_p == 12 and hi_p == 22, f"{lo_p / 10:.1f}~{hi_p / 10:.1f}코인")
 
 # 🚨 **등급 경계가 겹치면 상위 등급의 맛이 사라져요.**
 #
 # 5차에서 일반을 0.8~1.5로 올렸더니 희귀 최소(1.5)와 **딱 맞닿았어요** — "희귀를
-# 잡았는데 일반 대물급과 같은 값"이 나오는 상태죠. 그래서 희귀도 2.0~3.8로 같이
-# 올렸어요(사용자 결정 - 4.0으로 하면 이번엔 대물 최소와 맞닿아요). 다음에 한쪽만 또 올리면 여기서 걸려요.
+# 잡았는데 일반 대물급과 같은 값"이 나오는 상태죠. 그래서 희귀도 같이 올렸어요.
+# 6차는 전 등급을 똑같이 x1.5해서 경계 간격도 그대로 1.5배가 됐어요.
+# 다음에 한쪽만 또 올리면 여기서 걸려요.
 # ⚠️ `GRADE_ORDER`는 **내림차순**(전설→일반)이에요. 방향에 기대지 말고 값으로 정렬해요.
 _bounds = sorted(((g, GRADES[g]["pieces"]) for g in GRADE_ORDER),
                  key=lambda gp: gp[1][0])
@@ -407,14 +458,17 @@ fake.docs.pop(R, None)
 
 left, bought = run(fishing_store.rod_state(R))
 check("처음엔 낚시대가 없다", left == 0)
-check("낚시대 없이 쓰면 None", run(fishing_store.use_rod(R)) is None)
+# 🚨 `use_rod`는 2026-10-20부터 **(남은 내구도, 막힌 이유)** 튜플이에요. 예전처럼
+#    `is None`으로 받으면 튜플은 항상 참이라 상한도 품절도 안 걸려요.
+check("낚시대 없이 쓰면 no_rod", run(fishing_store.use_rod(R)) == (None, "no_rod"))
 
 check("낚시대를 산다", run(fishing_store.buy_rod(R, ROD_DURABILITY)) is True)
 check(f"내구도 {ROD_DURABILITY}로 시작",
       run(fishing_store.rod_state(R))[0] == ROD_DURABILITY)
 
-# 🚨 **하루 제한이 없어요**(2026-10-17 4차). 대신 1개당 순이익이 0 근처라 안전해요.
-check("🚨 같은 날 또 살 수 있다 (제한 해제)",
+# 🚨 **개수 제한이 없어요**(2026-10-17 4차에 풀고 6차에도 안 되살렸어요).
+#    상한은 개수가 아니라 **던진 횟수**에 걸려요 - 아래 [8d]가 그걸 검사해요.
+check("🚨 같은 날 또 살 수 있다 (개수 제한 없음)",
       run(fishing_store.buy_rod(R, ROD_DURABILITY)) is True)
 
 # 🚨 내구도가 **쌓여야** 해요. 덮어쓰면 남은 횟수가 날아가요.
@@ -423,12 +477,19 @@ check("🚨 내구도가 덮어쓰이지 않고 쌓인다",
       f"{run(fishing_store.rod_state(R))[0]}회 (기대 {ROD_DURABILITY * 2})")
 
 # 내구도 소진
-rem = [run(fishing_store.use_rod(R)) for _ in range(ROD_DURABILITY * 2)]
+#
+# ⚠️ 하루 상한이 내구도보다 작으면 **상한이 먼저** 걸려서 이 블록이 내구도를 못
+#    비워요. 그래서 상한을 잠깐 끄고 재요 — 여기서 보려는 건 내구도 쪽이에요.
+#    (상한 자체는 [8d]에서 따로 검사해요.)
+_cap_backup = fish_data.DAILY_CAST_CAP
+fish_data.DAILY_CAST_CAP = 0
+fishing_store.DAILY_CAST_CAP = 0
+rem = [run(fishing_store.use_rod(R))[0] for _ in range(ROD_DURABILITY * 2)]
 check("전부 쓰면 0이 된다", rem[-1] == 0, str(rem[-3:]))
 check("한 번에 1씩 줄어든다",
       all(a - b == 1 for a, b in zip(rem, rem[1:])), str(rem[:4]))
 check("🚨 다 쓰면 더 못 쓴다 (음수로 안 내려감)",
-      run(fishing_store.use_rod(R)) is None)
+      run(fishing_store.use_rod(R)) == (None, "no_rod"))
 
 # 🚨 코인 차감 실패 시 되돌리기 — 안 되면 공짜 낚시대가 돼요.
 run(fishing_store.buy_rod(R, ROD_DURABILITY))      # 10
@@ -438,6 +499,8 @@ run(fishing_store.refund_rod(R, ROD_DURABILITY))   # 차감 실패 -> 방금 산
 check("🚨 환불은 **방금 준 만큼만** 뺀다 (쓰던 낚시대가 안 날아감)",
       run(fishing_store.rod_state(R))[0] == 9,
       f"{run(fishing_store.rod_state(R))[0]}회 (기대 9)")
+fish_data.DAILY_CAST_CAP = _cap_backup
+fishing_store.DAILY_CAST_CAP = _cap_backup
 
 # ==================================================================
 print("\n[8c] 🎣 놓치면 횟수를 돌려준다 + 제한시간 시계")
@@ -941,7 +1004,10 @@ class _RecInter:
 _store_patch = {
     # ⚠️ `use_rod`를 **느리게** 만들어요. 고친 코드의 핵심이 "DB가 느려도 괜찮다"라,
     #    빠른 가짜로만 돌리면 정작 그 성질을 안 건드려요.
-    "use_rod": lambda uid: 4,
+    # 🚨 반환은 **(남은 내구도, 막힌 이유)** 튜플이에요(2026-10-20). 옛 형태(`4`)로
+    #    두면 `left, blocked = ...`가 TypeError로 터져요.
+    "use_rod": lambda uid: (4, None),
+    "cast_quota": lambda uid: (3, fish_data.DAILY_CAST_CAP),
     "record_cast": lambda uid, key, size: None,
     "give_back_rod": lambda uid: None,
     "get": lambda uid: {"tank": {}, "casts": 1, "caught": 1, "sold": 0},
@@ -1034,7 +1100,9 @@ if (_fnode.body and isinstance(_fnode.body[0], _ast.Expr)
         and isinstance(getattr(_fnode.body[0].value, "value", None), str)):
     _fnode.body = _fnode.body[1:]
 _src = _ast.unparse(_fnode)
-_hard = [tok for tok in ("90.5", "6.7", "2.7", "14코인", "14.1", "4.13", "0.8~1.5")
+_hard = [tok for tok in ("90.5", "6.7", "2.7", "14코인", "14.1", "4.13", "0.8~1.5",
+                         # 6차에 생긴 숫자들. 상한·하루벌이도 상수에서 계산해야 해요.
+                         "1.2~2.2", "21코인", "42코인", "22코인", "하루 20번")
          if tok in _src]
 check("🚨 확률·값·평균을 소스에 하드코딩하지 않았다", not _hard, f"발견: {_hard}")
 
@@ -1242,6 +1310,161 @@ check("입질 후 기다려주는 시간이 옛 제한시간(2.5초)보다 길�
 check("가드 TTL이 한 판 최대 길이보다 길다 (연타 가드가 먼저 안 풀리게)",
       _fish_cog.CAST_GUARD_TTL > _fish_cog.BITE_MAX + _fish_cog.STRIKE_WAIT,
       f"TTL {_fish_cog.CAST_GUARD_TTL:.0f}초")
+
+# ==================================================================
+print("\n[17] ⏳ 하루 캐스트 상한 (2026-10-20 6차)")
+# ------------------------------------------------------------------
+# 🚨 이게 **발행의 유일한 천장**이에요. 여기 뚫리면 5차의 "시간 쓰는 사람만 번다"로
+#    돌아가요(실측에서 상위 1명이 전체 캐스트의 50%였어요).
+#
+# ⚠️ 상한은 낚시대 **개수**가 아니라 **던진 횟수**에 걸려야 해요. 개수로 걸면
+#    🪝소형(3회)을 쓰는 하위권이 하루 3캐스트에 막혀서, 진입을 넓히려 만든 상품이
+#    오히려 불리해져요. 아래 "소형으로도 상한까지 쓸 수 있다"가 그걸 지켜요.
+CAP = fish_data.DAILY_CAST_CAP
+check("🚨 하루 상한이 켜져 있다", bool(CAP), f"DAILY_CAST_CAP={CAP}")
+check("🚨 개수 제한(ROD_PER_DAY)은 꺼져 있다 (이중 제한 금지)",
+      fish_data.ROD_PER_DAY == 0, f"ROD_PER_DAY={fish_data.ROD_PER_DAY}")
+
+C = "cap-user"
+fake.docs.pop(C, None)
+# 상한보다 넉넉하게 사둬요 — 막는 게 내구도가 아니라 **상한**이어야 하니까요.
+for _ in range((CAP // ROD_DURABILITY) + 2):
+    run(fishing_store.buy_rod(C, ROD_DURABILITY))
+_rod_before = run(fishing_store.rod_state(C))[0]
+
+_results = [run(fishing_store.use_rod(C)) for _ in range(CAP)]
+check(f"상한({CAP}회)까지는 전부 던져진다",
+      all(r[1] is None for r in _results),
+      f"막힌 게 {sum(1 for r in _results if r[1])}건")
+
+_used, _cap = run(fishing_store.cast_quota(C))
+check("오늘 던진 횟수가 정확히 센다", (_used, _cap) == (CAP, CAP), f"{_used}/{_cap}")
+
+_blocked = run(fishing_store.use_rod(C))
+check(f"🚨 {CAP + 1}번째는 'cap'으로 막힌다", _blocked[1] == "cap", str(_blocked))
+
+# ⭐ 상한에 걸려도 **낚시대는 안 깎여요.** 이게 "코인 손실 0"의 근거예요
+#    (10-18 동시 1판 제한 때는 선차감 탓에 1회분을 손해 본 사람이 있었어요).
+_rod_after = run(fishing_store.rod_state(C))[0]
+check("🚨 상한에 막힐 때 내구도가 안 깎인다",
+      _rod_after == _rod_before - CAP,
+      f"{_rod_after}회 (기대 {_rod_before - CAP})")
+check("상한에 막혀도 낚시대가 남아 있다 (내일 이어서 쓴다)", _rod_after > 0,
+      f"{_rod_after}회")
+
+# 🚨 **일부러 깨서 FAIL이 나는지** 봐요. 상한 검사를 통째로 빼먹어도 위 검사들이
+#    통과하면 그건 검사가 아니에요.
+fishing_store.DAILY_CAST_CAP = 0
+_unlimited = run(fishing_store.use_rod(C))
+check("(역검증) 상한을 0으로 끄면 그 다음 캐스트가 통과한다",
+      _unlimited[1] is None, str(_unlimited))
+fishing_store.DAILY_CAST_CAP = CAP
+
+# 🚨 놓친 판은 **횟수를 돌려줘야** 해요. 안 돌려주면 놓침이 "내구도 + 상한" 이중
+#    벌칙이 돼요(놓침은 지연 탓일 수 있어서 벌칙으로 두지 않기로 했어요).
+G = "cap-miss-user"
+fake.docs.pop(G, None)
+run(fishing_store.buy_rod(G, ROD_DURABILITY))
+run(fishing_store.use_rod(G))
+check("던지면 오늘 횟수가 1 센다", run(fishing_store.cast_quota(G))[0] == 1)
+run(fishing_store.give_back_rod(G))
+check("🚨 놓치면 오늘 횟수도 돌아온다",
+      run(fishing_store.cast_quota(G))[0] == 0,
+      f"{run(fishing_store.cast_quota(G))[0]}회")
+check("놓치면 내구도도 같이 돌아온다",
+      run(fishing_store.rod_state(G))[0] == ROD_DURABILITY)
+
+# 🚨 **자정을 넘긴 환불이 공짜 캐스트를 만들면 안 돼요.** 어제자 카운터에 대고
+#    `$inc: -1`을 하면 오늘 한 번을 덤으로 던지게 돼요.
+fake.docs[G]["cast_date"] = "2000-01-01"
+fake.docs[G]["casts_today"] = 5
+run(fishing_store.give_back_rod(G))
+check("🚨 어제 카운터는 환불로 안 깎인다 (공짜 캐스트 방지)",
+      fake.docs[G]["casts_today"] == 5,
+      f"{fake.docs[G]['casts_today']}회 (기대 5)")
+
+# ⭐ 날짜가 바뀌면 리셋돼요. 그리고 **그 첫 캐스트도 1로 세야** 해요 — 0으로 두면
+#    매일 한 번이 공짜가 돼요.
+fake.docs[G]["cast_date"] = "2000-01-01"
+fake.docs[G]["casts_today"] = CAP
+_after_mid = run(fishing_store.use_rod(G))
+check("🚨 날짜가 바뀌면 상한이 리셋된다", _after_mid[1] is None, str(_after_mid))
+check("리셋 후 첫 캐스트도 1로 센다",
+      run(fishing_store.cast_quota(G))[0] == 1,
+      f"{run(fishing_store.cast_quota(G))[0]}회")
+
+# ⭐ 🪝 소형으로도 상한까지 쓸 수 있어야 해요 (개수 제한이면 3회에 막혀요)
+S2 = "cap-small-user"
+fake.docs.pop(S2, None)
+for _ in range((CAP // SMALL_ROD_DURABILITY) + 1):
+    run(fishing_store.buy_rod(S2, SMALL_ROD_DURABILITY))
+_small = [run(fishing_store.use_rod(S2)) for _ in range(CAP)]
+check(f"🪝 소형만 써도 하루 {CAP}번까지 던질 수 있다",
+      all(r[1] is None for r in _small),
+      f"막힌 게 {sum(1 for r in _small if r[1])}건 — 개수 제한이 걸린 거예요")
+
+# 📐 안내문에 쓰는 수치가 상한과 맞물려 계산되는가
+check("1인 하루 순발행 상한 = 상한 × 캐스트당 순발행",
+      abs(fish_data.max_daily_net_issue()
+          - CAP * fish_data.net_issue_per_cast()) < 1e-9,
+      f"{fish_data.max_daily_net_issue():.2f}코인")
+check("🚨 상한이 0이면 '발행 없음'이 아니라 무제한(inf)이다",
+      _inf_check := (lambda: (
+          setattr(fish_data, "DAILY_CAST_CAP", 0),
+          fish_data.max_daily_net_issue() == float("inf"),
+          setattr(fish_data, "DAILY_CAST_CAP", CAP),
+      )[1])())
+check("하루 상한 수입이 낚시대값보다 크다 (상한을 다 써도 적자면 아무도 안 함)",
+      fish_data.max_daily_income() > CAP * (ROD_PRICE / ROD_DURABILITY),
+      f"수입 {fish_data.max_daily_income():.1f} vs 낚시대값 "
+      f"{CAP * ROD_PRICE / ROD_DURABILITY:.1f}코인")
+
+# 🚨 **상한에 걸린 화면이 실제로 뜨는가.** 상한 로직만 맞고 화면이 터지면 유저는
+#    "눌렀는데 아무 반응이 없다"를 겪어요(이 저장소에 그 신고 전력이 있어요).
+_cap_rec = []
+_cap_patch = {
+    "use_rod": lambda uid: (7, "cap"),      # 상한에 걸렸고 낚시대는 7번 남은 상태
+    "cast_quota": lambda uid: (CAP, CAP),
+    "record_cast": lambda uid, key, size: None,
+    "give_back_rod": lambda uid: None,
+    "get": lambda uid: {"tank": {}, "casts": 1, "caught": 1, "sold": 0},
+}
+_cap_saved = {k: getattr(fishing.fishing_store, k) for k in _cap_patch}
+for _k, _fn in _cap_patch.items():
+    setattr(fishing.fishing_store, _k, _mk(_fn))
+try:
+    _cap_ok = asyncio.run(fishing.run_cast(_RecInter(_cap_rec), edit=True))
+    _cap_kinds = [r[0] for r in _cap_rec]
+    check("🚨 상한에 걸려도 화면이 뜬다 (조용히 끝나지 않는다)",
+          _cap_ok is True and "edit_original" in _cap_kinds, f"순서 {_cap_kinds}")
+    check("상한 화면도 defer로 시작한다 (3초 토큰)",
+          _cap_kinds[:1] == ["defer"], f"순서 {_cap_kinds}")
+    # 🚨 상한에 걸린 사람에게 **낚시대를 팔면 안 돼요** — 오늘 못 쓰는 걸 사게 돼요
+    #    (🎲 "하루 한도를 넘는 1회 연장"과 같은 死상품이에요).
+    check("🚨 상한 화면에는 낚시대 구매 버튼이 없다",
+          all("view" not in str(r) or r[0] != "send_message" for r in _cap_rec),
+          f"{_cap_rec}")
+finally:
+    for _k, _fn in _cap_saved.items():
+        setattr(fishing.fishing_store, _k, _fn)
+
+# 🚨 안내문이 상한을 **실제로 말하는가**. 숫자를 하드코딩하지 않았는지도 같이 봐요.
+_src17 = _Path(os.path.join(BOT_DIR, "cogs/fishing.py")).read_text(encoding="utf-8")
+check("🚨 상한 분기에서 BuyRodView를 띄우지 않는다",
+      _src17.index('blocked == "cap"') < _src17.index('blocked == "no_rod"')
+      and "view=None," in _src17[_src17.index('blocked == "cap"'):
+                                 _src17.index('blocked == "no_rod"')],
+      "상한 분기 안에 view=None이 있어야 해요")
+check("🎣 /낚시확률이 하루 상한을 안내한다", "DAILY_CAST_CAP" in _src17)
+check("🚨 상한 숫자를 안내문에 하드코딩하지 않았다",
+      f"하루 **{CAP}번**" not in _src17,
+      "상수를 끼워 넣어야 해요 (상점 '하루 1개'가 그렇게 썩었어요)")
+_src17_shop = _Path(os.path.join(BOT_DIR, "cogs/akgui_shop.py")).read_text(
+    encoding="utf-8")
+check("🛒 악귀상점 라벨도 상한을 말한다", "DAILY_CAST_CAP" in _src17_shop)
+_src17_faq = _Path(os.path.join(BOT_DIR, "utils/faq_knowledge.py")).read_text(
+    encoding="utf-8")
+check("❓ 봇 매니저도 상한을 안다", "DAILY_CAST_CAP" in _src17_faq)
 
 # ==================================================================
 # 🚨 요약은 **반드시 파일 맨 끝**에 있어야 해요. 여기보다 위에 두면 그 뒤에 추가한
