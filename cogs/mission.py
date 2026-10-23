@@ -24,6 +24,7 @@ from discord.ext import commands, tasks
 from cogs import voice_rank
 from cogs.rank import _extract_player_match_stats
 from utils import (
+    adult_check,
     coin_wallet,
     henrik_api,
     match_feed,
@@ -73,6 +74,71 @@ def _is_today_kst(unix_seconds: int | None) -> bool:
     return played == datetime.now(KST).date()
 
 
+# ------------------------------------------------------------------
+# 미션 완료 처리 (모듈 함수)
+#
+# ⭐ **왜 클래스 밖에 있나**: 다른 cog(출석·낚시·도박)가 "행동이 성립했다"고 알려줘야
+#    하는데, cog 인스턴스를 가져오려면 `bot.get_cog("Mission")`을 거쳐야 해요. 이 함수들은
+#    `self`를 하나도 안 쓰니 모듈 함수로 두면 `from cogs import mission` 한 줄로 끝나요.
+#    (`cogs/mission.py`가 `cogs/voice_rank.py`의 `on_minutes_added`를 그렇게 부르고 있어요 -
+#     같은 방식이에요.)
+#
+# 🚨 **`COMMAND_MISSIONS`(명령어 완료 감지)로 처리하면 안 되는 것들이에요.**
+#    `on_app_command_completion`은 명령어가 **에러 없이 끝나면** 발동해요. 그래서
+#    "낚시대가 없어요"·"이미 출석했어요"·"코인이 부족해요" 안내를 띄우고 정상 종료한
+#    경우까지 전부 완료로 잡혀서 **공짜로 깨져요.** 반드시 아래처럼 실제로 행동이
+#    성립한 지점에서 불러야 해요.
+# ------------------------------------------------------------------
+async def complete(user_id: int, key: str, channel: discord.abc.Messageable | None = None):
+    """이번에 새로 깼으면 코인을 주고 알려줘요. 이미 깬 미션이면 아무 일도 안 해요."""
+    if not await mission_store.progress(user_id, key):
+        return
+
+    balance = await coin_wallet.add(user_id, mission_store.REWARD_PER_MISSION, reason=f"미션:{key}")
+    info = MISSIONS[key]
+    log.info("🎯 미션 완료: %s / %s (+%d코인)", user_id, key, mission_store.REWARD_PER_MISSION)
+
+    if channel is None:
+        return
+    # 끈 사람에겐 알림만 생략해요. 코인은 위에서 이미 들어갔어요.
+    if not await notify_prefs.is_enabled(user_id, "mission_channel"):
+        return
+    try:
+        await channel.send(
+            f"🎯 <@{user_id}> **{info['title']}** 미션 완료! "
+            f"악귀코인 **+{mission_store.REWARD_PER_MISSION}개** (보유 {balance}개)",
+            # 멘션 글씨는 남기고 핑만 안 쏴요. 미션은 하루 3개라 핑까지 가면 꽤 거슬려요.
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except discord.HTTPException:
+        # 알림 실패로 코인 지급을 되돌리진 않아요. 코인은 이미 들어갔어요.
+        log.warning("미션 완료 알림 전송 실패 (user=%s key=%s)", user_id, key, exc_info=True)
+
+
+async def on_action(
+    user_id: int,
+    key: str,
+    channel: discord.abc.Messageable | None = None,
+    member: discord.abc.User | discord.Member | None = None,
+) -> None:
+    """다른 cog가 "이 행동이 성립했다"고 알려주는 입구. 🎣 낚시·📅 출석·🎰 도박이 써요.
+
+    🚨 **예외를 여기서 삼켜요.** 미션 적립 때문에 낚시나 출석 본 흐름이 깨지면 안 돼요.
+    호출부마다 try를 붙이라고 하면 언젠가 하나를 빠뜨리니 입구에서 막아요.
+    (`_add_voice_minutes`가 음성 레벨을 감싸는 것과 같은 이유예요.)
+
+    ⚠️ `member`는 🔞 미션 배정 판정에만 써요. 안 넘기면 도박 미션이 배정에서 빠지는데,
+    그건 "못 깨는 미션을 배정하는" 쪽보다 안전해요.
+    """
+    try:
+        linked = riot_account_store.get_account(user_id) is not None
+        # 오늘 미션을 아직 안 받았을 수 있으니 먼저 배정해둬요.
+        await mission_store.ensure_today(user_id, linked, adult_check.is_adult(member))
+        await complete(user_id, key, channel)
+    except Exception:  # noqa: BLE001
+        log.warning("미션 적립 실패 (user=%s key=%s)", user_id, key, exc_info=True)
+
+
 class Mission(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -97,31 +163,11 @@ class Mission(commands.Cog):
 
     # ------------------------------------------------------------------
     # 공통: 미션 완료 처리 + 코인 지급
+    # ⭐ 본체는 모듈 함수 `complete()`예요 (다른 cog도 써야 해서 클래스 밖에 뒀어요).
+    #    여기는 기존 호출부를 그대로 두기 위한 얇은 위임이에요.
     # ------------------------------------------------------------------
     async def _complete(self, user_id: int, key: str, channel: discord.abc.Messageable | None = None):
-        """이번에 새로 깼으면 코인을 주고 알려줘요. 이미 깬 미션이면 아무 일도 안 해요."""
-        if not await mission_store.progress(user_id, key):
-            return
-
-        balance = await coin_wallet.add(user_id, mission_store.REWARD_PER_MISSION, reason=f"미션:{key}")
-        info = MISSIONS[key]
-        log.info("🎯 미션 완료: %s / %s (+%d코인)", user_id, key, mission_store.REWARD_PER_MISSION)
-
-        if channel is None:
-            return
-        # 끈 사람에겐 알림만 생략해요. 코인은 위에서 이미 들어갔어요.
-        if not await notify_prefs.is_enabled(user_id, "mission_channel"):
-            return
-        try:
-            await channel.send(
-                f"🎯 <@{user_id}> **{info['title']}** 미션 완료! "
-                f"악귀코인 **+{mission_store.REWARD_PER_MISSION}개** (보유 {balance}개)",
-                # 멘션 글씨는 남기고 핑만 안 쏴요. 미션은 하루 3개라 핑까지 가면 꽤 거슬려요.
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except discord.HTTPException:
-            # 알림 실패로 코인 지급을 되돌리진 않아요. 코인은 이미 들어갔어요.
-            log.warning("미션 완료 알림 전송 실패 (user=%s key=%s)", user_id, key, exc_info=True)
+        await complete(user_id, key, channel)
 
     async def _is_linked(self, user_id: int) -> bool:
         return riot_account_store.get_account(user_id) is not None
@@ -137,7 +183,11 @@ class Mission(commands.Cog):
         if key is None or interaction.user.bot:
             return
         # 오늘 미션을 아직 안 받았을 수 있으니 먼저 배정해둬요.
-        await mission_store.ensure_today(interaction.user.id, await self._is_linked(interaction.user.id))
+        await mission_store.ensure_today(
+            interaction.user.id,
+            await self._is_linked(interaction.user.id),
+            adult_check.is_adult(interaction.user),
+        )
         await self._complete(interaction.user.id, key, interaction.channel)
 
     # ------------------------------------------------------------------
@@ -159,7 +209,9 @@ class Mission(commands.Cog):
         if minutes <= 0:
             return
 
-        await mission_store.ensure_today(member.id, await self._is_linked(member.id))
+        await mission_store.ensure_today(
+            member.id, await self._is_linked(member.id), adult_check.is_adult(member)
+        )
         # ⚠️ 여기서 _complete()를 쓰면 안 돼요. 그건 진행도를 1씩만 올려서, 30분짜리 미션이
         # 5분 정산 한 번에 1분만 오르거든요. 실제로 머문 분만큼 올려야 해요.
         await self._add_voice_minutes(member, channel, minutes)
@@ -405,7 +457,14 @@ class Mission(commands.Cog):
 
         `ensure_today`를 여기서 부르는 건, 미션 문서가 `/미션`을 쳐야 생기기 때문이에요.
         문서가 없으면 자동 판정 대상에서 빠져버려요. 뽑히는 미션은 `user_id:날짜` 시드로
-        정해져서, 봇이 미리 만들어도 유저가 직접 만들 때와 **똑같은 미션**이 나와요."""
+        정해져서, 봇이 미리 만들어도 유저가 직접 만들 때와 **똑같은 미션**이 나와요.
+
+        ⚠️ **여기만 `adult`를 안 넘겨요**(2026-10-23). 이 루프엔 `user_id`밖에 없어서
+        길드 멤버를 따로 찾아야 역할을 볼 수 있는데, 그만큼의 값이 없어요 - 이 루프가
+        문서를 **처음 만드는** 경우에만 영향이 있고, 대상은 전부 연동자라 **발로 1 +
+        서버 2**를 받아요. 즉 서버 슬롯이 🔞을 뺀 7종에서 뽑힐 뿐이고, 그 사람은
+        어차피 다른 미션을 받으니 손해가 없어요. 반대로 여기서 `adult=True`로 두면
+        **인증 없는 사람에게 못 깨는 미션이 깔려요.**"""
         today = mission_store.today_iso()
         if self._account_missing.get(user_id) == today:
             return None, False  # 오늘 이미 "그런 계정 없음"을 확인했어요
@@ -507,9 +566,10 @@ class Mission(commands.Cog):
 
         user_id = interaction.user.id
         linked = await self._is_linked(user_id)
+        adult = adult_check.is_adult(interaction.user)
 
         # ⚠️ 순서 주의: 1회성 미션 기록은 미션 문서 안에 들어가니, 문서를 먼저 만들어야 해요.
-        doc = await mission_store.ensure_today(user_id, linked)
+        doc = await mission_store.ensure_today(user_id, linked, adult)
 
         # 연동만 해두고 아직 보상을 못 받았으면 1회성 미션을 여기서 챙겨줘요.
         if linked and await mission_store.claim_one_time(user_id, "link_riot"):
@@ -524,7 +584,7 @@ class Mission(commands.Cog):
         valorant_keys = [k for k in doc["picks"] if MISSIONS[k]["kind"] == "valorant"]
         if valorant_keys:
             note = await self._check_valorant(user_id, valorant_keys, None)
-            doc = await mission_store.ensure_today(user_id, linked)  # 판정 결과 반영해서 다시 읽기
+            doc = await mission_store.ensure_today(user_id, linked, adult)  # 판정 결과 반영해서 다시 읽기
 
         lines = []
         for key in doc["picks"]:

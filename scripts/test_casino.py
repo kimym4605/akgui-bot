@@ -349,6 +349,8 @@ check("통산 지출도 이어서 쌓인다 (5+10+15+20+25 = 75)",
 # ⚠️ `cogs.casino`(=EXTEND_NOTE)는 여기서 import하면 안 돼요. `.env`를 읽기 **전**이라
 #    `ADULT_ROLE_ID`가 None으로 캐시돼서 아래 성인 게이트 검사가 통째로 깨져요.
 #    그 검사는 9) 뒤로 옮겼어요.
+#    🚨 상수가 `utils/adult_check.py`로 옮겨간 뒤에도 **같은 함정이에요** - 그 모듈을
+#       `.env` 로드 전에 import하면(예: `utils.mission_store` 경유) 똑같이 None으로 굳어요.
 
 print("8) 한 판에 잃을 수 있는 최대와 하루 최대")
 check(f"1회 최대 {casino_store.MAX_BET}코인", casino_store.MAX_BET == 5)
@@ -369,8 +371,12 @@ os.environ["BIRTHDAY_DB_NAME"] = "agwi_casino_test"
 import discord  # noqa: E402
 
 from cogs import casino as casino_cog  # noqa: E402
+from utils import adult_check  # noqa: E402
 
-ADULT_ID = casino_cog.ADULT_ROLE_ID
+# ⭐ 상수는 2026-10-23에 `utils/adult_check.py`로 옮겼어요. 🎰 도박 미션 배정이 **같은
+#    기준**을 봐야 하는데, `mission_store`가 `cogs.casino`에서 가져오면 순환 import가
+#    되거든요. `casino_cog._is_adult`는 그 함수를 그대로 가리켜요.
+ADULT_ID = adult_check.ADULT_ROLE_ID
 check("ADULT_ROLE_ID가 설정돼 있다 (없으면 전원 차단돼요)", bool(ADULT_ID), str(ADULT_ID))
 
 
@@ -412,12 +418,12 @@ check("DM(서버 밖)은 차단", casino_cog._is_adult(FakeUser()) is False)
 check("None도 차단", casino_cog._is_adult(None) is False)
 
 # 설정이 비었을 때 **막는 쪽**으로 기우는지 (열어주면 미성년자가 통과해요)
-saved = casino_cog.ADULT_ROLE_ID
-casino_cog.ADULT_ROLE_ID = None
+saved = adult_check.ADULT_ROLE_ID
+adult_check.ADULT_ROLE_ID = None
 check("ADULT_ROLE_ID가 비면 일반 유저는 차단", casino_cog._is_adult(FakeMember([999999])) is False)
 check("설정이 비어도 운영진은 통과(잠김 방지)",
       casino_cog._is_adult(FakeMember([999999], administrator=True)) is True)
-casino_cog.ADULT_ROLE_ID = saved
+adult_check.ADULT_ROLE_ID = saved
 
 
 async def check_commands():

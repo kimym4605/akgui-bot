@@ -21,12 +21,13 @@
    반대로 하면(이기면 주고 지면 빼기) 중간에 봇이 죽었을 때 공짜 판이 돼요.
 """
 import logging
-import os
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+from cogs import mission
+from utils import adult_check
 from utils import casino_games as games
 from utils import casino_store, coin_wallet
 from utils.casino_store import DAILY_LIMIT, EXTEND_BONUS, MAX_BET, MIN_BET
@@ -57,18 +58,11 @@ BET_EXTEND_NOTE = "베팅한도연장"
 
 # 🔞 성인만 쓸 수 있어요. `/채널설정`으로 도박장 채널에 묶더라도 **명령어 자체를 막지 않으면
 # 다른 채널에서 그냥 쓸 수 있어요.** 채널을 가리는 것만으로는 잠금이 안 돼요.
-# adult_verify와 같은 ADULT_ROLE_ID를 봐요(여기서 또 상수를 만들면 둘이 어긋나요).
-ADULT_ROLE_ID = os.getenv("ADULT_ROLE_ID")
-
-
-def _is_adult(user: discord.abc.User | None) -> bool:
-    if not isinstance(user, discord.Member):
-        return False          # DM이면 서버 역할을 못 봐요
-    if user.guild_permissions.administrator:
-        return True           # 운영진은 통과 (역할 설정이 꼬여도 잠기지 않게)
-    if not ADULT_ROLE_ID:
-        return False          # ⚠️ 설정이 없으면 **막는 쪽**으로. 열어주면 미성년자가 통과해요.
-    return any(str(role.id) == ADULT_ROLE_ID for role in user.roles)
+#
+# ⭐ 판정은 `utils/adult_check.py`로 옮겼어요(2026-10-23). 🎰 도박 미션 배정도 **같은
+#    기준**을 봐야 하는데, `mission_store`가 여기서 가져오면 순환 import가 돼요.
+#    "미션은 받았는데 명령어가 막힌다"가 제일 나쁜 조합이라 기준은 꼭 한 벌이어야 해요.
+_is_adult = adult_check.is_adult
 
 
 def adult_only():
@@ -125,6 +119,16 @@ async def take_bet(interaction: discord.Interaction, amount: int) -> tuple[bool,
         return False, (
             f"악귀코인이 부족해요. **{amount}개**가 필요한데 지금 **{balance}개** 갖고 있어요."
         ), False
+
+    # 🎯 🎰 "한 판 걸어보기" 미션 (2026-10-23). **차감까지 끝난 뒤**에 불러요.
+    #
+    # ⭐ 게임이 4종(`/도박` 슬롯·블랙잭·하이로우…)인데 베팅은 전부 이 함수를 지나요.
+    #    그래서 훅이 여기 하나만 있으면 돼요.
+    # 🚨 `COMMAND_MISSIONS`로는 못 해요 - 한도 초과나 잔액 부족으로 **위에서 return된
+    #    경우에도** 명령어 자체는 정상 종료되니까요(= 안 걸고 공짜로 깸).
+    await mission.on_action(
+        interaction.user.id, "play_gamble", interaction.channel, interaction.user
+    )
 
     return True, "", False
 

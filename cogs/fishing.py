@@ -111,6 +111,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from cogs import mission
 from utils import coin_wallet, fish_data, fishing_store
 from utils.channel_check import restrict_to_channel
 from utils.fish_data import (
@@ -311,6 +312,18 @@ async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> 
     # 🎣 주간 대회 적립은 `fishing_store.record_cast` **안에서** 일어나요.
     #    🚨 여기서 또 부르면 `caught`가 2배로 세어져요(2026-10-18에 실제로 그랬어요).
     await fishing_store.record_cast(interaction.user.id, key, size)
+
+    # 🎯 🎣 "세 마리 낚기" 미션 (2026-10-23). **잡았을 때만** 1마리씩 올려요.
+    #
+    # 🚨 `COMMAND_MISSIONS`에 "낚시"를 넣으면 안 돼요 - 낚시대가 없어도 `/낚시` 명령어는
+    #    정상 종료되니 세 번 쳐서 공짜로 깨요. 놓친 판(`key is None`)도 안 세는 게 맞아요:
+    #    위에서 `give_back_rod`로 **하루 횟수를 돌려주니** 안 던진 것으로 치거든요.
+    # ⚠️ 적립은 `record_cast` 뒤에 둬요. 미션 알림이 먼저 가면 "완료"가 떴는데 어항엔
+    #    아직 없는 순간이 생겨요.
+    if key:
+        await mission.on_action(
+            interaction.user.id, "catch_fish", interaction.channel, interaction.user
+        )
 
     state = await fishing_store.get(interaction.user.id)
     total = sum(len(v) for v in state["tank"].values())

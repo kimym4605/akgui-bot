@@ -86,8 +86,8 @@ def install(doc):
     return fake
 
 
-# 연동자의 실제 배정 모양: 발로 2 + 서버 1
-LINKED_PICKS = [VALORANT_KEYS[0], VALORANT_KEYS[1], SERVER_KEYS[0]]
+# 연동자의 실제 배정 모양: 발로 1 + 서버 2 (2026-10-23에 발로 2 + 서버 1에서 바뀌었어요)
+LINKED_PICKS = [VALORANT_KEYS[0], SERVER_KEYS[0], SERVER_KEYS[1]]
 
 print("1) 고른 미션만 바뀌고, 교체는 항상 서버 미션이다")
 for _ in range(20):  # 무작위라 여러 번 돌려요
@@ -500,7 +500,9 @@ _patches = {
     (cosmetic_store, "owned_themes"): lambda uid: [],
     (cosmetic_store, "grant_theme"): lambda uid, key: True,
     (cosmetic_store, "select_theme"): lambda uid, key: None,
-    (mission_store, "reroll"): lambda uid, key: (SERVER_KEYS[0], None),
+    # ⚠️ `adult`가 2026-10-23에 붙었어요(🔞 도박 미션을 비성인에게 안 주려고요).
+    #    기본값을 둬야 이 스텁이 인자 수로 터지지 않아요.
+    (mission_store, "reroll"): lambda uid, key, adult=False: (SERVER_KEYS[0], None),
     (mission_store, "rerolls_left"): lambda uid: 0,
 }
 _orig = {(m, n): getattr(m, n) for (m, n) in _patches}

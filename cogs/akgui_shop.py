@@ -24,7 +24,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils import attend_service, coin_wallet, cosmetic_store, inventory_store, mission_store, riot_account_store
+from utils import (
+    adult_check, attend_service, coin_wallet, cosmetic_store, inventory_store,
+    mission_store, riot_account_store,
+)
 from utils.interaction_ack import ack
 from utils.inventory_store import PROTECT_MAX, PROTECT_PRICE
 from utils.mission_store import MISSIONS, REROLL_LIMIT_PER_DAY, REROLL_PRICE
@@ -161,7 +164,11 @@ class RerollView(discord.ui.View):
             )
             return
 
-        new_key, reason = await mission_store.reroll(interaction.user.id, key)
+        # ⚠️ `adult`를 넘겨야 해요. 안 넘기면 성인 인증자도 🔞 미션으로는 안 바뀌고,
+        #    거꾸로 True로 고정하면 인증 없는 사람이 **못 깨는 미션**을 2코인에 사게 돼요.
+        new_key, reason = await mission_store.reroll(
+            interaction.user.id, key, adult_check.is_adult(interaction.user)
+        )
         if new_key is None:
             # 바꾸지 못했으면 반드시 돌려줘요(실패 사유와 무관하게).
             await coin_wallet.add(interaction.user.id, REROLL_PRICE, reason="미션리롤 실패 환불")
@@ -323,7 +330,9 @@ class ShopView(discord.ui.View):
         # ⚠️ `linked`를 반드시 실제로 확인해요. False로 넘기면, 오늘 미션 문서가 아직
         #    없는 연동자에게 **서버 미션만** 배정돼서 발로 미션을 통째로 잃어요.
         linked = riot_account_store.get_account(interaction.user.id) is not None
-        doc = await mission_store.ensure_today(interaction.user.id, linked=linked)
+        doc = await mission_store.ensure_today(
+            interaction.user.id, linked=linked, adult=adult_check.is_adult(interaction.user)
+        )
         done = set(doc.get("done") or [])
         pending = [k for k in (doc.get("picks") or []) if k not in done]
         if not pending:

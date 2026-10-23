@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from cogs import mission
 from utils import profile_card, profile_service
 from utils.channel_check import channel_key, restrict_to_channel
 from utils import attend_service
@@ -238,6 +239,16 @@ class Attendance(commands.Cog):
                 ephemeral=True,
             )
             return
+
+        # 🎯 📅 출석 미션 (2026-10-23). **출석이 성공한 뒤에만** 불러요.
+        #
+        # 🚨 `COMMAND_MISSIONS`(명령어 완료 감지)에 "출석"을 넣으면 안 돼요. 출석은 하루
+        #    1회라 **이미 출석한 사람이 다시 쳐도** 명령어는 정상 종료되고, 그러면 위의
+        #    `if not success: return`에 걸린 사람까지 미션이 깨져요(= 공짜 1코인).
+        # ⚠️ 예외는 `on_action`이 안에서 삼켜요. 미션 때문에 출석이 깨지면 안 되니까요.
+        await mission.on_action(
+            interaction.user.id, "attend_check", interaction.channel, interaction.user
+        )
 
         streak = info["streak"]
         lines = [f"획득 악귀코인: **+{info['coinGain']}개**"]
