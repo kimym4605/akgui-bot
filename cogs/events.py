@@ -17,10 +17,43 @@
 1분마다 돌면서 **시작 30분 전**인 일정을 찾아 참가자를 멘션해요.
 - `remindedAt`을 남겨서 같은 일정을 두 번 알리지 않아요.
 - `@loop.error`에서 **반드시 restart** — 안 그러면 예외 하나에 영구 정지해요.
+
+## ⭐ 모집글 줍기 (2026-10-23) — 이 서버는 예약이 아니라 "지금 소집"이다
+
+출시 닷새 뒤 `events`가 **1건**이고 그것도 만든 사람이 직접 취소했어요.
+🚨 **채널은 처음부터 맞게 꽂혀 있었어요** — `pokemonChannel:event`가 `📣｜내전모집`
+(`1555898408861048932`)이에요. 그러니까 "채널을 안 정해서"가 아니에요.
+
+채널 로그를 읽어보니 사람들은 `/일정`을 안 쓰고 **평문으로 모아요.** 그런데 그 평문이
+바로 일정이에요:
+
+    10-17 📣내전모집 yar_860: "@everyone 지금 당장 라잇나우 롤 내전 하실분"
+          ram._.g:  "내일까지 컴이 고쳐지면 할수있을것 같은데 **일단 참여 눌러놔야하나**"
+                     ↑ 버튼을 찾고 있었어요. `/일정`은 이미 이 채널에 있었는데도요.
+    10-23 💬일반  yar_860: "나 1시40분 정도에 집 가서 2시에 도착할건데 게임 ㄱ?"
+
+그래서 **모집글에 시간이 적혀 있으면 봇이 📅 를 달아둬요.** 누르면 그 글이 그대로
+일정이 돼서 참가 버튼과 30분 전 리마인더가 붙어요. (`cogs/suggestion.py`의 💡 평문
+줍기와 같은 수법이에요 — 사람은 하던 대로 적고, 추적만 봇이 해요)
+
+🚨 **시간이 없는 글엔 아무것도 안 달아요.** "지금 당장 하실분"은 예약이 아니라 즉시
+소집이고, 그건 `/방만들기`가 할 일이에요. 📅 를 달면 거짓 일정이 쌓여요.
+
+🚨 **`@everyone`을 걸러내지 마세요.** 건의함(`cogs/suggestion.py`)은 `@everyone`을
+공지로 보고 빼는데, 여기선 **반대로 가장 강한 모집 신호**예요(위 10-17 글이 그래요).
+
+🚨 **시간 해석은 틀릴 수 있어요.** 잡담에서 숫자를 주워오니까요("1시40분 정도에 집
+가서 2시에 도착"은 1시로 읽혀요). 그래서 **자동으로 만들지 않고 📅 로 물어봐요** —
+카드에 해석한 시각이 그대로 찍히니까, 틀리면 🚫 취소를 누르면 돼요.
+
+🚨 **MESSAGE CONTENT INTENT가 필요해요**(글 내용을 읽어야 하니까요). 판단은
+`bot.intents.message_content` **하나로** 해요 — 환경변수를 또 읽으면 두 군데가
+어긋나서 켜져 있는데도 조용히 아무것도 안 해요.
 """
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 
 import discord
@@ -28,7 +61,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from utils import event_store, when_parser
-from utils.channel_check import restrict_to_channel
+from utils.channel_check import get_allowed_channel_id, restrict_to_channel
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +69,47 @@ CHANNEL_GROUP = "event"
 
 MAX_TITLE = 80
 REMIND_CHECK_SECONDS = 60
+
+# ── 모집글 줍기 ──────────────────────────────────────────────────────────
+PICKUP_EMOJI = "📅"
+
+# 이보다 짧으면 모집글로 안 봐요("9시"만 적힌 한 마디는 일정이 아니에요).
+MIN_PICKUP_LEN = 5
+
+# 너무 먼 미래로 읽힌 건 오해예요. `when_parser`는 날짜 단서가 없으면 오늘/내일로
+# 잡으니까 보통 짧은데, "12월 3일"처럼 적으면 멀어질 수 있어요. 한 달까지만 받아요.
+MAX_PICKUP_DAYS = 31
+
+# `<@123>`·`<@!123>`·`<@&55>`·`<#99>` 같은 멘션 토큰. 제목에서 걷어내요
+# (그대로 두면 일정 제목에 멘션이 박혀서 **카드가 사람을 또 호출해요**).
+_MENTION_RE = re.compile(r"<[@#][!&]?\d+>")
+
+
+def pickup_title(content: str) -> str:
+    """모집글 평문 → 일정 제목. 멘션을 걷어내고 한 줄로 줄여요."""
+    text = _MENTION_RE.sub(" ", content or "")
+    text = text.replace("@everyone", " ").replace("@here", " ")
+    # 여러 줄로 적은 모집글은 첫 줄만 제목으로 써요(나머지는 원글에 그대로 있어요).
+    first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    return " ".join(first.split())[:MAX_TITLE]
+
+
+def parse_pickup(content: str, *, now: datetime | None = None) -> datetime | None:
+    """모집글에서 시작 시각을 읽어요. 못 읽거나 말이 안 되면 None이에요.
+
+    🚨 **`@everyone`을 빼지 않아요.** 건의함과 반대로, 여기선 그게 모집 신호예요."""
+    text = _MENTION_RE.sub(" ", content or "").strip()
+    if len(text) < MIN_PICKUP_LEN:
+        return None
+    try:
+        start = when_parser.parse(text, now=now)
+    except when_parser.ParseError:
+        return None  # 시간이 없는 글 = "지금 당장 하실분". 📅 를 달지 않아요.
+
+    base = (now or datetime.now(when_parser.KST)).astimezone(when_parser.KST)
+    if (start - base).days > MAX_PICKUP_DAYS:
+        return None
+    return start
 
 
 def build_embed(doc: dict, names: dict[str, str]) -> discord.Embed:
@@ -165,6 +239,78 @@ class Events(commands.Cog):
 
     async def cog_unload(self):
         self.remind_loop.cancel()
+
+    # ── 모집글 줍기 ────────────────────────────────────────────────────
+    def _channel_id(self) -> int | None:
+        return get_allowed_channel_id(CHANNEL_GROUP)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """모집 채널의 평문에 시간이 적혀 있으면 📅 를 달아둬요.
+
+        🚨 시간이 없으면 아무것도 안 달아요 — "지금 당장 하실분"은 예약이 아니에요."""
+        if not self.bot.intents.message_content:
+            return
+        if message.author.bot or message.guild is None:
+            return
+        channel_id = self._channel_id()
+        if channel_id is None or message.channel.id != channel_id:
+            return  # 채널 미설정이면 어디에도 안 달아요(조용한 기본값)
+        if parse_pickup(message.content) is None:
+            return
+        try:
+            await message.add_reaction(PICKUP_EMOJI)
+        except discord.HTTPException:
+            pass  # 권한이 없거나 리액션이 꽉 찬 경우. `/일정`은 그대로 돼요.
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        """📅 를 누르면 그 모집글이 일정이 돼요(참가 버튼 + 30분 전 리마인더).
+
+        ⭐ **누가 눌러도 돼요.** 주최자는 원글 작성자로 남으니까요. `raw` 이벤트를
+        쓰는 건 캐시에 없는(= 조금 전에 올라온 게 아닌) 글에도 달 수 있어야 해서예요.
+
+        🚨 `store.claim_source`로 **먼저 찜해요.** 일정 문서의 `_id`는 봇이 새로 올릴
+        메시지 id라서, 그걸로는 중복을 막을 수 없어요."""
+        if payload.guild_id is None or str(payload.emoji) != PICKUP_EMOJI:
+            return
+        if self.bot.user and payload.user_id == self.bot.user.id:
+            return  # 봇이 달아둔 그 📅
+        channel_id = self._channel_id()
+        if channel_id is None or payload.channel_id != channel_id:
+            return
+
+        channel = self.bot.get_channel(payload.channel_id)
+        if channel is None:
+            return
+        try:
+            message = await channel.fetch_message(payload.message_id)
+        except discord.HTTPException:
+            return
+        if message.author.bot:
+            return
+
+        start = parse_pickup(message.content)
+        title = pickup_title(message.content)
+        if start is None or not title:
+            return
+
+        if not await event_store.claim_source(message.id):
+            return  # 이미 일정이 된 글. 카드가 바로 아래에 있으니 조용히 넘겨요.
+
+        try:
+            posted = await channel.send("📅 일정을 만드는 중이에요...")
+            await event_store.create(
+                posted.id, payload.guild_id, payload.channel_id,
+                message.author.id, title, start, None,
+            )
+            doc = await event_store.get(posted.id)
+            names = collect_names(message.guild, doc)
+            await posted.edit(content=None, embed=build_embed(doc, names), view=RsvpView())
+        except discord.HTTPException:
+            # 🚨 안 풀면 그 모집글은 **영영** 일정이 못 돼요.
+            await event_store.release_source(message.id)
+            log.warning("일정 모집글 줍기 실패 (source=%s)", message.id, exc_info=True)
 
     # ------------------------------------------------------------------
     @app_commands.command(name="일정", description="약속을 잡고 참가자를 모아요. (예: 토요일 21시 내전)")

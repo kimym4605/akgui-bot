@@ -69,8 +69,16 @@ def restrict_to_channel(
         if interaction.channel_id == allowed_channel_id or parent_id == allowed_channel_id:
             return True
 
+        # ⭐ **막히는 자리에 ❓ 매니저를 붙여요**(2026-10-23). 명령어를 쓰려다 거절당한
+        #    순간이 "쓰는 법을 물어볼" 가장 자연스러운 자리예요. 전용 채널에만 뒀더니
+        #    닷새 동안 실사용이 1건이었어요. → `utils/ask_hint.py`
+        #    🚨 import는 **함수 안에서** 해요 — 모듈 맨 위에 두면 `discord.ui`를 끌어와
+        #       이 모듈을 쓰는 cog 전부와 순환 참조가 생길 수 있어요.
+        from utils.ask_hint import AskHintView
+
         await interaction.response.send_message(
             f"이 명령어는 <#{allowed_channel_id}> 채널(또는 그 안의 스레드)에서만 사용할 수 있어요.",
+            view=AskHintView(),
             ephemeral=True,
         )
         return False

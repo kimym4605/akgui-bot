@@ -50,6 +50,9 @@ log = logging.getLogger(__name__)
 
 CHANNEL_GROUP = "assistant"
 CHANNEL_ENV = "ASSISTANT_CHANNEL_ID"
+# 💡 건의함의 채널 그룹이에요. `cogs/suggestion.py`의 `CHANNEL_GROUP`과 같은 값이어야 해요.
+# 🚨 그 모듈을 import하지 않아요 — 건의함 쪽이 매니저를 다시 참조해서 순환이 생겨요.
+SUGGEST_GROUP = "suggestion"
 
 # 모델은 사용자가 Haiku 4.5로 정했어요(2026-10-18). 질문 하나에 몇 원 수준이에요.
 # ⚠️ Haiku 4.5는 `output_config.effort`와 adaptive thinking을 안 받아요(400). 보내지 마세요.
@@ -73,6 +76,22 @@ def _is_enabled_for_messages() -> bool:
     return os.getenv("ASSISTANT_READ_MESSAGES", "").strip() in {"1", "true", "True", "yes"}
 
 
+def suggest_hint() -> str:
+    """"바라는 것"을 `/건의`로 보내는 한 줄. 채널이 지정돼 있으면 멘션으로 걸어요.
+
+    🚨 **이 다리가 없으면 바람이 아무 데도 안 남아요.** 2026-10-18에 누가 낚시 값
+    조정을 물었는데 AI가 "매니저분께 직접 말씀해 주세요"로 끝냈어요. 그날 건의함은
+    0건이었고, 정작 `💡｜기능-추천방`에는 **평문 건의가 다섯 건 넘게** 쌓여 있었어요.
+    두 기능이 서로를 몰라서 둘 다 안 쓰인 거예요."""
+    channel_id = get_allowed_channel_id(SUGGEST_GROUP)
+    where = f"<#{channel_id}>" if channel_id else "`💡｜기능-추천방`"
+    return (
+        f"{where} 에서 **`/건의`** 로 올려주세요. 번호가 붙어서 "
+        "**반영됐는지 추적**돼요.\n"
+        "-# 그 채널에 그냥 적고, 봇이 달아주는 💡 를 눌러도 똑같이 올라가요."
+    )
+
+
 class Assistant(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -80,6 +99,13 @@ class Assistant(commands.Cog):
         self._client_ready = False
         self._last_call: dict[int, float] = {}
         self._channel_cache: tuple[float, int | None] = (0.0, None)
+
+    async def cog_load(self):
+        # 🚨 "막히는 자리"에 뿌린 ❓ 버튼은 봇이 재시작돼도 살아 있어야 해요.
+        #    여기서 등록하지 않으면 재시작 뒤에 누른 사람이 "상호작용 실패"를 봐요.
+        #    버튼을 보내는 쪽은 `utils/channel_check.py`예요.
+        from utils.ask_hint import AskHintView
+        self.bot.add_view(AskHintView())
 
     # ── Claude 클라이언트 (있으면 쓰고 없으면 규칙만) ──────────────────────
     def _claude(self):
@@ -142,6 +168,10 @@ class Assistant(commands.Cog):
                 value="\n".join(f"· {t.title} — {' · '.join(t.commands[:3])}" for t in related),
                 inline=False,
             )
+        # 🚨 못 답한 질문의 상당수는 "바라는 것"이에요(2026-10-18에 실제로 낚시 값 조정
+        #    얘기가 들어왔는데 "매니저에게 물어보세요"로 끝나 아무 데도 안 남았어요).
+        #    여기서 `/건의`로 다리를 놓어 둬요. → feedback/건의함 0건 문제와 같은 줄기예요.
+        embed.add_field(name="바라는 게 있어서 물으신 거면", value=suggest_hint(), inline=False)
         return embed
 
     async def _ask_claude(self, question: str) -> str | None:
@@ -229,7 +259,7 @@ class Assistant(commands.Cog):
             await assistant_store.refund(user_id)  # 돈이 안 나갔으니 한도도 돌려줘요
             return self._miss_embed(
                 related,
-                "지금은 제가 답을 만들지 못했어요. 아래에서 찾아보시거나 매니저에게 물어봐 주세요.",
+                "지금은 제가 답을 만들지 못했어요. 아래에서 찾아봐 주세요.",
             ), False
 
         embed = discord.Embed(
@@ -238,27 +268,62 @@ class Assistant(commands.Cog):
         )
         return embed, True
 
-    # ── 전용 채널 듣기 ───────────────────────────────────────────────────
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if not _is_enabled_for_messages():
-            return
-        if message.author.bot or message.guild is None:
-            return
-        if message.content is None:
-            return
-
+    # ── 듣는 자리 ────────────────────────────────────────────────────────
+    def _in_assistant_channel(self, message: discord.Message) -> bool:
         channel_id = self._assistant_channel_id()
         if channel_id is None:
-            return  # 아직 `/채널설정 봇 매니저`를 안 했어요 → 아무 데서도 안 들어요
-
+            return False  # 아직 `/채널설정 봇 매니저`를 안 했어요 → 조용한 기본값
         # 그 채널 안의 스레드도 허용해요(다른 명령어의 채널 제한과 같은 규칙이에요).
         parent_id = getattr(message.channel, "parent_id", None)
-        if message.channel.id != channel_id and parent_id != channel_id:
+        return message.channel.id == channel_id or parent_id == channel_id
+
+    def _question_from_mention(self, message: discord.Message) -> str | None:
+        """봇을 멘션한 글에서 질문만 떼어내요. 멘션이 아니면 None이에요.
+
+        ⭐ **어디서든 답하는 자리**(2026-10-23). 전용 채널에만 뒀더니 닷새 동안 실사용이
+        1건이었어요. 멘션은 **불러야만 반응**하니까 채널이 시끄러워지지 않아요.
+
+        🚨 `@everyone`·`@here`로는 안 불려요. 공지 한 줄에 봇이 끼어들면 최악이에요.
+        🚨 역할 멘션도 아니에요 — `message.mentions`는 **사용자 멘션만** 담아요."""
+        if self.bot.user is None or message.mention_everyone:
+            return None
+        if self.bot.user not in message.mentions:
+            return None
+
+        # `<@123>`·`<@!123>` 두 형태를 다 떼어내요(옛 클라이언트가 `!`를 붙여요).
+        text = (message.content or "")
+        for form in (f"<@{self.bot.user.id}>", f"<@!{self.bot.user.id}>"):
+            text = text.replace(form, " ")
+        return text.strip()
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or message.guild is None:
+            return
+        if not message.content:
             return
 
-        question = message.content.strip()
+        # ⒜ 멘션은 **어느 채널에서나** 받아요. 인텐트가 꺼져 있어도 디스코드가
+        #    "봇을 멘션한 글"의 내용은 보내주기 때문에 이 길은 그대로 돼요.
+        question = self._question_from_mention(message)
+
+        # ⒝ 전용 채널에서는 멘션 없이 그냥 적어도 돼요(내용을 읽어야 하니 인텐트 필요).
+        mentioned = question is not None
+        if question is None:
+            if not _is_enabled_for_messages() or not self._in_assistant_channel(message):
+                return
+            question = message.content.strip()
+
         if len(question) < MIN_QUESTION_LEN:
+            # 멘션만 하고 아무것도 안 적은 경우예요. 부른 건 분명하니까 **답은 해요**
+            # (조용히 무시하면 "봇이 고장났나" 싶어서 다시 안 불러요). AI는 안 써요.
+            if mentioned:
+                await message.reply(
+                    "네, 불렀어요? **하고 싶은 걸 말로 적어주세요.** 명령어 이름은 몰라도 돼요.\n"
+                    f"> @{self.bot.user.display_name} 코인 어떻게 모아?\n"
+                    "> 낚시대 어디서 사?",
+                    mention_author=False,
+                )
             return
         if len(question) > MAX_QUESTION_LEN:
             await message.reply(

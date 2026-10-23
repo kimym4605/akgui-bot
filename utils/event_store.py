@@ -28,6 +28,11 @@ from utils.pokemon_store import _db
 log = logging.getLogger(__name__)
 
 _events = _db["events"]
+# 평문 줍기 전용. `_id`가 **원본(사람이 쓴) 모집글 id**예요.
+# 🚨 일정 문서의 `_id`는 봇이 새로 올릴 메시지 id라서 "이미 등록됐나"를 그걸로는
+#    막을 수 없어요 — 두 사람이 동시에 📅 를 누르면 같은 모집이 두 번 올라가요.
+#    `utils/suggestion_store.py`가 같은 이유로 같은 구조예요.
+_claims = _db["event_claims"]
 
 KST = timezone(timedelta(hours=9))
 
@@ -40,6 +45,23 @@ KEEP_AFTER_HOURS = 6
 
 def _mid(message_id) -> str:
     return str(message_id)
+
+
+def _claim_source_sync(source_id) -> bool:
+    """이 모집글을 내가 찜했으면 True. 누가 이미 찜했으면 False예요."""
+    from pymongo.errors import DuplicateKeyError
+    try:
+        _claims.insert_one({
+            "_id": _mid(source_id),
+            "at": datetime.now(timezone.utc),
+        })
+        return True
+    except DuplicateKeyError:
+        return False
+
+
+def _release_source_sync(source_id) -> None:
+    _claims.delete_one({"_id": _mid(source_id)})
 
 
 def _create_sync(message_id, guild_id, channel_id, host_id, title: str,
@@ -151,6 +173,26 @@ async def create(message_id, guild_id, channel_id, host_id, title, start_at, cap
     await asyncio.to_thread(
         _create_sync, message_id, guild_id, channel_id, host_id, title, start_at, capacity
     )
+
+
+async def claim_source(source_id) -> bool:
+    """평문 줍기 전에 모집글을 찜해요. False면 이미 일정이 된 글이에요.
+
+    🚨 **조회로 막으려 하지 마세요** — 확인과 insert 사이가 비어서, 동시에 📅 를
+    누르면 같은 모집이 두 번 올라가요."""
+    try:
+        return await asyncio.to_thread(_claim_source_sync, source_id)
+    except Exception:  # noqa: BLE001
+        log.warning("일정 원본 찜 실패 (source=%s)", source_id, exc_info=True)
+        return False  # DB가 흔들릴 때는 **중복을 만드는 쪽보다 안 올리는 쪽**이 나아요
+
+
+async def release_source(source_id) -> None:
+    """메시지를 못 올렸을 때 찜을 풀어요(안 풀면 그 모집은 영영 못 올려요)."""
+    try:
+        await asyncio.to_thread(_release_source_sync, source_id)
+    except Exception:  # noqa: BLE001
+        log.warning("일정 원본 찜 해제 실패 (source=%s)", source_id, exc_info=True)
 
 
 async def get(message_id) -> dict | None:
