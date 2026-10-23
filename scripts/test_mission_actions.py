@@ -319,6 +319,193 @@ check("mission.complete가 모듈 함수", callable(getattr(mission_cog, "comple
 check("mission.on_action이 모듈 함수", callable(getattr(mission_cog, "on_action", None)))
 
 
+print("\n9) ⭐ 호출부를 **실제로 실행**해서 진행도가 오르는지 (문자열 검사로는 못 잡는 것)")
+# 🚨 7)은 "소스에 호출이 적혀 있다"까지만 봐요. 그런데 `on_action`은 **예외를 삼켜요**.
+#    둘이 겹치면 훅이 조용히 실패해도 완료가 0건으로만 보이고, "아무도 안 해서 0건"인지
+#    "버그로 0건"인지 구분이 안 돼요. 전에 주간 대회 훅이 정확히 그랬어요(2026-10-18).
+#    그래서 여기서는 **진짜 함수를 불러서** 가짜 DB의 진행도가 변했는지 확인해요.
+import discord
+
+from utils import coin_wallet, notify_prefs, riot_account_store
+
+granted = []          # coin_wallet.add 호출 기록
+sent = []             # 채널 알림 기록
+
+
+def _mk_async(fn):
+    async def _f(*a, **k):
+        return fn(*a, **k)
+    return _f
+
+
+# 🚨 스텁은 **미션 경로 밖**만 덮어요. `on_action -> ensure_today -> progress -> complete`는
+#    실제 코드가 돌아야 의미가 있어요(스텁을 크게 잡으면 그 안의 버그를 못 잡아요).
+def _patch_outside_mission():
+    coin_wallet.add = _mk_async(lambda uid, amount, reason=None: granted.append((str(uid), amount, reason)) or 99)
+    coin_wallet.get_balance = _mk_async(lambda uid: 0)   # 실패 안내문이 읽어요
+    notify_prefs.is_enabled = _mk_async(lambda uid, kind: True)
+    riot_account_store.get_account = lambda uid: None   # 비연동자로 둬요
+
+
+_patch_outside_mission()
+
+
+class FakeChannel:
+    async def send(self, content=None, **kw):
+        sent.append(content)
+
+
+class FakeInter:
+    """미션 훅이 쓰는 것만 - `user.id` · `channel`. user는 Member가 아니라 비성인이에요."""
+
+    def __init__(self, uid):
+        self.user = type("U", (), {"id": uid, "bot": False})()
+        self.channel = FakeChannel()
+        self.followup = type("F", (), {"send": _mk_async(lambda *a, **k: None)})()
+        self.response = type("R", (), {
+            "defer": _mk_async(lambda *a, **k: None),
+            "send_message": _mk_async(lambda *a, **k: None),
+        })()
+
+    async def edit_original_response(self, **kw):
+        return None
+
+
+def install_doc(uid, picks, done=None, progress=None):
+    fake.docs[str(uid)] = {
+        "_id": str(uid), "date": mission_store.today_iso(),
+        "picks": list(picks), "progress": dict(progress or {}), "done": list(done or []),
+    }
+
+
+def prog_of(uid, key):
+    return fake.docs[str(uid)].get("progress", {}).get(key, 0)
+
+
+def done_of(uid):
+    return fake.docs[str(uid)].get("done", [])
+
+
+# ── 🎰 도박: take_bet (게임 4종의 공통 입구) ────────────────────────────
+from cogs import casino as casino_cog
+from utils import casino_store
+
+install_doc(9001, ["play_gamble", "use_map", "use_rank"])
+granted.clear(); sent.clear()
+casino_store.bet_limit_today = _mk_async(lambda uid: (5, 0))
+casino_store.try_wager = _mk_async(lambda uid, amt: (True, amt))
+casino_store.refund_wager = _mk_async(lambda uid, amt: None)
+coin_wallet.spend = _mk_async(lambda uid, amt, reason=None: True)
+
+ok, err, limited = asyncio.run(casino_cog.take_bet(FakeInter(9001), 1))
+check("🎰 베팅이 성립하면 도박 미션이 완료된다",
+      ok is True and "play_gamble" in done_of(9001), f"ok={ok} done={done_of(9001)}")
+check("🎰 코인이 실제로 지급됐다", any(g[0] == "9001" for g in granted), str(granted))
+check("🎰 완료 알림이 채널로 갔다", any("한 판 걸어보기" in (s or "") for s in sent), str(sent))
+
+# 🚨 **잔액 부족으로 못 걸었으면 올라가면 안 돼요** (= COMMAND_MISSIONS를 피한 이유)
+install_doc(9002, ["play_gamble", "use_map", "use_rank"])
+coin_wallet.spend = _mk_async(lambda uid, amt, reason=None: False)
+ok2, _, _ = asyncio.run(casino_cog.take_bet(FakeInter(9002), 1))
+check("🚨 잔액이 부족해 못 걸면 미션이 안 올라간다",
+      ok2 is False and "play_gamble" not in done_of(9002), f"ok={ok2} done={done_of(9002)}")
+
+# 🚨 한 판 한도를 넘겨도 올라가면 안 돼요
+install_doc(9003, ["play_gamble", "use_map", "use_rank"])
+coin_wallet.spend = _mk_async(lambda uid, amt, reason=None: True)
+ok3, _, _ = asyncio.run(casino_cog.take_bet(FakeInter(9003), 999))
+check("🚨 한도를 넘겨 거절되면 미션이 안 올라간다",
+      ok3 is False and "play_gamble" not in done_of(9003), f"ok={ok3} done={done_of(9003)}")
+
+# 🚨 하루 베팅 한도를 다 썼을 때도
+install_doc(9004, ["play_gamble", "use_map", "use_rank"])
+casino_store.try_wager = _mk_async(lambda uid, amt: (False, 20))
+casino_store.state_today = _mk_async(lambda uid: (20, 20))
+ok4, _, _ = asyncio.run(casino_cog.take_bet(FakeInter(9004), 1))
+check("🚨 하루 한도를 다 썼으면 미션이 안 올라간다",
+      ok4 is False and "play_gamble" not in done_of(9004), f"ok={ok4} done={done_of(9004)}")
+
+
+# ── 📅 출석: /출석 핸들러 ──────────────────────────────────────────────
+from cogs import attendance as attend_cog
+from utils import attend_service
+
+cog = attend_cog.Attendance.__new__(attend_cog.Attendance)
+handler = attend_cog.Attendance.do_attend.callback
+
+install_doc(9101, ["attend_check", "use_map", "use_rank"])
+granted.clear()
+attend_service.attend = _mk_async(lambda uid: (True, {
+    "coin": 10, "coinGain": 1, "streak": 3, "streakBonus": 0, "weeklyBonus": 0,
+}))
+asyncio.run(handler(cog, FakeInter(9101)))
+check("📅 출석에 성공하면 출석 미션이 완료된다",
+      "attend_check" in done_of(9101), str(done_of(9101)))
+
+# 🚨 **이미 출석한 사람이 다시 쳐도** 명령어는 정상 종료돼요 - 그때 올라가면 공짜 1코인이에요
+install_doc(9102, ["attend_check", "use_map", "use_rank"])
+attend_service.attend = _mk_async(lambda uid: (False, {"coin": 10, "streak": 3}))
+asyncio.run(handler(cog, FakeInter(9102)))
+check("🚨 이미 출석했으면 미션이 안 올라간다 (공짜 완료 방지)",
+      "attend_check" not in done_of(9102), str(done_of(9102)))
+
+
+# ── 🎣 낚시: finish_cast ──────────────────────────────────────────────
+from cogs import fishing as fishing_cog
+from utils import fishing_store
+
+fishing_store.record_cast = _mk_async(lambda uid, key, size=None: None)
+fishing_store.give_back_rod = _mk_async(lambda uid: None)
+fishing_store.get = _mk_async(lambda uid: {"tank": {}, "pieces": 0, "dust": 0,
+                                           "casts": 0, "caught": 0, "sold": 0, "best": None})
+fishing_store.cast_quota = _mk_async(lambda uid: (1, 20))   # 남은 캐스트 안내문이 읽어요
+SOME_FISH = next(iter(fishing_cog.BY_KEY))
+
+
+class FakeView:
+    def __init__(self, result, caught=None):
+        self.result = result
+        self.caught = caught
+        self.size = fishing_cog.fish_data.SIZE_BY_KEY[caught][0] if caught else None
+        self.rod_left = 5
+
+    def stop(self):
+        pass
+
+
+install_doc(9201, ["catch_fish", "use_map", "use_rank"])
+asyncio.run(fishing_cog.finish_cast(FakeInter(9201), FakeView("ok", SOME_FISH)))
+check("🎣 한 마리 낚으면 진행도가 1 오른다", prog_of(9201, "catch_fish") == 1,
+      str(prog_of(9201, "catch_fish")))
+
+# 🚨 놓친 판은 하루 횟수를 돌려받으니 **안 세는 게** 맞아요
+asyncio.run(fishing_cog.finish_cast(FakeInter(9201), FakeView("early")))
+asyncio.run(fishing_cog.finish_cast(FakeInter(9201), FakeView("afk")))
+check("🚨 놓친 판(early·afk)은 진행도를 올리지 않는다", prog_of(9201, "catch_fish") == 1,
+      str(prog_of(9201, "catch_fish")))
+
+# 3마리째에 완료 + 코인
+granted.clear()
+asyncio.run(fishing_cog.finish_cast(FakeInter(9201), FakeView("ok", SOME_FISH)))
+check("🎣 2마리째는 아직 미완료", "catch_fish" not in done_of(9201), str(done_of(9201)))
+asyncio.run(fishing_cog.finish_cast(FakeInter(9201), FakeView("ok", SOME_FISH)))
+check("🎣 3마리째에 완료되고 코인이 지급된다",
+      "catch_fish" in done_of(9201) and any(g[0] == "9201" for g in granted),
+      f"done={done_of(9201)} granted={granted}")
+
+# 4마리째엔 코인이 또 가면 안 돼요
+granted.clear()
+asyncio.run(fishing_cog.finish_cast(FakeInter(9201), FakeView("ok", SOME_FISH)))
+check("🚨 4마리째엔 코인이 다시 지급되지 않는다", not granted, str(granted))
+
+# 배정 안 된 사람은 낚아도 아무 일 없어야 해요
+install_doc(9202, ["use_map", "use_rank", "use_myshop"])
+granted.clear()
+asyncio.run(fishing_cog.finish_cast(FakeInter(9202), FakeView("ok", SOME_FISH)))
+check("낚시 미션이 배정 안 된 사람은 낚아도 코인이 없다",
+      not granted and not done_of(9202), f"granted={granted} done={done_of(9202)}")
+
+
 # ==================================================================
 # 🚨 요약은 **맨 마지막**이어야 해요. 뒤에 섹션을 붙이면 그 FAIL이 집계되지 않아
 #    종료코드가 0으로 나오고 배포 관문이 그냥 통과해요 (2026-10-19에 실제로 그랬어요).
