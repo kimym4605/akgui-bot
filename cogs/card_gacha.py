@@ -21,6 +21,10 @@
 판단은 `_is_card_channel`이 해요. 실패·환불 안내는 **장소와 무관하게 늘 본인에게만** 보내요
 (남의 잔액 부족을 채널에 띄울 이유가 없어요).
 
+단 🟡 **레전드는 어디서 뽑았든 뽑기방에 홍보**해요 - 0.5%짜리가 본인에게만 보이고 끝나면
+서버에서 가장 귀한 순간이 아무도 모르게 지나가요. 그리고 **나쁜말악귀가 나오면 🥈 부방장을
+멘션**해요(2026-10-27 사용자 지시). `announce_legend` 주석을 보세요.
+
 ## 수치 (2026-10-17 사용자 확정)
 
 | 항목 | 값 |
@@ -81,10 +85,32 @@ from utils.card_store import (
     PULL_PRICE,
 )
 from utils.channel_check import get_allowed_channel_id, restrict_to_channel
+from utils.staff_check import normalize_role_name
 
 log = logging.getLogger(__name__)
 
 COIN_LOG_NOTE = "카드뽑기"
+
+# ============================================================
+# 🟡 레전드 홍보 (2026-10-27 사용자 지시)
+#
+# 레전드는 한 장당 0.5%예요. 그런데 `/출석`의 🎴 버튼으로 뽑으면 결과가 **본인에게만**
+# 보여서(`_is_card_channel` 주석 참고), 서버에서 가장 귀한 순간이 아무도 모르게 지나가요.
+# 그래서 레전드가 나오면 **뽑기방에 따로 알려줘요.**
+#
+# ⚠️ 뽑기방에서 공개로 뽑은 경우엔 결과가 이미 그 채널에 올라가 있어요. 같은 걸 두 번
+#    띄우면 자기 결과 바로 아래에 "축하해요"가 붙는 꼴이라, 그때는 **홍보를 건너뛰어요**
+#    (🥈 부방장 멘션만 필요하면 그 한 줄만 보내요).
+# ⚠️ 홍보가 실패해도 **뽑기는 이미 끝났어요.** 절대 예외를 올리지 않아요(코인은 나갔고
+#    카드는 들어간 상태라, 여기서 터지면 유저에겐 "실패한 뽑기"로 보여요).
+# ============================================================
+# 나쁜말악귀(l02)가 나오면 🥈 부방장을 멘션해요.
+NAUGHTY_CARD_KEY = "l02"
+
+# 역할은 **이모지 뗀 이름으로 정확히 일치** 비교해요 — ID로 박으면 역할을 지웠다 다시
+# 만들 때 조용히 멘션이 사라져요(`utils/staff_check.py` 맨 위 설명과 같은 이유예요).
+# 🚨 부분 일치로 하면 안 돼요: `방장` ⊂ `부방장`이라 👑 방장까지 걸려요.
+VICE_LEADER_ROLE_NAME = "부방장"
 
 
 def _is_card_channel(interaction: discord.Interaction) -> bool:
@@ -179,6 +205,88 @@ def _result_embed(
     return embed
 
 
+def _vice_leader_role(guild: discord.Guild) -> discord.Role | None:
+    """🥈 부방장 역할. 못 찾으면 None(멘션 없이 홍보만 올라가요)."""
+    for role in guild.roles:
+        if normalize_role_name(role.name) == VICE_LEADER_ROLE_NAME:
+            return role
+    log.warning("🥈 부방장 역할을 못 찾았어요 - 나쁜말악귀 멘션을 건너뛰어요")
+    return None
+
+
+def _legend_embed(member: discord.abc.User, legends: list[dict],
+                  summary: dict | None) -> discord.Embed:
+    """뽑기방에 올릴 홍보 임베드. 뽑은 사람은 멘션으로 적지만 핑은 안 쏴요
+    (`allowed_mentions`에서 users를 꺼둬요 - 본인은 이미 결과를 봤어요)."""
+    names = " · ".join(f"**{d['name']}**{' 🆕' if d['is_new'] else ''}" for d in legends)
+    title = (f"🟡 레전드 출현! {legends[0]['name']}" if len(legends) == 1
+             else f"🟡 레전드 {len(legends)}장 출현!")
+    embed = discord.Embed(
+        title=title,
+        description=f"{member.mention} 님이 {names} 를 뽑았어요!",
+        color=GRADE_COLOR["레전드"],
+    )
+    if summary:
+        legend = summary["per_grade"]["레전드"]
+        embed.add_field(
+            name="레전드 도감",
+            value=f"**{legend['owned']}/{legend['total']}종**",
+            inline=True,
+        )
+    if any(d["pity"] for d in legends):
+        embed.add_field(name="천장", value=f"⭐ {PITY_DRAWS}장 확정", inline=True)
+    embed.set_footer(
+        text=f"레전드는 한 장당 {GRADE_WEIGHTS['레전드']}% · /카드뽑기 로 도전해봐요"
+    )
+    return embed
+
+
+async def announce_legend(interaction: discord.Interaction, drawn: list[dict], *,
+                          shown_publicly: bool, summary: dict | None = None) -> None:
+    """레전드를 뽑았으면 뽑기방에 홍보해요. 나쁜말악귀면 🥈 부방장을 멘션해요.
+
+    ⚠️ 부르는 쪽에서 반드시 `try/except`로 감싸주세요(위 설명 참고)."""
+    legends = [d for d in drawn if d["grade"] == "레전드"]
+    if not legends:
+        return
+
+    guild = interaction.guild
+    if guild is None:
+        return  # DM이면 홍보할 곳이 없어요
+
+    channel_id = get_allowed_channel_id("card", "CARD_CHANNEL_ID")
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if channel is None:
+        # 채널 지정이 아예 없으면 결과가 어차피 전부 공개라 홍보할 자리가 따로 없어요.
+        log.info("🟡 레전드가 나왔는데 뽑기방을 못 찾아서 홍보를 건너뛰어요 (channel_id=%s)",
+                 channel_id)
+        return
+
+    role = (_vice_leader_role(guild)
+            if any(d["key"] == NAUGHTY_CARD_KEY for d in legends) else None)
+    content = (f"{role.mention} 🗯️ **나쁜말악귀**가 깨어났어요!" if role else None)
+    mentions = discord.AllowedMentions(
+        everyone=False, users=False, roles=[role] if role else False)
+
+    # 뽑기방에서 공개로 뽑았으면 결과가 이미 여기 있어요. 멘션만 필요하면 그 한 줄만.
+    if shown_publicly and _is_card_channel(interaction):
+        if content:
+            await channel.send(content=content, allowed_mentions=mentions)
+        return
+
+    embed = _legend_embed(interaction.user, legends, summary)
+    png = await card_render.render_pull(legends)
+    file = None
+    if png is not None:
+        name = f"legend_{interaction.user.id}.png"
+        file = discord.File(io.BytesIO(png), filename=name)
+        embed.set_image(url=f"attachment://{name}")
+    await channel.send(content=content, embed=embed, file=file,
+                       allowed_mentions=mentions)
+    log.info("🟡 레전드 홍보: user=%s cards=%s", interaction.user.id,
+             [d["key"] for d in legends])
+
+
 async def do_pull(interaction: discord.Interaction, *, pulls: int = 1,
                   ephemeral: bool = False):
     """뽑기 `pulls`회(= `pulls * CARDS_PER_PULL`장). `/카드뽑기`와 🎴 버튼이 같이 써요.
@@ -245,11 +353,18 @@ async def do_pull(interaction: discord.Interaction, *, pulls: int = 1,
     if png is None:
         # 이미지가 실패해도 뽑은 건 이미 들어갔어요. 글자로라도 보여줘요.
         await interaction.followup.send(embed=embed, view=view, ephemeral=ephemeral)
-        return
+    else:
+        file = discord.File(io.BytesIO(png), filename=f"gacha_{user_id}.png")
+        embed.set_image(url=f"attachment://gacha_{user_id}.png")
+        await interaction.followup.send(embed=embed, file=file, view=view,
+                                        ephemeral=ephemeral)
 
-    file = discord.File(io.BytesIO(png), filename=f"gacha_{user_id}.png")
-    embed.set_image(url=f"attachment://gacha_{user_id}.png")
-    await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=ephemeral)
+    # 4) 🟡 레전드면 뽑기방에 홍보해요. 결과는 이미 보냈으니 여기서 터져도 조용히 넘겨요.
+    try:
+        await announce_legend(interaction, drawn, shown_publicly=not ephemeral,
+                              summary=summary)
+    except Exception:
+        log.exception("🟡 레전드 홍보 실패 - 뽑기 자체는 정상이에요 (user=%s)", user_id)
 
 
 # ============================================================

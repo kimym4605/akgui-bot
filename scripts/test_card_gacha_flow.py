@@ -89,6 +89,9 @@ class FakeInteraction:
         self.response = FakeResponse()
         self.channel_id = channel_id
         self.channel = type("Ch", (), {"parent_id": parent_id})()
+        # 🟡 레전드 홍보는 길드가 없으면 조용히 넘어가요. 이 테스트의 관심사는 환불이라
+        # 홍보는 꺼둬요 — 홍보 자체는 `test_card_legend_announce.py`가 봐요.
+        self.guild = None
 
 
 def run(coro):
