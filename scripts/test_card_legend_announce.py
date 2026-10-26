@@ -10,15 +10,19 @@
 
 여기서 확인하는 것:
   1) 레전드가 없으면 뽑기방에 아무것도 안 보낸다 (평소 뽑기를 시끄럽게 만들지 않기)
-  2) 다른 채널(`#출석체크` 등)에서 뽑은 레전드는 **뽑기방에 홍보**된다
-  3) 뽑기방에서 공개로 뽑았으면 **홍보를 건너뛴다** (같은 걸 두 번 띄우지 않기)
+  2) 다른 채널에서 뽑은 레전드는 **뽑기방에 홍보**된다 (카드 그림까지)
+  3) 🚨 **뽑기방에서 공개로 뽑아도 홍보는 올라간다** — 그림만 생략한다
   4) 나쁜말악귀면 🥈 부방장을 멘션한다 — `allowed_mentions.roles`에도 그 역할만 들어간다
-  5) 뽑기방 공개 뽑기 + 나쁜말악귀면 **멘션 한 줄만** 간다 (임베드 중복 없이)
-  6) 멘션 대상은 👑 방장이 아니다 (`방장` ⊂ `부방장` 부분일치 함정)
-  7) 🥈 부방장 역할이 없어도 홍보는 올라간다 (멘션만 빠진다)
-  8) 뽑기방을 못 찾으면 조용히 넘어간다
-  9) 홍보가 터져도 `do_pull`은 성공으로 끝난다 (코인은 나갔고 카드는 들어갔으니까)
- 10) 뽑은 사람에게는 핑이 안 간다 (`allowed_mentions.users` 꺼짐)
+  5) 멘션 대상은 👑 방장이 아니다 (`방장` ⊂ `부방장` 부분일치 함정)
+  6) 🥈 부방장 역할이 없어도 홍보는 올라간다 (멘션만 빠진다)
+  7) 뽑기방을 못 찾으면 조용히 넘어간다
+  8) 홍보가 터져도 `do_pull`은 성공으로 끝난다 (코인은 나갔고 카드는 들어갔으니까)
+  9) 뽑은 사람에게는 핑이 안 간다 (`allowed_mentions.users` 꺼짐)
+
+🚨 3)이 이 파일에서 가장 중요한 검사예요. 처음엔 "공개로 뽑았으면 결과가 이미 보이니
+홍보를 건너뛴다"고 만들었는데, 그 전제(`/출석`의 🎴 버튼으로 뽑으면 본인에게만 보인다)는
+**2026-10-17에 그 버튼이 제거되면서 사라졌어요.** 지금 뽑기는 거의 전부 뽑기방 공개
+뽑기라, 건너뛰기를 두면 이 기능이 **한 번도 안 터져요.** 그 회귀를 여기서 막아요.
 """
 import asyncio
 import os
@@ -147,16 +151,34 @@ if ch.sent:
           str(ch.sent[0]["content"]))
 
 print()
-print("[3] 뽑기방에서 공개로 뽑았으면 홍보를 건너뛴다 (중복 방지)")
+print("[3] 🚨 뽑기방에서 공개로 뽑아도 홍보는 올라간다 (그림만 생략)")
+print("    - 지금 뽑기의 거의 전부가 이 경로예요. 건너뛰면 기능이 안 터져요.")
 inter, ch = make(channel_id=CARD_CHANNEL)
 run(gacha.announce_legend(inter, [card("l06")], shown_publicly=True, summary=SUMMARY))
-check("같은 채널에 두 번 안 띄운다", len(ch.sent) == 0, f"{len(ch.sent)}건")
+check("공개 뽑기에서도 홍보가 간다", len(ch.sent) == 1, f"{len(ch.sent)}건")
+if ch.sent:
+    embed = ch.sent[0]["embed"]
+    check("임베드는 그대로 있다", embed is not None and "수호악귀" in embed.title)
+    check("같은 그림을 두 번 안 띄운다", ch.sent[0]["file"] is None
+          and embed.image.url is None, str(embed.image.url))
 
 print()
-print("[3-1] 뽑기방에서 뽑았어도 결과가 본인에게만 보였으면 홍보한다")
-inter, ch = make(channel_id=CARD_CHANNEL)
+print("[3-1] 다른 채널(본인에게만 보인 뽑기)에서는 그림까지 붙는다")
+inter, ch = make(channel_id=OTHER_CHANNEL)
+
+
+async def with_image(drawn):
+    return b"PNG"
+
+
+gacha.card_render.render_pull = with_image
 run(gacha.announce_legend(inter, [card("l06")], shown_publicly=False, summary=SUMMARY))
-check("ephemeral이면 뽑기방에서도 홍보가 간다", len(ch.sent) == 1, f"{len(ch.sent)}건")
+check("그림이 첨부된다", bool(ch.sent) and ch.sent[0]["file"] is not None)
+if ch.sent:
+    check("임베드가 그 그림을 가리킨다",
+          (ch.sent[0]["embed"].image.url or "").startswith("attachment://"),
+          str(ch.sent[0]["embed"].image.url))
+gacha.card_render.render_pull = no_image
 
 print()
 print("[4] 나쁜말악귀 -> 🥈 부방장 멘션")
@@ -179,13 +201,14 @@ if ch.sent:
     check("임베드도 같이 간다", ch.sent[0]["embed"] is not None)
 
 print()
-print("[5] 뽑기방 공개 뽑기 + 나쁜말악귀 -> 멘션 한 줄만")
+print("[5] 뽑기방 공개 뽑기 + 나쁜말악귀 -> 멘션도 같이 간다")
 inter, ch = make(channel_id=CARD_CHANNEL)
 run(gacha.announce_legend(inter, [card("l02")], shown_publicly=True, summary=SUMMARY))
 check("한 건만 간다", len(ch.sent) == 1, f"{len(ch.sent)}건")
 if ch.sent:
-    check("임베드 없이 멘션 줄만 간다", ch.sent[0]["embed"] is None)
-    check("멘션은 들어있다", "<@&" in (ch.sent[0]["content"] or ""))
+    check("멘션이 들어있다", "<@&" in (ch.sent[0]["content"] or ""),
+          str(ch.sent[0]["content"]))
+    check("임베드도 같이 간다", ch.sent[0]["embed"] is not None)
 
 print()
 print("[6] 👑 방장을 멘션하지 않는다 (`방장` ⊂ `부방장` 부분일치 함정)")

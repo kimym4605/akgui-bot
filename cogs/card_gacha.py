@@ -21,9 +21,10 @@
 판단은 `_is_card_channel`이 해요. 실패·환불 안내는 **장소와 무관하게 늘 본인에게만** 보내요
 (남의 잔액 부족을 채널에 띄울 이유가 없어요).
 
-단 🟡 **레전드는 어디서 뽑았든 뽑기방에 홍보**해요 - 0.5%짜리가 본인에게만 보이고 끝나면
-서버에서 가장 귀한 순간이 아무도 모르게 지나가요. 그리고 **나쁜말악귀가 나오면 🥈 부방장을
-멘션**해요(2026-10-27 사용자 지시). `announce_legend` 주석을 보세요.
+단 🟡 **레전드(0.5%)는 어디서 뽑았든 뽑기방에 홍보**해요 - 서버에서 가장 귀한 순간이라
+한 줄 띄워줘요. 그리고 **나쁜말악귀가 나오면 🥈 부방장을 멘션**해요(2026-10-27 사용자 지시).
+`announce_legend` 주석을 보세요 - "공개 뽑기면 건너뛴다"를 넣었다가 **그 경로가 지금의
+전부여서** 되돌린 기록이 있어요.
 
 ## 수치 (2026-10-17 사용자 확정)
 
@@ -94,13 +95,18 @@ COIN_LOG_NOTE = "카드뽑기"
 # ============================================================
 # 🟡 레전드 홍보 (2026-10-27 사용자 지시)
 #
-# 레전드는 한 장당 0.5%예요. 그런데 `/출석`의 🎴 버튼으로 뽑으면 결과가 **본인에게만**
-# 보여서(`_is_card_channel` 주석 참고), 서버에서 가장 귀한 순간이 아무도 모르게 지나가요.
-# 그래서 레전드가 나오면 **뽑기방에 따로 알려줘요.**
+# 레전드는 한 장당 0.5%예요. 그게 나오면 **뽑기방에 홍보**해요.
 #
-# ⚠️ 뽑기방에서 공개로 뽑은 경우엔 결과가 이미 그 채널에 올라가 있어요. 같은 걸 두 번
-#    띄우면 자기 결과 바로 아래에 "축하해요"가 붙는 꼴이라, 그때는 **홍보를 건너뛰어요**
-#    (🥈 부방장 멘션만 필요하면 그 한 줄만 보내요).
+# 🚨 **"공개로 뽑았으면 결과가 이미 보이니 건너뛴다"고 만들었다가 되돌렸어요.**
+#    그 판단은 `/출석`에 🎴 버튼이 달려 있던 시절의 지형을 전제로 했는데, 그 버튼은
+#    **2026-10-17에 제거됐어요**(`cogs/attendance.py` 주석). `/카드뽑기`는 뽑기방
+#    전용이고 결과에 달린 "한 번 더"도 거기서 눌리니, 지금 뽑기는 **거의 전부 뽑기방
+#    공개 뽑기**예요. 그래서 건너뛰기를 넣으면 이 기능이 **한 번도 안 터져요.**
+#    → 기능을 "언제 안 하는지"로 조건을 달 때는 그 조건이 지금도 일어나는 일인지
+#      **경로를 직접 확인할 것.** 옛 주석의 전제를 그대로 믿으면 죽은 코드가 돼요.
+#
+# ⚠️ 결과가 이미 그 채널에 공개로 올라갔을 때는 **카드 그림만 생략**해요(같은 그림이
+#    위아래로 두 번 뜨니까요). 홍보 자체는 올라가요.
 # ⚠️ 홍보가 실패해도 **뽑기는 이미 끝났어요.** 절대 예외를 올리지 않아요(코인은 나갔고
 #    카드는 들어간 상태라, 여기서 터지면 유저에겐 "실패한 뽑기"로 보여요).
 # ============================================================
@@ -268,19 +274,17 @@ async def announce_legend(interaction: discord.Interaction, drawn: list[dict], *
     mentions = discord.AllowedMentions(
         everyone=False, users=False, roles=[role] if role else False)
 
-    # 뽑기방에서 공개로 뽑았으면 결과가 이미 여기 있어요. 멘션만 필요하면 그 한 줄만.
-    if shown_publicly and _is_card_channel(interaction):
-        if content:
-            await channel.send(content=content, allowed_mentions=mentions)
-        return
+    # 결과가 이미 이 채널에 공개로 올라갔으면 그림만 생략해요(위 설명 참고).
+    already_shown = shown_publicly and _is_card_channel(interaction)
 
     embed = _legend_embed(interaction.user, legends, summary)
-    png = await card_render.render_pull(legends)
     file = None
-    if png is not None:
-        name = f"legend_{interaction.user.id}.png"
-        file = discord.File(io.BytesIO(png), filename=name)
-        embed.set_image(url=f"attachment://{name}")
+    if not already_shown:
+        png = await card_render.render_pull(legends)
+        if png is not None:
+            name = f"legend_{interaction.user.id}.png"
+            file = discord.File(io.BytesIO(png), filename=name)
+            embed.set_image(url=f"attachment://{name}")
     await channel.send(content=content, embed=embed, file=file,
                        allowed_mentions=mentions)
     log.info("🟡 레전드 홍보: user=%s cards=%s", interaction.user.id,
