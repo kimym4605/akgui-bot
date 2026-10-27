@@ -351,10 +351,24 @@ from pathlib import Path as _Path  # noqa: E402
 _shop_src = _Path(os.path.join(BOT_DIR, "cogs/akgui_shop.py")).read_text(encoding="utf-8")
 _shop_tree = _ast.parse(_shop_src)
 
+#
+# 🚨 **클래스 안만 보면 안 돼요** (2026-10-27에 실제로 느슨해질 뻔했어요).
+#    🪙 상설 패널을 붙이면서 품목 동작을 `act_*` **모듈 함수**로 뺐어요. 그 결과
+#    클래스 메서드는 `await act_buy_rod(interaction)` 한 줄짜리 위임이 됐는데,
+#    이 검사가 클래스만 보고 있으면 **진짜 로직을 통째로 안 본 채 초록불**이 돼요.
+#    → [[feedback_loose_assertions_false_pass]]
+_module_fns = [f for f in _shop_tree.body
+               if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))]
+_module_fn_names = {f.name for f in _module_fns}
 _handlers = [(c.name, f) for c in _shop_tree.body if isinstance(c, _ast.ClassDef)
              for f in c.body if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))
              and any(a.arg == "interaction" for a in f.args.args)]
+_handlers += [("(모듈)", f) for f in _module_fns
+              if any(a.arg == "interaction" for a in f.args.args)]
 check("상호작용 핸들러를 찾았다", len(_handlers) >= 8, f"{len(_handlers)}개")
+_acts = sorted(f.name for o, f in _handlers if f.name.startswith("act_"))
+check("🚨 모듈 함수 act_*가 검사 대상에 들어왔다 (위임만 보고 통과하지 않게)",
+      len(_acts) >= 6, f"{len(_acts)}개: {_acts}")
 
 # ⚠️ `interaction_check`는 예외예요 - 거절 안내만 하고 DB를 안 쳐요. 거기서 defer하면
 #    "받아놓고 아무것도 안 한" 빈 응답이 남아요.
@@ -380,7 +394,11 @@ for _owner, _fn in _handlers:
     #    DB를 안 치고 바로 답하는 안내문(`ShopView.title`)은 `ack` 없이
     #    `response.send_message` 한 방이 맞아요 - defer를 끼우면 왕복만 늘어요.
     _is_direct_reply = getattr(getattr(_func, "value", None), "attr", "") == "response"
-    if _name == "ack" or _is_direct_reply:
+    # ⭐ **같은 파일의 모듈 함수로 위임하는 것도 맞아요** — 그 함수가 바로 위
+    #    `_handlers`에 들어와 **따로 검사되기 때문**이에요. 이름을 실제 함수 목록과
+    #    맞춰보니, `act_byu_rod`처럼 오타를 내면 여기서 걸려요.
+    _is_delegate = _name in _module_fn_names
+    if _name == "ack" or _is_direct_reply or _is_delegate:
         _ok_list.append(f"{_owner}.{_fn.name}")
     else:
         _late.append(f"{_owner}.{_fn.name} → {_name}():{_awaits[0].lineno}")
@@ -539,6 +557,110 @@ try:
 finally:
     for (_m, _n), _fn in _orig.items():
         setattr(_m, _n, _fn)
+
+# ==================================================================
+print("\n13) 🪙 상설 패널 (공개 메시지 + 영속 버튼)")
+# ------------------------------------------------------------------
+# 🚨 이 섹션은 **요약 블록 위**에 있어야 해요. 아래에 붙이면 FAIL이 찍혀도
+#    `sys.exit(1)`을 지나쳐서 **종료코드가 0**이 되고 배포 관문이 통과해요.
+#    → [[feedback_handrolled_test_summary_at_end]]
+from cogs.akgui_shop import ShopPanelView, _item_fields, _panel_embed  # noqa: E402
+
+_panel = ShopPanelView()
+layout_ok(_panel, "패널")
+
+# 🚨 영속 뷰 3조건: timeout=None + 버튼마다 고정 custom_id + bot.add_view.
+check("패널에 타임아웃이 없다 (영속)", _panel.timeout is None, str(_panel.timeout))
+_ids = [getattr(i, "custom_id", None) for i in _panel.children]
+check("모든 버튼에 custom_id가 있다", all(_ids), str(_ids))
+check("custom_id가 전부 고유하다", len(set(_ids)) == len(_ids), str(_ids))
+check("custom_id가 akgui:shop: 로 시작한다",
+      all((i or "").startswith("akgui:shop:") for i in _ids), str(_ids))
+
+_add_ok, _add_err = True, ""
+try:
+    dcommands.Bot(command_prefix="!", intents=discord.Intents.default()).add_view(
+        ShopPanelView())
+except Exception as _exc:  # noqa: BLE001
+    _add_ok, _add_err = False, f"{type(_exc).__name__}: {_exc}"
+check("bot.add_view가 패널을 받아준다", _add_ok, _add_err)
+
+# 🚨 **상태를 self에 담으면 안 돼요.** 이 객체는 봇 전체에 하나뿐이라 모든 사람이
+#    공유해요. 버튼(Item)은 discord.py가 꽂아주는 거라 빼고, **우리가 담은 것만** 봐요.
+_baseline = set(vars(discord.ui.View(timeout=None)))
+_leaked = [n for n, v in vars(_panel).items()
+           if n not in _baseline and not isinstance(v, discord.ui.Item)]
+check("🚨 패널 뷰에 사람별 상태가 없다", not _leaked, str(_leaked))
+
+# ⭐ 가격을 라벨에 **손으로 적지 않았는지** — 상수를 바꿨을 때 버튼이 따라오는지예요.
+#    "(하루 1개)" 라벨이 한쪽에만 남아 10명이 88개를 산 뒤까지 거짓이던 전례가 있어요.
+import utils.fish_data as _fish  # noqa: E402
+from utils.inventory_store import PROTECT_PRICE as _PP  # noqa: E402
+from utils.mission_store import REROLL_PRICE as _RP  # noqa: E402
+
+_labels = " | ".join(i.label or "" for i in _panel.children)
+for _tag, _val in (("낚시대", _fish.ROD_PRICE), ("소형", _fish.SMALL_ROD_PRICE),
+                   ("리롤", _RP), ("보호권", _PP),
+                   ("테마", profile_card.THEME_PRICE),
+                   ("칭호", title_store.TITLE_PLANS[10])):
+    check(f"버튼 라벨에 {_tag} 가격({_val})이 상수에서 들어왔다",
+          f"{_val}코인" in _labels, _labels)
+check("🪙 내 코인 버튼이 있다", any("내 코인" in (i.label or "") for i in _panel.children),
+      _labels)
+
+# 🚨 공개 패널에 **사람별 값**이 들어가면 나머지 전원에게 거짓이 돼요.
+_pub = _panel_embed()
+_pub_text = (_pub.description or "") + "".join(
+    (f.name or "") + (f.value or "") for f in _pub.fields)
+for _forbidden in ("지금 가진 보호권", "지금 쓰는 테마", "가진 테마", "내 악귀코인",
+                   "오늘 남은 횟수"):
+    check(f"공개 패널에 '{_forbidden}'이 없다", _forbidden not in _pub_text)
+
+# 품목은 비공개 화면과 **같은 개수**여야 해요(한쪽에만 품목이 빠지면 안 팔려요).
+_mine_fields = _item_fields({"rerolls_left": 1, "protects": 0,
+                             "themes": [cosmetic_store.DEFAULT_THEME],
+                             "theme": cosmetic_store.DEFAULT_THEME})
+check("공개·비공개 품목 수가 같다", len(_item_fields()) == len(_mine_fields),
+      f"공개 {len(_item_fields())} vs 비공개 {len(_mine_fields)}")
+_mine_text = "".join(n + v for n, v in _mine_fields)
+check("비공개 화면엔 사람별 줄이 들어간다",
+      "오늘 남은 횟수" in _mine_text and "지금 가진 보호권" in _mine_text)
+check("패널 필드가 디스코드 한도(25개) 안", len(_pub.fields) <= 25, str(len(_pub.fields)))
+# 임베드 필드 값은 1024자까지예요. 품목 설명이 길어지면 조용히 400이 나요.
+_too_long = [f.name for f in _pub.fields if len(f.value or "") > 1024]
+check("패널 필드 값이 1024자 이하", not _too_long, str(_too_long))
+
+
+async def _panel_cmd():
+    bot = dcommands.Bot(command_prefix="!", intents=discord.Intents.default())
+    await bot.load_extension("cogs.akgui_shop")
+    names = {c.name for c in bot.tree.get_commands()}
+    check("/상점패널 등록됨", "상점패널" in names, str(sorted(names)))
+
+
+asyncio.run(_panel_cmd())
+
+# /상점패널은 서버 소유자만 — 아무나 패널을 도배하면 안 돼요.
+check("🚨 /상점패널에 소유자 검사가 있다",
+      "interaction.user.id != interaction.guild.owner_id" in _shop_src)
+
+# `cog_load`에서 add_view를 빼먹으면 재시작 뒤 버튼이 **조용히** 죽어요(에러도 안 나요).
+# 🚨 이걸 `"add_view(ShopPanelView())" in _shop_src` 로 썼다가 **거짓 통과했어요**
+#    (2026-10-27). `ShopPanelView`의 docstring에 그 글자가 설명으로 적혀 있어서,
+#    `cog_load`에서 호출을 지워도 초록불이었어요. **실제 호출을 AST로 봐요.**
+#    → [[feedback_loose_assertions_false_pass]]
+_cog_load = next(
+    (f for c in _shop_tree.body
+     if isinstance(c, _ast.ClassDef) and c.name == "AkguiShop"
+     for f in c.body
+     if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef)) and f.name == "cog_load"),
+    None)
+check("AkguiShop.cog_load가 있다", _cog_load is not None)
+_registers = _cog_load is not None and any(
+    getattr(n.func, "attr", "") == "add_view"
+    and any(getattr(getattr(a, "func", None), "id", "") == "ShopPanelView" for a in n.args)
+    for n in _ast.walk(_cog_load) if isinstance(n, _ast.Call))
+check("🚨 cog_load에서 add_view(ShopPanelView())를 실제로 호출한다", _registers)
 
 print()
 if failures:
