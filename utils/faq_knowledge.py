@@ -59,6 +59,9 @@ from utils.fish_data import (
     GRADES as FISH_GRADE_INFO,
     ROD_DURABILITY,
     ROD_PRICE,
+    STREAK_CAST_BONUS,
+    STREAK_CAST_EVERY,
+    STREAK_CAST_MAX,
     SMALL_ROD_DURABILITY,
     SMALL_ROD_PRICE,
     TOTAL_SPECIES as FISH_SPECIES,
@@ -232,11 +235,17 @@ def _fishing() -> str:
    서두르지 않아도 돼요 — 입질 뒤라면 **늦게 눌러도 잡혀요**.
 3. 잡은 건 `/어항`에서 보고, `/물고기판매`로 한꺼번에 팔아요.
 
-⏳ **하루에 {DAILY_CAST_CAP}번까지** 던질 수 있어요(한국 시간 자정에 다시 채워져요).
+⏳ **기본은 하루 {DAILY_CAST_CAP}번까지** 던질 수 있어요(한국 시간 자정에 다시 채워져요).
 오래 붙어 있는 사람만 벌던 걸 고치려고 2026-10-20에 생겼고, 그러면서 물고기 값도
 같이 올랐어요 — **짧게 해도 벌리게** 하려는 거예요.
+· 🔥 **연속 출석 {STREAK_CAST_EVERY}일마다 +{STREAK_CAST_BONUS}번** 늘어나요
+  (최대 **+{STREAK_CAST_MAX}번** = 하루 {DAILY_CAST_CAP + STREAK_CAST_MAX}번).
+  2026-10-27에 생겼어요 — 상한에 막히는 사람이 많아서 늘렸는데, 전체를 올리면
+  애초에 안 막히던 사람까지 발행이 늘어서 **매일 오는 사람에게만** 열어뒀어요.
+  ⚠️ **연속이 끊기면 보너스도 없어져요**(그래서 🧊 출석 보호권이 쓸모가 있어요).
+  내 상한은 `/낚시확률`이나 낚시 결과 화면의 "오늘 남은 횟수"에서 봐요.
 · 상한에 걸려도 **낚시대는 안 없어져요.** 남은 횟수는 다음 날 이어서 써요.
-· 🪝 소형으로 던져도 똑같이 하루 {DAILY_CAST_CAP}번 중 한 번이에요.
+· 🪝 소형으로 던져도 똑같이 하루 상한 중 한 번이에요.
 · 놓친 판(성급·방치)은 **횟수에 안 들어가요.**
 
 ⚠️ **한 번에 한 판만** 할 수 있어요. 던지는 중에 또 `/낚시`를 치면 "그 판을 먼저
@@ -251,6 +260,8 @@ def _fishing() -> str:
   낚시대값을 빼면 **{fish_data.net_issue_per_rod():+.0f}코인**쯤 남아요.
 · 🏁 하루 {DAILY_CAST_CAP}번을 다 쓰면 약 **{fish_data.max_daily_income():.0f}코인**이고,
   낚시대값을 빼면 **{fish_data.max_daily_net_issue():+.0f}코인**이 남아요.
+  🔥 연속 출석 보너스를 최대로 받으면(하루 {DAILY_CAST_CAP + STREAK_CAST_MAX}번)
+  **{fish_data.ceiling_daily_net_issue():+.0f}코인**까지 돼요.
 · **꽝은 없어요.** 입질이 온 뒤에 누르면 반드시 뭔가 나와요.
   **늦게 눌러도 괜찮아요** — '늦었다'는 판정이 없어요(모바일에서 반응이 늦게
   전달될 때가 있어서 없앴어요). 입질 **전에** 누르거나 아예 안 누르면 놓치지만,
@@ -923,8 +934,12 @@ def build_system_prompt(bot: discord.Client) -> str:
         "- 🚨 **아래 명령어는 서버 소유자만 쓸 수 있어.** 일반 서버원에게 써보라고 안내하지 마:\n"
         "  `/채널설정` · `/내전시즌` · `/서버리포트` · `/안내게시` · `/규칙설정` · `/설명설정`\n"
         "- 낚시는 **한 번에 한 판만** 돼. 던지는 중에 또 치면 거절되고, 그때 낚시대는 안 줄어.\n"
-        f"- 🎣 낚시는 **하루 {DAILY_CAST_CAP}번**까지야(한국 시간 자정 리셋). "
+        f"- 🎣 낚시는 **기본 하루 {DAILY_CAST_CAP}번**까지야(한국 시간 자정 리셋). "
         "상한에 걸려도 낚시대는 안 없어지고 남은 횟수는 다음 날 쓸 수 있어. "
-        "🚨 **「한도 연장권」 같은 건 없어** — 도박에만 있는 거라, 낚시에도 있다고 말하지 마."
+        f"🔥 **연속 출석 {STREAK_CAST_EVERY}일마다 +{STREAK_CAST_BONUS}번** 늘어나고 "
+        f"최대 +{STREAK_CAST_MAX}번이야(=하루 {DAILY_CAST_CAP + STREAK_CAST_MAX}번). "
+        "연속이 끊기면 보너스도 사라져. "
+        "🚨 **「한도 연장권」 같은 건 없어** — 도박에만 있는 거라, 낚시에도 있다고 말하지 마. "
+        "상한을 늘리는 길은 **연속 출석뿐**이고 코인으로는 못 사."
     )
     return "\n".join(sections)

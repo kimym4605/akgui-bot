@@ -202,11 +202,21 @@ if balances:
     # ⏳ 하루 상한(2026-10-20 6차)이 생겨서 **1인 발행에 천장이 있어요.** 이제
     #    "며칠이면 따라잡나"를 셀 수 있어요 — 전엔 시간이 유일한 상한이라 불가능했어요.
     if DAILY_CAST_CAP:
-        from utils.fish_data import max_daily_net_issue
+        # 🚨 7차(10-27)부터 상한이 **사람마다 달라요**(연속 출석 5일마다 +2 · 최대 +10).
+        #    `max_daily_net_issue()`만 찍으면 천장을 낮게 잡아요 — 둘 다 보여줘요.
+        from utils.fish_data import (
+            STREAK_CAST_BONUS, STREAK_CAST_EVERY, STREAK_CAST_MAX,
+            ceiling_daily_net_issue, max_daily_net_issue,
+        )
         cap_net = max_daily_net_issue()
+        ceil_net = ceiling_daily_net_issue()
         med = statistics.median(balances)
         print(f"  ⏳ 낚시 하루 상한 {DAILY_CAST_CAP}회 = 1인 최대 순발행 "
               f"{cap_net:+.1f}코인/일")
+        if STREAK_CAST_MAX:
+            print(f"     └ 🔥 연속 출석 {STREAK_CAST_EVERY}일마다 +{STREAK_CAST_BONUS}회"
+                  f"(최대 +{STREAK_CAST_MAX}회) → **천장은 "
+                  f"{DAILY_CAST_CAP + STREAK_CAST_MAX}회 / {ceil_net:+.1f}코인/일**")
         if cap_net > 0:
             print(f"     └ 중앙값({med:.1f}코인)인 사람이 상위권(최대 {max(balances)}코인)을 "
                   f"따라잡는 데 {(max(balances) - med) / cap_net:.0f}일")

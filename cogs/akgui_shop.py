@@ -48,7 +48,7 @@ from utils.inventory_store import PROTECT_MAX, PROTECT_PRICE
 from utils.mission_store import MISSIONS, REROLL_LIMIT_PER_DAY, REROLL_PRICE
 from utils.fish_data import (
     DAILY_CAST_CAP, ROD_DURABILITY, ROD_PRICE, SMALL_ROD_DURABILITY,
-    SMALL_ROD_PRICE,
+    SMALL_ROD_PRICE, STREAK_CAST_BONUS, STREAK_CAST_EVERY, STREAK_CAST_MAX,
 )
 from utils.profile_card import THEME_PRICE, THEMES
 from utils.title_store import TITLE_DAYS, TITLE_PLANS
@@ -90,6 +90,11 @@ def _item_fields(state: dict | None = None) -> list[tuple[str, str]]:
         "　└ 낚시는 낚시대가 있어야 해요 · 꽝 없이 **반드시 물고기가 나와요**\n"
         + (f"　└ ⏳ 던지는 건 **하루 {DAILY_CAST_CAP}번**까지예요 "
            "(낚시대 개수는 제한 없어요 · 남은 횟수는 다음 날로 넘어가요)\n"
+           # ⭐ 7차 연속 출석 보너스. 🚨 **여기도 상수에서 뽑아요** — 공개 패널이라
+           #    사람별 값은 못 넣지만, 규칙 자체는 알려줘야 눌러볼 수 있어요.
+           + (f"　└ 🔥 `/출석`을 **{STREAK_CAST_EVERY}일 연속**하면 "
+              f"**+{STREAK_CAST_BONUS}번** 늘어나요 (최대 +{STREAK_CAST_MAX}번)\n"
+              if STREAK_CAST_MAX else "")
            if DAILY_CAST_CAP else
            "　└ **몇 개든** 살 수 있어요 (하루 제한 없어요)\n")
         + "　└ 잡은 건 `/어항`에 쌓였다가 `/물고기판매`로 한 번에 팔려요",

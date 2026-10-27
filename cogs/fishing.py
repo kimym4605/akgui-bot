@@ -136,6 +136,28 @@ BITE_MIN, BITE_MAX = 2.0, 8.0      # 입질까지 기다리는 시간
 #    왜 바꿨는지는 `STRIKE_WAIT`를 쓰는 자리의 주석에 적어뒀어요.
 STRIKE_WAIT = 6.0                  # 입질 후 챔질을 기다려주는 시간
 
+
+def _streak_cast_hint(my_cap: int) -> str:
+    """🔥 연속 출석으로 캐스트를 **늘리는 방법**을 알려주는 한 줄 (7차).
+
+    🚨 **"막히는 그 자리"에 띄워요.** 만들어두고 안 쓰이는 걸 세 번 반복한 서버라
+       (💡건의·📅일정·❓매니저, 리롤권·보호권·테마) 보너스를 상점이나 도움말에만
+       적어두면 아무도 모른 채 20번에서 막혀요.
+    ⚠️ 끝에 개행을 붙여서 돌려줘요(호출부가 문장을 이어 붙여요). 보너스가 꺼져
+       있으면 **빈 문자열**이라 안내문이 저절로 사라져요.
+    """
+    if not DAILY_CAST_CAP or not fish_data.STREAK_CAST_MAX:
+        return ""
+    every, per = fish_data.STREAK_CAST_EVERY, fish_data.STREAK_CAST_BONUS
+    bonus = my_cap - DAILY_CAST_CAP
+    if bonus >= fish_data.STREAK_CAST_MAX:
+        return f"-# 🔥 연속 출석 보너스 **+{bonus}번**을 받고 있어요 (최대치예요)\n"
+    if bonus > 0:
+        return (f"-# 🔥 연속 출석으로 **+{bonus}번** 받고 있어요 · "
+                f"{every}일마다 **+{per}번** (최대 +{fish_data.STREAK_CAST_MAX}번)\n")
+    return (f"-# 🔥 `/출석`을 **{every}일 연속**하면 던지는 횟수가 **+{per}번** 늘어요 "
+            f"({every}일마다 · 최대 +{fish_data.STREAK_CAST_MAX}번)\n")
+
 # ------------------------------------------------------------------
 # 🎣 한 사람당 **동시에 한 판만** (2026-10-18 사용자 결정)
 #
@@ -240,9 +262,14 @@ async def purchase_rod(user_id, small: bool = False) -> tuple[bool, str]:
         elif today_left < durability:
             tail = (f"⏳ 오늘은 **{today_left}번**만 더 던질 수 있어요 "
                     f"(나머지 {durability - today_left}번은 내일 이어서)")
+    # ⭐ 7차: 상한 때문에 다 못 쓰게 됐을 때만 **늘리는 법**을 붙여요. 넉넉한 사람에게
+    #    띄우면 잔소리예요(메시지가 길어지면 아무도 안 읽어요).
+    hint = ""
+    if cap and max(0, cap - used) < durability:
+        hint = "\n" + _streak_cast_hint(cap).rstrip("\n")
     return True, (
         f"{label}를 샀어요! **{durability}번** 던질 수 있어요.\n"
-        f"남은 악귀코인 **{balance}개** · {tail}"
+        f"남은 악귀코인 **{balance}개** · {tail}" + hint
     )
 
 
@@ -365,9 +392,13 @@ async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> 
     used, cap = await fishing_store.cast_quota(interaction.user.id)
     today_left = max(0, cap - used) if cap else None
     if cap:
+        # ⭐ 7차: 보너스를 받고 있으면 **분모에 그게 보여요**(25/30 같은 식).
+        #    "왜 내 상한이 남과 다르지?"를 그 자리에서 설명해주려고 +N을 적어요.
+        bonus = cap - DAILY_CAST_CAP
         embed.add_field(name="오늘 남은 횟수",
-                        value=(f"**{today_left}/{cap}번**" if today_left
-                               else "**다 썼어요** (내일 자정에 채워져요)"),
+                        value=((f"**{today_left}/{cap}번**" if today_left
+                                else "**다 썼어요** (내일 자정에 채워져요)")
+                               + (f"\n-# 🔥 연속 출석 +{bonus}" if bonus > 0 else "")),
                         inline=True)
 
     embed.set_footer(
@@ -528,14 +559,19 @@ async def _run_cast(interaction: discord.Interaction, *, edit: bool) -> bool:
         # ⭐ 하루 상한. **낚시대는 안 깎였어요** — 남은 횟수를 같이 알려줘서
         #    "낚시대가 사라진 게 아니다"를 분명히 해요.
         # 🚨 여기서 낚시대 구매 버튼을 띄우면 **오늘 못 쓰는 걸 사게 돼요.**
+        #
+        # 🚨 **`DAILY_CAST_CAP`을 적지 마세요**(7차). 상한이 사람마다 달라졌어요.
+        #    보너스를 받은 사람에게 "20번을 다 던졌어요"라고 하면 거짓이에요.
+        _, my_cap = await fishing_store.cast_quota(uid)
         await show(
-            content=(f"🎣 오늘은 **{DAILY_CAST_CAP}번**을 다 던졌어요. "
+            content=(f"🎣 오늘은 **{my_cap}번**을 다 던졌어요. "
                      f"내일 자정(한국 시간)에 다시 채워져요.\n"
                      f"-# 🎣 낚시대는 그대로 있어요"
                      + (f" (**{left}번** 남음)" if left else "")
-                     + f" · 하루 {DAILY_CAST_CAP}번이면 평균 "
-                     f"**{fish_data.max_daily_income():.0f}코인**쯤 벌려요\n"
-                     "-# `/어항` 으로 확인하고 `/물고기판매` 로 팔아두세요"),
+                     + f" · 하루 {my_cap}번이면 평균 "
+                     f"**{fish_data.income_for_cap(my_cap):.0f}코인**쯤 벌려요\n"
+                     + _streak_cast_hint(my_cap)
+                     + "-# `/어항` 으로 확인하고 `/물고기판매` 로 팔아두세요"),
             embed=None,
             view=None,
         )
@@ -777,10 +813,13 @@ class Fishing(commands.Cog):
         #    "낚시대는 8번 남았는데 왜 못 던지냐"를 막는 자리예요.
         used, cap = await fishing_store.cast_quota(interaction.user.id)
         if cap:
+            # ⭐ 7차: 연속 출석 보너스를 받고 있으면 그 몫을 따로 적어요.
+            _b = cap - DAILY_CAST_CAP
             embed.add_field(
                 name="오늘 남은 횟수",
-                value=(f"**{max(0, cap - used)}/{cap}번**" if used < cap
-                       else "**다 썼어요**\n-# 내일 자정(한국 시간)에 채워져요"),
+                value=((f"**{max(0, cap - used)}/{cap}번**" if used < cap
+                        else "**다 썼어요**\n-# 내일 자정(한국 시간)에 채워져요")
+                       + (f"\n-# 🔥 연속 출석 +{_b}" if _b > 0 else "")),
                 inline=True)
 
         hit = f"{data['caught']}/{data['casts']}" if data["casts"] else "0/0"
@@ -884,7 +923,13 @@ class Fishing(commands.Cog):
         ⚠️ 평균 벌이는 `expected_*` 헬퍼를 써요. 등급 값 범위의 **중앙값으로 계산하면
         과대 안내**예요 - 치수가 작은 쪽으로 치우쳐 있어서(`SIZE_SKEW`) 14.8이 아니라
         14.1이 맞아요.
+        🚨 **7차부터 DB를 한 번 다녀와요**(내 상한을 알려주려고 `cast_quota`를 봐요).
+        그래서 **먼저 받아둬야** 해요 — 안 그러면 Atlas가 느린 날 3초를 넘겨서
+        `10062`로 죽어요. `scripts/scan_interaction_latency.py`가 실제로 이걸 잡았고
+        (`test_cog_load`가 그 스캐너를 불러서 **배포를 막아요**), 전엔 "DB를 안
+        건드려서 defer 없이 바로 답해도 된다"는 주석이 붙어 있었어요.
         """
+        await interaction.response.defer()
         total_w = sum(g["weight"] for g in GRADES.values())
         lines = []
         for grade in GRADE_ORDER:
@@ -914,14 +959,25 @@ class Fishing(commands.Cog):
         # ⭐ 하루 상한을 **"평균 얼마 벌리나"보다 먼저** 보여줘요. 벌이만 보고 기대를
         #    키웠다가 상한을 뒤늦게 발견하면 속은 기분이 들어요.
         if DAILY_CAST_CAP:
+            # ⭐ 7차: **내 상한**을 보여줘요(사람마다 달라졌어요). `/낚시확률`은
+            #    본인이 치는 명령이라 여기선 본인 값을 적는 게 맞아요.
+            _, my_cap = await fishing_store.cast_quota(interaction.user.id)
+            _bonus = my_cap - DAILY_CAST_CAP
             embed.add_field(
                 name="⏳ 하루 던질 수 있는 횟수",
-                value=(f"하루 **{DAILY_CAST_CAP}번**까지예요 "
+                value=(f"기본 **{DAILY_CAST_CAP}번** · **내 상한은 {my_cap}번**이에요 "
                        "(한국 시간 자정에 채워져요)\n"
-                       "　└ ⭐ 상한에 걸려도 **낚시대는 안 없어져요** — 남은 횟수는 "
+                       + (f"　└ 🔥 연속 출석 보너스 **+{_bonus}번**을 받고 있어요"
+                          + ("  (최대치예요)\n" if _bonus >= fish_data.STREAK_CAST_MAX
+                             else "\n")
+                          if _bonus > 0 else
+                          f"　└ 🔥 `/출석`을 **{fish_data.STREAK_CAST_EVERY}일 연속**하면 "
+                          f"**+{fish_data.STREAK_CAST_BONUS}번** 늘어나요 "
+                          f"(최대 +{fish_data.STREAK_CAST_MAX}번)\n")
+                       + "　└ ⭐ 상한에 걸려도 **낚시대는 안 없어져요** — 남은 횟수는 "
                        "다음 날 이어서 써요\n"
                        f"　└ 어떤 낚시대를 쓰든 상한은 같아요 "
-                       f"(🪝 소형도 하루 {DAILY_CAST_CAP}번 중 한 번이에요)"),
+                       f"(🪝 소형도 하루 {my_cap}번 중 한 번이에요)"),
                 inline=False,
             )
         embed.add_field(
@@ -929,9 +985,12 @@ class Fishing(commands.Cog):
             value=(f"한 번 던지면 평균 **{per_cast:.1f}코인** → 낚시대 하나로 "
                    f"약 **{per_rod:.0f}코인**\n"
                    f"　└ 낚시대값 {ROD_PRICE}코인을 빼면 **{net:+.0f}코인**쯤 남아요\n"
-                   + (f"　└ 🏁 하루 {DAILY_CAST_CAP}번을 다 쓰면 "
-                      f"**{fish_data.max_daily_income():.0f}코인**쯤 벌리고, "
-                      f"낚시대값을 빼면 **{fish_data.max_daily_net_issue():+.0f}코인**"
+                   # 🚨 **내 상한 기준**으로 적어요(7차). `DAILY_CAST_CAP`으로 적으면
+                   #    보너스를 받는 사람에게 실제보다 적게 말해요.
+                   + (f"　└ 🏁 내 상한 {my_cap}번을 다 쓰면 "
+                      f"**{fish_data.income_for_cap(my_cap):.0f}코인**쯤 벌리고, "
+                      f"낚시대값을 빼면 "
+                      f"**{my_cap * fish_data.net_issue_per_cast():+.0f}코인**"
                       "이 남아요\n" if DAILY_CAST_CAP else "")
                    + "　└ ⚠️ 판매는 **내림**이에요(1코인 = 10조각) — 남는 조각은 "
                    "다음 판매로 넘어가요"),
@@ -962,8 +1021,10 @@ class Fishing(commands.Cog):
             inline=False,
         )
         embed.set_footer(text="/어항 에서 지금 가치를 확인해보세요")
-        # DB를 안 건드려서 defer 없이 바로 답해도 3초를 안 넘겨요.
-        await interaction.response.send_message(embed=embed)
+        # 🚨 위에서 `defer()`를 했으니 **followup**이에요. `response.send_message`를
+        #    그대로 두면 `InteractionResponded`로 터져요(7차에 defer를 넣으면서 같이
+        #    고쳤어요 — AST 검사로는 안 잡히는 종류라 테스트가 실제로 돌려봐요).
+        await interaction.followup.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):

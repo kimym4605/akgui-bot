@@ -283,6 +283,33 @@ class FakeFish:
 fake = FakeFish()
 fishing_store._fish = fake
 
+
+# 🚨 7차 연속 출석 보너스가 **출석 컬렉션을 읽어요**(`_streak_sync`). 여기도 가짜로
+#    안 바꾸면 캐스트마다 진짜 Atlas(없으면 localhost)로 붙으려 해서
+#    `ServerSelectionTimeoutError`로 죽어요 — 2026-10-19에 `fishing_week` 훅이
+#    똑같이 이 테스트를 깨놨어요. 저장소를 하나 더 붙였으면 **여기도** 추가하세요.
+#    → feedback_wire_the_hook_not_just_the_store
+class FakeAttend:
+    def __init__(self):
+        self.docs = {}
+
+    def find_one(self, flt, projection=None):
+        d = self.docs.get(flt["_id"])
+        return dict(d) if d else None
+
+    def set_streak(self, user_id, streak, last=None):
+        """`last`를 안 주면 **오늘**로 둬요(= 살아있는 연속)."""
+        self.docs[str(user_id)] = {
+            "_id": str(user_id),
+            "attendanceStreak": streak,
+            "lastAttendanceDate": last if last is not None else fishing_store.today_iso(),
+        }
+
+
+fake_attend, fake_guest = FakeAttend(), FakeAttend()
+fishing_store._trainers = fake_attend
+fishing_store._attend_guest = fake_guest
+
 # 🚨 주간 대회 훅도 가짜로 바꿔요(2026-10-19에 발견).
 #
 # 2026-10-18에 `record_cast` 끝에 `fishing_week.record_catch`가 붙었는데, 가짜는
@@ -1120,16 +1147,38 @@ class _RatesResp:
         self.calls.append("defer")
 
 
+# 🚨 7차부터 `/낚시확률`이 **내 상한**을 보여주려고 `cast_quota`를 봐요. DB를
+#    다녀오니 `defer()` → `followup.send`로 바뀌었고, 이 스텁에 `followup`이 없어서
+#    `AttributeError`가 났어요 — **AST 검사로는 안 잡히는 종류**라 이렇게 실제로
+#    돌려봐야 해요(`response.send_message`를 하나라도 남겨두면 `InteractionResponded`).
+class _RatesFollowup:
+    def __init__(self, resp):
+        self.resp = resp
+
+    async def send(self, *a, **kw):
+        self.resp.calls.append("followup")
+        self.resp.embed = kw.get("embed")
+
+
 class _RatesInter:
     def __init__(self):
         self.response = _RatesResp()
         self.user = types.SimpleNamespace(id=1, display_name="t")
 
+    @property
+    def followup(self):
+        return _RatesFollowup(self.response)
+
 
 _ri = _RatesInter()
 asyncio.run(fishing.Fishing.rates.callback(fishing.Fishing(None), _ri))
-check("DB를 안 치니 defer 없이 한 방에 답한다",
-      _ri.response.calls == ["send_message"], f"호출 {_ri.response.calls}")
+# 🚨 7차: 내 상한을 읽으려고 DB를 다녀오니 **defer가 먼저**예요. 전엔
+#    `["send_message"]` 한 방이었는데, 그대로 두면 Atlas가 느린 날 3초를 넘겨
+#    `10062`로 죽어요(`scan_interaction_latency.py`가 실제로 잡았어요).
+check("🚨 DB를 치니 defer로 먼저 받고 followup으로 답한다",
+      _ri.response.calls == ["defer", "followup"], f"호출 {_ri.response.calls}")
+check("🚨 defer 뒤에 response.send_message를 쓰지 않는다 (InteractionResponded 방지)",
+      "send_message" not in _ri.response.calls, f"호출 {_ri.response.calls}")
 
 _emb = _ri.response.embed
 _blob = (_emb.description or "") + "".join(
@@ -1465,6 +1514,122 @@ check("🛒 악귀상점 라벨도 상한을 말한다", "DAILY_CAST_CAP" in _sr
 _src17_faq = _Path(os.path.join(BOT_DIR, "utils/faq_knowledge.py")).read_text(
     encoding="utf-8")
 check("❓ 봇 매니저도 상한을 안다", "DAILY_CAST_CAP" in _src17_faq)
+
+# ==================================================================
+print("\n[18] 🔥 연속 출석으로 캐스트 상한이 늘어나는가 (2026-10-27 7차)")
+# ------------------------------------------------------------------
+# 사용자 제안("연속출석 10일마다 늘려주는 건 어떨까")에서 나왔고, 실측으로 주기를
+# 5일로 좁혔어요 — 막힌 6명의 연속이 55·17·12·9·8·3일이라 10일이면 3명에게만 닿아요.
+#
+# 🚨 여기서 꼭 지켜야 하는 것 세 개:
+#   ⒜ 보너스가 **조건부 update에도** 반영돼야 해요. 안내문만 25번이라 하고 DB가
+#      20에서 막으면 "보너스를 받았는데 못 던진다"가 돼요(제일 나쁜 결과).
+#   ⒝ **끊긴 연속은 0**이어야 해요. `attendanceStreak`은 다음 출석까지 줄지 않아서,
+#      한 달 전에 55일을 찍고 안 오는 사람도 DB엔 55로 남아 있어요.
+#   ⒞ **천장이 있어야** 해요(`STREAK_CAST_MAX`). 없으면 6차가 만든 발행 상한이 사라져요.
+EVERY = fish_data.STREAK_CAST_EVERY
+PER = fish_data.STREAK_CAST_BONUS
+BMAX = fish_data.STREAK_CAST_MAX
+print(f"  설정: 연속 {EVERY}일마다 +{PER}회 · 최대 +{BMAX}회 "
+      f"→ 상한 {CAP} ~ {CAP + BMAX}회")
+
+check("🚨 보너스에 천장이 있다 (없으면 발행 상한이 사라진다)", BMAX > 0, f"MAX={BMAX}")
+check("한 칸 보너스가 천장을 넘지 않는다", PER <= BMAX, f"{PER} vs {BMAX}")
+
+# ⒜ 계산식
+for _streak, _want in ((0, 0), (EVERY - 1, 0), (EVERY, PER), (EVERY * 2, PER * 2),
+                       (EVERY * 999, BMAX)):
+    check(f"연속 {_streak}일 → +{_want}회",
+          fish_data.streak_cast_bonus(_streak) == _want,
+          f"{fish_data.streak_cast_bonus(_streak)}회")
+check("🚨 음수·0 연속은 보너스 0", fish_data.streak_cast_bonus(-5) == 0)
+check(f"daily_cap_for({EVERY}) = 기본 + 보너스",
+      fish_data.daily_cap_for(EVERY) == CAP + PER, str(fish_data.daily_cap_for(EVERY)))
+check("🚨 상한이 무제한(0)이면 보너스도 0 (이중 의미 금지)",
+      (lambda: (setattr(fish_data, "DAILY_CAST_CAP", 0),
+                fish_data.streak_cast_bonus(999) == 0
+                and fish_data.daily_cap_for(999) == 0,
+                setattr(fish_data, "DAILY_CAST_CAP", CAP))[1])())
+
+# ⒝ 살아있는 연속만 인정 — 가짜 출석 컬렉션으로 직접 돌려봐요
+B = "streak-bonus-user"
+fake.docs.pop(B, None)
+fake_attend.set_streak(B, EVERY * 2)                      # 오늘 출석 · 보너스 2칸
+check("오늘 출석한 연속은 상한에 반영된다",
+      run(fishing_store.cast_quota(B))[1] == CAP + PER * 2,
+      str(run(fishing_store.cast_quota(B))[1]))
+
+fake_attend.set_streak(B, EVERY * 2, last=fishing_store._yesterday_iso())
+check("⭐ 어제 출석도 인정된다 (출석 전에 낚시부터 하는 사람)",
+      run(fishing_store.cast_quota(B))[1] == CAP + PER * 2,
+      str(run(fishing_store.cast_quota(B))[1]))
+
+fake_attend.set_streak(B, 99, last="2020-01-01")
+check("🚨 끊긴 연속(옛 날짜)은 보너스 0 — 안 오는 사람이 영구히 받으면 안 된다",
+      run(fishing_store.cast_quota(B))[1] == CAP,
+      f"{run(fishing_store.cast_quota(B))[1]}회 (기대 {CAP})")
+
+fake_attend.docs.pop(B, None)
+check("출석 기록이 아예 없으면 기본 상한",
+      run(fishing_store.cast_quota(B))[1] == CAP)
+
+# ⭐ 게스트(포켓몬 미시작자)도 받아야 해요 — 출석은 두 컬렉션에 나뉘어 있어요
+G2 = "streak-guest-user"
+fake.docs.pop(G2, None)
+fake_guest.set_streak(G2, EVERY)
+check("⭐ 게스트 컬렉션의 연속도 인정된다 (한쪽만 보면 게스트는 못 받는다)",
+      run(fishing_store.cast_quota(G2))[1] == CAP + PER,
+      str(run(fishing_store.cast_quota(G2))[1]))
+fake_guest.docs.pop(G2, None)
+
+# ⒜ **조건부 update가 실제로 늘어난 상한까지 허용하는가** — 이게 핵심이에요
+U = "streak-cast-user"
+fake.docs.pop(U, None)
+fake_attend.set_streak(U, EVERY * 999)        # 보너스 만땅
+_my_cap = CAP + BMAX
+for _ in range((_my_cap // ROD_DURABILITY) + 2):
+    run(fishing_store.buy_rod(U, ROD_DURABILITY))
+_boosted = [run(fishing_store.use_rod(U)) for _ in range(_my_cap)]
+check(f"🚨 늘어난 상한({_my_cap}회)까지 **실제로 던져진다**",
+      all(r[1] is None for r in _boosted),
+      f"막힌 게 {sum(1 for r in _boosted if r[1])}건 — 조건부 update가 "
+      f"{CAP}에서 막았다면 보너스가 거짓이에요")
+_over = run(fishing_store.use_rod(U))
+check(f"🚨 {_my_cap + 1}번째는 막힌다 (천장은 여전히 있다)",
+      _over[1] == "cap", str(_over))
+check("막힌 뒤 안내용 상한도 늘어난 값이다",
+      run(fishing_store.cast_quota(U))[1] == _my_cap,
+      str(run(fishing_store.cast_quota(U))[1]))
+fake_attend.docs.pop(U, None)
+
+# ⒞ 발행 천장
+check("🚨 ceiling_daily_net_issue = (기본+최대) × 캐스트당 순발행",
+      abs(fish_data.ceiling_daily_net_issue()
+          - (CAP + BMAX) * fish_data.net_issue_per_cast()) < 1e-9,
+      f"{fish_data.ceiling_daily_net_issue():.2f}코인")
+check("⚠️ max_daily_net_issue()의 기본값은 **보너스 없음**이다 "
+      "(안내문 7곳이 그 기준으로 쓰여 있다)",
+      abs(fish_data.max_daily_net_issue() - CAP * fish_data.net_issue_per_cast()) < 1e-9,
+      f"{fish_data.max_daily_net_issue():.2f}코인")
+check("천장이 기본보다 크다", fish_data.ceiling_daily_net_issue()
+      > fish_data.max_daily_net_issue())
+print(f"  1인 발행: 기본 {fish_data.max_daily_net_issue():+.1f} → "
+      f"천장 {fish_data.ceiling_daily_net_issue():+.1f}코인/일")
+
+# ⭐ 안내문 — "늘리는 법"이 막히는 자리에 뜨는가
+_hint_none = fishing._streak_cast_hint(CAP)
+_hint_some = fishing._streak_cast_hint(CAP + PER)
+_hint_full = fishing._streak_cast_hint(CAP + BMAX)
+check("보너스가 없으면 '연속하면 늘어난다'를 알려준다",
+      "연속" in _hint_none and f"+{PER}" in _hint_none, _hint_none.strip())
+check("보너스를 받고 있으면 받는 양을 알려준다",
+      f"+{PER}번" in _hint_some, _hint_some.strip())
+check("최대치면 '최대치'라고 말한다", "최대치" in _hint_full, _hint_full.strip())
+_src18 = _Path(os.path.join(BOT_DIR, "cogs/fishing.py")).read_text(encoding="utf-8")
+check("🚨 상한 안내가 DAILY_CAST_CAP을 그대로 박지 않는다 (사람마다 달라졌다)",
+      "오늘은 **{DAILY_CAST_CAP}번**을 다 던졌어요" not in _src18)
+for _name, _src in (("악귀상점", _src17_shop), ("봇 매니저", _src17_faq)):
+    check(f"{_name} 안내도 연속 보너스를 말한다", "STREAK_CAST" in _src)
 
 # ==================================================================
 # 🚨 요약은 **반드시 파일 맨 끝**에 있어야 해요. 여기보다 위에 두면 그 뒤에 추가한

@@ -34,13 +34,20 @@ from pymongo import ReturnDocument
 
 from utils import fishing_week
 from utils.fish_data import (
-    BY_KEY, COIN_PIECES, DAILY_CAST_CAP, GRADE_ORDER, pieces_of,
+    BY_KEY, COIN_PIECES, DAILY_CAST_CAP, GRADE_ORDER, daily_cap_for, pieces_of,
 )
 from utils.pokemon_store import _db
 
 log = logging.getLogger(__name__)
 
 _fish = _db["fish"]
+# 🚨 연속 출석(7차 캐스트 보너스)을 읽으려고 둬요. 출석은 **두 컬렉션**에 나뉘어요 —
+#    포켓몬을 시작한 사람은 `trainers`, 안 한 사람은 `attendance_guest`예요
+#    (`utils/attend_service.py` 맨 위 설명). 한쪽만 보면 **게스트는 보너스를 못 받아요.**
+#    ⚠️ `attend_service`를 import하지 않고 컬렉션을 직접 봐요 — 그쪽은 `coin_wallet`·
+#       `inventory_store`를 끌어와서 순환 참조가 생길 수 있어요.
+_trainers = _db["trainers"]
+_attend_guest = _db["attendance_guest"]
 
 
 def _uid(user_id) -> str:
@@ -68,6 +75,11 @@ KST = timezone(timedelta(hours=9))
 
 def today_iso() -> str:
     return datetime.now(KST).date().isoformat()
+
+
+def _yesterday_iso() -> str:
+    """어제(KST). 7차 캐스트 보너스가 "연속이 살아있나"를 볼 때만 써요."""
+    return (datetime.now(KST).date() - timedelta(days=1)).isoformat()
 
 
 def _rod_sync(user_id) -> tuple[int, bool]:
@@ -101,15 +113,53 @@ def _refund_rod_sync(user_id, durability: int) -> None:
     _fish.update_one({"_id": _uid(user_id)}, {"$inc": {"rod": -durability}})
 
 
+def _streak_sync(user_id) -> int:
+    """**살아있는** 연속 출석 일수. 끊긴 기록은 0으로 봐요. (7차 캐스트 보너스용)
+
+    🚨 `attendanceStreak`은 **다음 출석 때까지 줄어들지 않아요.** 그래서 한 달 전에
+    55일을 찍고 안 오는 사람도 DB엔 55로 남아 있어요
+    (`attend_service._rankings_sync`가 같은 함정을 설명해요). 그 값을 그대로 상한에
+    쓰면 **안 오는 사람이 보너스를 영구히 받아요.**
+    → `/출석순위`와 **같은 규칙**을 써요: `lastAttendanceDate`가 **오늘이나 어제**여야
+      살아있는 것으로 봐요.
+
+    ⭐ "어제"까지 인정하는 게 중요해요. 오늘 출석하기 **전에** 낚시부터 하는 사람이
+       흔한데, 오늘만 인정하면 그 사람은 보너스를 못 받아요.
+    ⚠️ 이틀 이상 빠지면 0이에요. 🧊 보호권이 있어도 그건 **다음 출석 때** 적용되니,
+       출석을 하는 순간 `lastAttendanceDate`가 오늘이 돼서 보너스가 돌아와요."""
+    uid = _uid(user_id)
+    today, yesterday = today_iso(), _yesterday_iso()
+    for col in (_trainers, _attend_guest):
+        doc = col.find_one(
+            {"_id": uid}, {"attendanceStreak": 1, "lastAttendanceDate": 1})
+        if not doc:
+            continue
+        if doc.get("lastAttendanceDate") in (today, yesterday):
+            return int(doc.get("attendanceStreak") or 0)
+    return 0
+
+
+def _cap_sync(user_id) -> int:
+    """그 사람의 하루 캐스트 상한(= 기본 + 연속 출석 보너스). 0이면 무제한.
+
+    🚨 **상한을 쓰는 곳은 전부 이걸 거쳐야 해요.** `DAILY_CAST_CAP`을 직접 비교하면
+    7차 보너스를 무시하고 20에서 막혀요 — 아래 조건부 update가 특히 그래요
+    (거기서 틀리면 "보너스를 받았는데 던질 수 없다"가 돼요)."""
+    if not DAILY_CAST_CAP:
+        return 0
+    return daily_cap_for(_streak_sync(user_id))
+
+
 def _quota_sync(user_id) -> tuple[int, int]:
     """(오늘 던진 횟수, 하루 상한). 상한이 0이면 무제한이에요.
 
     🚨 `cast_date`가 오늘이 아니면 **0으로 봐요.** 어제 숫자를 그대로 읽으면
-    자정이 지나도 "상한 다 썼어요"가 떠요(리셋은 실제 차감 때 일어나요)."""
+    자정이 지나도 "상한 다 썼어요"가 떠요(리셋은 실제 차감 때 일어나요).
+    ⚠️ 상한은 사람마다 달라요(7차) — `DAILY_CAST_CAP`을 그대로 돌려주면 안 돼요."""
     doc = _fish.find_one(
         {"_id": _uid(user_id)}, {"cast_date": 1, "casts_today": 1}) or {}
     used = int(doc.get("casts_today", 0) or 0) if doc.get("cast_date") == today_iso() else 0
-    return used, DAILY_CAST_CAP
+    return used, _cap_sync(user_id)
 
 
 def _use_rod_sync(user_id) -> tuple[int | None, str | None]:
@@ -131,11 +181,16 @@ def _use_rod_sync(user_id) -> tuple[int | None, str | None]:
     `$ne`는 missing을 포함해요). 그래서 낚시를 처음 하는 사람도 2번 쿼리가 받아줘요."""
     today = today_iso()
     uid = _uid(user_id)
+    # 🚨 **상한을 먼저 구해요**(7차). 사람마다 다르니 `DAILY_CAST_CAP`을 조건에 그대로
+    #    넣으면 보너스를 받은 사람이 20에서 막혀요.
+    # ⚠️ 읽기 1~2번이 늘지만 이 함수는 이미 스레드에서 돌고, 호출부가 `defer`를
+    #    **먼저** 해둬요(`cogs/fishing.py`의 3초 토큰 주석). 그래서 안전해요.
+    cap = _cap_sync(user_id)
 
     # 1) 오늘 이미 던진 적이 있고 상한에 안 걸렸으면 → 둘 다 원자적으로
     cond: dict = {"_id": uid, "rod": {"$gte": 1}, "cast_date": today}
-    if DAILY_CAST_CAP:
-        cond["casts_today"] = {"$lt": DAILY_CAST_CAP}
+    if cap:
+        cond["casts_today"] = {"$lt": cap}
     doc = _fish.find_one_and_update(
         cond,
         {"$inc": {"rod": -1, "casts_today": 1}},
@@ -162,7 +217,10 @@ def _use_rod_sync(user_id) -> tuple[int | None, str | None]:
     doc = _fish.find_one({"_id": uid}, {"rod": 1, "cast_date": 1, "casts_today": 1}) or {}
     rod = int(doc.get("rod", 0) or 0)
     used = int(doc.get("casts_today", 0) or 0) if doc.get("cast_date") == today else 0
-    if DAILY_CAST_CAP and used >= DAILY_CAST_CAP:
+    # ⚠️ 위 조건부 update와 **같은 `cap`**을 써요. 여기서 `DAILY_CAST_CAP`을 보면
+    #    보너스를 받은 사람이 21번째 캐스트에서 "상한이에요"를 보는데 실제로는
+    #    던질 수 있는 모순이 생겨요(안내문만 틀리는 게 아니라 못 던지게 돼요).
+    if cap and used >= cap:
         return rod, "cap"
     return None, "no_rod"
 

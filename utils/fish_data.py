@@ -182,6 +182,45 @@ ROD_PER_DAY = 0       # 0 = 무제한 (개수 제한은 쓰지 않아요 — 위
 #    슬라이딩으로 하면 "언제 리셋되나"를 유저가 알 수 없어서 안내가 불가능해요.
 DAILY_CAST_CAP = 20   # 하루에 던질 수 있는 횟수 (0이면 무제한)
 
+# ------------------------------------------------------------------
+# ⭐ 🎣 **연속 출석으로 상한을 늘려줘요** (2026-10-27 7차 · 사용자 제안)
+#
+# ## 왜
+#
+# 6차 상한을 걸고 일주일 뒤 재보니, 그날 낚시한 **8명 중 6명이 20회 만땅**이었어요
+# (최근 이틀로 넓히면 6명 — 연속 출석 55·17·12·9·8·3일). 사용자가 "낚시를 더 하고
+# 싶어하는 사람들이 있다"고 해서 늘리기로 했어요.
+#
+# 🚨 **`DAILY_CAST_CAP` 자체를 올리지 않은 이유**: 전체 상한을 올리면 **애초에 안
+#    막혀 있던 사람까지 발행이 늘어요.** 라이트 유저는 20에 안 걸리니(6차 주석의
+#    "하루 10~20캐스트가 평범한 범위") 올려줘도 안 쓰고, 그런데 천장은 전원 올라가요.
+#    연속 출석에 묶으면 **매일 오는 사람에게만 열리고, 끊기면 닫혀요.**
+#
+# ## 🚨 주기를 10일로 하지 마세요 (첫 제안이 그거였어요)
+#
+# 실측에서 상한에 막힌 6명의 연속이 **55·17·12·9·8·3일**이라 10일 주기는 **3명에게만**
+# 닿았어요. 서버 **연속 출석 중앙값이 2일**이거든요 — 10일은 상위 6명만의 세계예요.
+# 게다가 10일 주기로 주는 보너스 36회 중 **22회(61%)가 상한에 안 걸리는 사람**
+# (63일인데 그날 1캐스트 · 35일 0캐스트 · 24일 0캐스트)에게 가서 그냥 안 쓰여요.
+# 5일 주기면 막힌 6명 중 **5명**에게 닿아요. 이 숫자들이 설계 근거예요.
+#
+# ## 🚨 `STREAK_CAST_MAX`가 새 천장이에요 — 비우지 마세요
+#
+# 상한을 안 두면 **1인 발행에 천장이 사라져요.** 실측에 63일 연속이 있어서
+# "5일마다 +2"를 무제한으로 두면 그 사람만 +24회고, 계속 자라요. 6차가 어렵게
+# 만든 "수식으로 막히는 발행"이 무의미해져요.
+#
+#     1인 하루 순발행 천장 = (DAILY_CAST_CAP + STREAK_CAST_MAX) × 캐스트당 순발행
+#                          = `ceiling_daily_net_issue()`
+#
+# ⚠️ **보너스는 연속이 "살아있을" 때만** 줘요. 판정은 `fishing_store._streak_sync`에
+#    있어요 — `attendanceStreak`은 **다음 출석 때까지 줄지 않아서**, 한 달 전에 55일을
+#    찍고 안 오는 사람도 DB엔 55로 남아 있어요(`attend_service._rankings_sync` 주석과
+#    같은 함정). 그 값을 그대로 쓰면 **안 오는 사람이 보너스를 영구히 받아요.**
+STREAK_CAST_EVERY = 5     # 연속 출석 N일마다
+STREAK_CAST_BONUS = 2     # 캐스트 +M회
+STREAK_CAST_MAX = 10      # 보너스 최대치 (= 새 발행 천장 · 0으로 두면 보너스 끔)
+
 GRADE_ORDER = ["전설", "대물", "희귀", "일반"]      # 보여줄 때 높은 등급부터
 
 # 어종. key는 저장용(ASCII 아니어도 되지만 짧게), name은 보여줄 이름이에요.
@@ -322,21 +361,71 @@ def net_issue_per_cast() -> float:
     return expected_coin_per_cast() - ROD_PRICE / ROD_DURABILITY
 
 
-def max_daily_net_issue() -> float:
+def streak_cast_bonus(streak: int) -> int:
+    """연속 출석 `streak`일로 얻는 **추가 캐스트 횟수**. (7차)
+
+    🚨 `STREAK_CAST_MAX`에서 멈춰요 — 그게 발행 천장이에요.
+    ⚠️ `streak`은 **살아있는 연속**이어야 해요(끊긴 기록은 0으로 넘기세요).
+       판정은 `fishing_store._streak_sync`가 해요.
+    ⚠️ `DAILY_CAST_CAP`이 0(무제한)이면 보너스는 의미가 없으니 0이에요."""
+    if streak <= 0 or not DAILY_CAST_CAP or not STREAK_CAST_EVERY:
+        return 0
+    return min(STREAK_CAST_MAX, (streak // STREAK_CAST_EVERY) * STREAK_CAST_BONUS)
+
+
+def daily_cap_for(streak: int) -> int:
+    """그 사람의 **하루 캐스트 상한**. 0이면 무제한이에요.
+
+    🚨 상한을 쓰는 곳은 전부 이 함수를 거쳐야 해요. `DAILY_CAST_CAP`을 직접 비교하면
+    7차 보너스를 무시하고 20에서 막아버려요(`fishing_store`의 조건부 update 포함)."""
+    if not DAILY_CAST_CAP:
+        return 0
+    return DAILY_CAST_CAP + streak_cast_bonus(streak)
+
+
+def max_daily_net_issue(streak: int = 0) -> float:
     """🚨 **1인 하루 순발행 상한.** 6차부터 경제에 실제로 더해질 수 있는 최대치예요.
+
+    ⚠️ 기본값은 **연속 보너스 없음**(=기본 상한 20회)이에요. 7차에서 기본값을 천장으로
+       바꾸려다 말았는데, 그러면 "하루 20번을 다 쓰면 N코인" 식으로 쓰고 있던 안내문
+       7곳이 **조용히 과장**돼요(평범한 사람이 버는 액수가 아니게 돼요).
+       경제 전체의 천장이 필요하면 `ceiling_daily_net_issue()`를 쓰세요.
 
     `DAILY_CAST_CAP`이 0(무제한)이면 상한이 없다는 뜻이라 `inf`를 줘요 — 0을 주면
     "발행이 없다"로 잘못 읽혀요."""
     if not DAILY_CAST_CAP:
         return float("inf")
-    return DAILY_CAST_CAP * net_issue_per_cast()
+    return daily_cap_for(streak) * net_issue_per_cast()
 
 
-def max_daily_income() -> float:
-    """상한을 다 쓴 사람이 하루에 **버는 총액**(낚시대값을 빼기 전)."""
+def ceiling_daily_net_issue() -> float:
+    """🚨 **경제의 1인 하루 발행 천장** = 연속 보너스를 다 받은 사람 기준(7차).
+
+    발행이 어디까지 갈 수 있나를 볼 땐 이걸 보세요. `max_daily_net_issue()`는
+    보너스가 없는 사람 기준이라 **천장을 낮게 잡아요.**"""
     if not DAILY_CAST_CAP:
         return float("inf")
-    return DAILY_CAST_CAP * expected_coin_per_cast()
+    return (DAILY_CAST_CAP + STREAK_CAST_MAX) * net_issue_per_cast()
+
+
+def income_for_cap(cap: int) -> float:
+    """상한이 `cap`회인 사람이 그걸 다 쓰면 **버는 총액**(낚시대값 빼기 전).
+
+    ⭐ 7차부터 상한이 사람마다 달라서, 안내문은 `DAILY_CAST_CAP`이 아니라
+    `fishing_store.cast_quota()`가 준 `cap`으로 계산해야 맞아요. 수식을 호출부에
+    복사하지 않게 이 함수를 거치세요."""
+    if not cap:
+        return float("inf")
+    return cap * expected_coin_per_cast()
+
+
+def max_daily_income(streak: int = 0) -> float:
+    """상한을 다 쓴 사람이 하루에 **버는 총액**(낚시대값을 빼기 전).
+
+    ⚠️ `max_daily_net_issue`와 같은 이유로 기본값은 **연속 보너스 없음**이에요."""
+    if not DAILY_CAST_CAP:
+        return float("inf")
+    return income_for_cap(daily_cap_for(streak))
 
 
 # 옛 이름. 낚시대 1개 = 하루치였던 시절의 흔적이라 그대로 둬요(호출부 호환).
