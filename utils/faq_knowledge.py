@@ -184,6 +184,8 @@ def _coin_earn() -> str:
 def _coin_spend() -> str:
     return f"""코인 쓰는 곳이에요.
 
+· 🪙 **#🪙｜악귀상점** 방에 가격표가 늘 떠 있어요 — **버튼을 누르면 그 자리에서 바로** 사져요
+  (2026-10-27부터. 명령어를 몰라도 돼요. 누른 결과는 **나한테만** 보여요)
 · 🛒 `/악귀상점` — 🎣 낚시대 {ROD_PRICE}코인(🪝 소형 {SMALL_ROD_PRICE}코인) · 🎲 미션 리롤권 {REROLL_PRICE}코인 ·
   🧊 출석 보호권 {PROTECT_PRICE}코인 · 🎨 프로필 카드 테마 {THEME_PRICE}코인
 · 🎴 `/카드뽑기` — {PULL_PRICE}코인에 {CARDS_PER_PULL}장
