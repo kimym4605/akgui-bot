@@ -190,7 +190,8 @@ MISS_COLOR = 0x6B7280
 _GRADE_KEYS = {g: [f["key"] for f in rows] for g, rows in FISH.items()}
 
 
-def roll_catch(rng: random.Random | None = None) -> str:
+def roll_catch(rng: random.Random | None = None,
+               rarity_factor: float = 1.0) -> str:
     """한 번 챔질에 **성공했을 때** 뭐가 잡히나.
 
     ⚠️ **꽝이 없어요**(2026-10-17 2차 설계). 타이밍만 맞히면 반드시 물고기가 나와요.
@@ -201,11 +202,16 @@ def roll_catch(rng: random.Random | None = None) -> str:
     낚시대 **개수**는 무제한이라, 개수로 발행량을 추정하면 통째로 틀려요. 1인 하루
     상한은 `fish_data.max_daily_net_issue()`가 알려줘요.
 
-    못 잡는 경우는 이제 **타이밍 실패뿐**이고, 그건 내 실수지 운이 아니에요."""
+    못 잡는 경우는 이제 **타이밍 실패뿐**이고, 그건 내 실수지 운이 아니에요.
+
+    🚨 **`rarity_factor`는 몰아 던지기 벌칙이에요**(8차). 1.0이 한 판 낚시고, 묶음이
+    커지면 1보다 작아져서 희귀 이상이 덜 나와요. 가중치 계산은
+    `fish_data.grade_weights` 한 곳에만 둬요 — 여기서 직접 곱하면 안내문
+    (`/낚시확률`)과 실제 추첨이 갈려요."""
     rng = rng or random
-    grades = list(GRADES)
-    weights = [GRADES[g]["weight"] for g in grades]
-    grade = rng.choices(grades, weights=weights, k=1)[0]
+    weights = fish_data.grade_weights(rarity_factor)
+    grades = list(weights)
+    grade = rng.choices(grades, weights=[weights[g] for g in grades], k=1)[0]
     return rng.choice(_GRADE_KEYS[grade])
 
 
@@ -426,6 +432,145 @@ async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> 
         await interaction.followup.send(embed=embed, view=next_view, ephemeral=True)
 
 
+async def finish_batch(interaction: discord.Interaction, view: "FishingView") -> None:
+    """🎣 **몰아 던지기** 결과를 보여줘요 (8차). `_run_cast`가 `batch > 1`일 때 불러요.
+
+    ## 규칙 (한 판 낚시와 일부러 다르게 둔 것만)
+
+    - 챔질 **1회**가 묶음 전체를 판정해요. 성공하면 `batch`판이 전부 잡혀요.
+    - 🚨 **놓치면 묶음 전체를 환불**해요(손해 0). 한 판 낚시의 `give_back_rod`와
+      같은 원칙이고, 묶음은 `give_back_rods`로 한 번에 돌려줘요.
+    - 🚨 **미스를 흉내내지 않아요.** 놓친 판은 하루 횟수까지 돌려주니(`finish_cast`
+      주석) 미스는 **소비한 캐스트당 수익에 영향이 없어요** — 흉내내면 "자동인데
+      왜 놓쳐?"라는 혼란만 남아요.
+    - 🚨 희귀 이상 확률만 `batch_rarity_factor`로 낮춰요. **치수는 그대로**예요 —
+      최대어는 등급이 먼저라(`fishing_week`), 전설·최대어를 노리면 여전히 한 판씩
+      던지는 게 유리해요. 그게 수동 낚시를 살려두는 장치예요.
+
+    ⚠️ 기록은 `record_casts` **한 번**으로 끝내요. `record_cast`를 N번 부르면
+       Atlas 왕복이 N×2회라 30판이면 결과 화면이 몇 초씩 늦어요."""
+    uid = interaction.user.id
+    n = view.batch
+
+    if view.result != "ok":
+        # 🚨 묶음을 통째로 돌려줘요. 안 돌려주면 한 번 놓치고 하루치를 날려요.
+        await fishing_store.give_back_rods(uid, n)
+        view.rod_left += n
+        reason = {
+            "early": "너무 일찍 챘어요. 미끼만 날아갔네요.",
+            "afk": "챔질을 하지 않아서 물고기가 그냥 갔어요.",
+        }.get(view.result, "놓쳤어요.")
+        used, cap = await fishing_store.cast_quota(uid)
+        embed = discord.Embed(
+            title="💨 전부 놓쳤어요",
+            description=(f"{reason}\n"
+                         f"**{n}번**을 묶어 던졌는데 한 번에 다 놓쳤어요 — "
+                         f"**횟수는 전부 돌려드렸어요.**"),
+            color=MISS_COLOR,
+        )
+        embed.set_footer(text="손해는 없어요 · 다시 던져보세요")
+        today_left = max(0, cap - used) if cap else None
+        next_view = (CastAgainView(uid, view.rod_left, today_left)
+                     if view.rod_left else BuyRodView(uid))
+        try:
+            await interaction.edit_original_response(embed=embed, view=next_view)
+        except discord.HTTPException:
+            await interaction.followup.send(embed=embed, view=next_view, ephemeral=True)
+        return
+
+    # ── 성공: n판을 굴려요 ────────────────────────────────────────────
+    factor = fish_data.batch_rarity_factor(n)
+    catches: list[tuple[str, int]] = []
+    for _ in range(n):
+        key = roll_catch(rarity_factor=factor)
+        catches.append((key, roll_size(key)))
+
+    await fishing_store.record_casts(uid, n, catches)
+
+    # 🎯 🎣 "세 마리 낚기" — 묶음은 **목표치만큼만** 불러요.
+    #    `progress`는 1씩 올리니 N번 불러야 N마리가 세어지는데, 목표를 넘겨 부르면
+    #    아무 일도 안 일어나요(이미 깬 미션). 30판이면 왕복이 60회라 그만큼 늦어요.
+    # 🚨 목표치를 손으로 적지 마세요 — `MISSIONS`에서 읽어요.
+    target = int((mission.MISSIONS.get("catch_fish") or {}).get("target") or 1)
+    for _ in range(min(len(catches), target)):
+        await mission.on_action(uid, "catch_fish", interaction.channel, interaction.user)
+
+    # ── 결과 표 ──────────────────────────────────────────────────────
+    total_pieces = sum(pieces_of(k, s) for k, s in catches)
+    by_grade: dict[str, int] = {}
+    for key, _size in catches:
+        by_grade[BY_KEY[key][0]] = by_grade.get(BY_KEY[key][0], 0) + 1
+
+    # 📏 묶음 안의 최고 한 마리 — 등급이 먼저, 같으면 치수
+    def _rank(key: str) -> int:
+        return len(GRADE_ORDER) - GRADE_ORDER.index(BY_KEY[key][0])
+
+    bkey, bsize = max(catches, key=lambda kv: (_rank(kv[0]), kv[1]))
+    bgrade, bname = BY_KEY[bkey]
+    blo, bhi = fish_data.SIZE_BY_KEY[bkey]
+    bpct = int((bsize - blo) / max(1, bhi - blo) * 100)
+    btag = " 🏆 **최대급!**" if bpct >= 90 else (" ✨ 큼직해요" if bpct >= 70 else "")
+
+    embed = discord.Embed(
+        title=f"🎣 {n}번 던져서 {len(catches)}마리!",
+        description=f"판매가 합계 **{total_pieces / COIN_PIECES:.1f}코인**",
+        color=GRADES[bgrade]["color"],
+    )
+    embed.add_field(
+        name="등급별",
+        value=" · ".join(f"{GRADES[g]['emoji']} **{g}** {by_grade[g]}마리"
+                         for g in GRADE_ORDER if g in by_grade),
+        inline=False,
+    )
+    embed.add_field(
+        name="가장 좋은 놈",
+        value=f"{GRADES[bgrade]['emoji']} **{bgrade} · {bname} {bsize}cm**{btag}",
+        inline=False,
+    )
+    # ⚠️ 전부 나열하면 30마리에서 임베드가 터져요(필드 1024자). 희귀 이상만 적어요 —
+    #    일반은 등급별 수만 보여줘도 충분하고, 사람들이 궁금한 건 희귀 쪽이에요.
+    rare = [(k, s) for k, s in catches if BY_KEY[k][0] != fish_data.COMMON_GRADE]
+    if rare:
+        lines = [f"{GRADES[BY_KEY[k][0]]['emoji']} {BY_KEY[k][1]} {s}cm "
+                 f"({pieces_of(k, s) / COIN_PIECES:.1f}코인)"
+                 for k, s in sorted(rare, key=lambda kv: -_rank(kv[0]))[:12]]
+        more = len(rare) - len(lines)
+        embed.add_field(
+            name=f"🐠 희귀 이상 {len(rare)}마리",
+            value="\n".join(lines) + (f"\n-# 외 {more}마리" if more > 0 else ""),
+            inline=False,
+        )
+
+    state = await fishing_store.get(uid)
+    total = sum(len(v) for v in state["tank"].values())
+    used, cap = await fishing_store.cast_quota(uid)
+    today_left = max(0, cap - used) if cap else None
+    embed.add_field(name="어항", value=f"**{total}마리** 모여 있어요", inline=True)
+    if cap:
+        bonus = cap - DAILY_CAST_CAP
+        embed.add_field(
+            name="오늘 남은 횟수",
+            value=((f"**{today_left}/{cap}번**" if today_left
+                    else "**다 썼어요** (내일 자정에 채워져요)")
+                   + (f"\n-# 🔥 연속 출석 +{bonus}" if bonus > 0 else "")),
+            inline=True,
+        )
+    embed.set_footer(
+        text=(f"몰아 던져서 희귀 이상 확률이 {1 - factor:.0%} 낮았어요 "
+              "· 노릴 땐 한 판씩 던지세요" if factor < 1.0 else
+              "/물고기판매 로 한 번에 팔아요"))
+
+    next_view = (CastAgainView(uid, view.rod_left, today_left)
+                 if view.rod_left else BuyRodView(uid))
+    try:
+        await interaction.edit_original_response(embed=embed, view=next_view)
+    except discord.HTTPException:
+        await interaction.followup.send(embed=embed, view=next_view, ephemeral=True)
+
+    log.info("🎣 몰아 던지기: %s / %d판 %d마리 %.1f코인 (배수 %.2f)",
+             uid, n, len(catches), total_pieces / COIN_PIECES, factor)
+
+
 class CastAgainView(discord.ui.View):
     """🎣 다시 던지기 - 결과 화면에 붙어요.
 
@@ -447,6 +592,48 @@ class CastAgainView(discord.ui.View):
         #    2번만 남았으면 "8번 남음"은 거짓이에요(눌러보고 나서 막히면 혼란스러워요).
         left = rod_left if today_left is None else min(rod_left, today_left)
         self.again.label = f"다시 던지기 ({left}번 남음)"
+
+        # ⭐ 🎣 **몰아 던지기 버튼**(8차). 사용자가 "결과 화면 버튼 + `/낚시` 옵션
+        #    둘 다"로 정했어요. → `utils/fish_data.BATCH_SIZES`
+        #
+        # 🚨 **던질 수 있는 수보다 큰 묶음은 아예 안 보여줘요.** 보여주고 나서
+        #    "5번 남았는데 10번 버튼"을 누르면 5판만 돌아가는데, 그건 유저가
+        #    **벌칙은 10판 기준으로 받는다고 오해**할 자리예요(실제로는 받은 수
+        #    기준으로 계산해요 — `_run_cast`의 `granted` 주석).
+        # ⚠️ 라벨에 숫자를 손으로 적지 않아요. 묶음 크기를 바꾸면 버튼이 따라와요.
+        for size in fish_data.BATCH_SIZES:
+            if left > size:
+                btn = discord.ui.Button(
+                    label=f"{size}번 몰아 던지기", emoji="🎣",
+                    style=discord.ButtonStyle.secondary, row=1)
+                btn.callback = self._make_batch(size)
+                self.add_item(btn)
+        # 「남은 전부」는 **2판 이상 남았을 때만** — 1판이면 '다시 던지기'와 같아요.
+        if left > 1:
+            all_btn = discord.ui.Button(
+                label=f"남은 {left}번 전부", emoji="🎣",
+                style=discord.ButtonStyle.success, row=1)
+            all_btn.callback = self._make_batch(0)
+            self.add_item(all_btn)
+
+    def _make_batch(self, size: int):
+        """묶음 버튼의 콜백을 만들어요. `size=0`이면 **남은 전부**예요.
+
+        🚨 `again`과 **같은 연타 가드**(`self._started`)를 써요. 따로 두면
+        '다시 던지기'와 '10번 몰아'를 동시에 눌러 두 판이 겹쳐요."""
+        async def _cb(interaction: discord.Interaction):
+            if self._started:
+                await interaction.response.defer()
+                return
+            self._started = True
+            try:
+                started = await run_cast(interaction, edit=True, batch=size)
+            except Exception:
+                self._started = False
+                raise
+            if not started:
+                self._started = False
+        return _cb
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
@@ -474,7 +661,8 @@ class CastAgainView(discord.ui.View):
             self._started = False
 
 
-async def run_cast(interaction: discord.Interaction, *, edit: bool) -> bool:
+async def run_cast(interaction: discord.Interaction, *, edit: bool,
+                   batch: int = 1) -> bool:
     """한 판 돌리기. **동시에 한 판만** 허용하는 가드를 씌운 얇은 껍데기예요.
 
     실제 진행은 `_run_cast`가 해요. 가드를 여기서 따로 떼어둔 이유는, 안쪽에서
@@ -502,12 +690,13 @@ async def run_cast(interaction: discord.Interaction, *, edit: bool) -> bool:
 
     _casting[uid] = now
     try:
-        return await _run_cast(interaction, edit=edit)
+        return await _run_cast(interaction, edit=edit, batch=batch)
     finally:
         _casting.pop(uid, None)
 
 
-async def _run_cast(interaction: discord.Interaction, *, edit: bool) -> bool:
+async def _run_cast(interaction: discord.Interaction, *, edit: bool,
+                    batch: int = 1) -> bool:
     """한 번 던지기. `/낚시`와 🎣 다시 던지기 버튼이 **같이** 써요.
 
     `edit=False`면 새 메시지를 띄우고(슬래시 명령), `edit=True`면 **지금 메시지를
@@ -551,9 +740,22 @@ async def _run_cast(interaction: discord.Interaction, *, edit: bool) -> bool:
     # 🚨 **내구도를 먼저 깎고** 시작해요. 던지고 나서 깎으면, 미니게임 도중에
     #    여러 번 `/낚시`를 쳐서 내구도 1개로 여러 판을 돌릴 수 있어요.
     #
-    # 🚨 **반환이 튜플이에요**(2026-10-20 6차). `if left is None:`으로 받으면 튜플은
-    #    항상 참이라 상한도 품절도 안 걸리고 그냥 던져져요.
-    left, blocked = await fishing_store.use_rod(uid)
+    # ⭐ 🎣 **몰아 던지기**(8차). `batch`가 몇 판을 묶을지예요 — `0`이면 **남은 전부**.
+    #
+    # 🚨 요청한 만큼 **못 받을 수 있어요**(상한·내구도가 모자랄 때). 아래부터는
+    #    `want`가 아니라 **`granted`**를 써야 해요. `want`로 굴리면 받지도 않은
+    #    캐스트로 물고기를 만들어서 **없는 코인을 발행**해요.
+    # 🚨 `use_rods`는 **3-튜플**이에요(`use_rod`는 2-튜플). 섞어 받으면 `blocked`
+    #    자리에 숫자가 들어가서 상한도 품절도 안 걸리고 그냥 던져져요.
+    want = batch if batch > 0 else 0
+    if want == 0:
+        # "남은 전부" — 상한과 내구도 중 **먼저 바닥나는 쪽**까지예요.
+        # ⚠️ `use_rods`가 어차피 둘 다 보고 깎지만, `want=0`을 넘기면 0개를 받아요.
+        #    그래서 여기서 한 번 읽어 상한을 알아내요(무제한이면 내구도까지).
+        used_q, cap_q = await fishing_store.cast_quota(uid)
+        rod_q, _ = await fishing_store.rod_state(uid)
+        want = max(1, min(rod_q, cap_q - used_q) if cap_q else max(1, rod_q))
+    granted, left, blocked = await fishing_store.use_rods(uid, want)
 
     if blocked == "cap":
         # ⭐ 하루 상한. **낚시대는 안 깎였어요** — 남은 횟수를 같이 알려줘서
@@ -598,14 +800,42 @@ async def _run_cast(interaction: discord.Interaction, *, edit: bool) -> bool:
         )
         return True
 
+    if blocked or granted <= 0:
+        # ⭐ `"race"` — 조건부 update가 동시 요청에 계속 졌어요(8차에 생긴 사유).
+        #    아무것도 안 깎였으니 그냥 다시 누르면 돼요.
+        # 🚨 `granted <= 0`을 **같이** 보는 게 중요해요. 새 사유가 생겼을 때
+        #    분기를 빠뜨리면 0판으로 미니게임이 돌아가서 "잡았는데 어항이 안 늘어요"가 돼요.
+        await show(
+            content=("🎣 방금 다른 처리가 먼저 들어갔어요. **다시 눌러주세요.**\n"
+                     "-# 낚시대도 횟수도 **그대로**예요."),
+            embed=None, view=None,
+        )
+        log.info("🎣 캐스트 차감 실패 (user=%s want=%s reason=%s)", uid, want, blocked)
+        return True
+
     view = FishingView(uid)
     view.rod_left = left
-    embed = discord.Embed(
-        title="🎣 찌를 던졌어요",
-        description="찌를 지켜보세요... **입질이 오면 바로 챔질!**",
-        color=WAIT_COLOR,
-    )
-    embed.set_footer(text="너무 일찍 누르면 미끼만 날려요")
+    view.batch = granted
+    if granted > 1:
+        # ⭐ 묶음이면 **몇 판인지와 벌칙을 먼저** 보여줘요. 결과에서야 알면
+        #    "왜 희귀가 안 나오지?"가 돼요 — 값을 미리 밝히는 게 공정해요.
+        factor = fish_data.batch_rarity_factor(granted)
+        embed = discord.Embed(
+            title=f"🎣 {granted}번 몰아 던졌어요",
+            description=("찌를 지켜보세요... **입질이 오면 한 번만 챔질!**\n"
+                         f"그 한 번으로 **{granted}판**이 전부 판정돼요."),
+            color=WAIT_COLOR,
+        )
+        embed.set_footer(
+            text=f"몰아 던지면 희귀 이상 확률이 {1 - factor:.0%} 낮아져요 "
+                 "· 놓치면 횟수를 전부 돌려받아요")
+    else:
+        embed = discord.Embed(
+            title="🎣 찌를 던졌어요",
+            description="찌를 지켜보세요... **입질이 오면 바로 챔질!**",
+            color=WAIT_COLOR,
+        )
+        embed.set_footer(text="너무 일찍 누르면 미끼만 날려요")
     # 🚨 **본인에게만** 보여요. 한 채널에서 여러 명이 동시에 던지면 찌가 뒤섞여서
     #    어느 게 내 건지 알 수 없고, 남의 '입질!'을 보고 눌러버리기도 해요.
     await show(content=None, embed=embed, view=view)
@@ -652,7 +882,10 @@ async def _run_cast(interaction: discord.Interaction, *, edit: bool) -> bool:
     #    2026-10-17에 "눌렀는데 봇이 반응이 없다"는 신고가 있었는데 로그가 없어서
     #    원인 찾기가 어려웠어요. 결과 표시 실패는 반드시 흔적을 남겨요.
     try:
-        await finish_cast(interaction, view)
+        if view.batch > 1:
+            await finish_batch(interaction, view)
+        else:
+            await finish_cast(interaction, view)
     except Exception:
         log.exception("🎣 낚시 결과 표시 실패 (user=%s result=%s)", uid, view.result)
         try:
@@ -682,6 +915,10 @@ class FishingView(discord.ui.View):
         self.caught: str | None = None
         self.size: int | None = None          # 📏 잡힌 물고기의 치수(cm)
         self.rod_left = 0                     # 이번 캐스트 뒤 남은 내구도
+        # ⭐ 🎣 몰아 던지기(8차). 이 찌가 **몇 판을 묶고 있나**예요. 1이면 한 판.
+        # ⚠️ 이 뷰는 **한 사람의 한 번**에만 쓰이는 일회성이라 상태를 담아도 돼요
+        #    (영속 뷰라면 금지예요 — `cogs/suggestion.py` 주석 참고).
+        self.batch = 1
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.user_id:
@@ -751,9 +988,25 @@ class Fishing(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="낚시", description="찌를 던져 물고기를 낚아요. (낚시대가 필요해요)")
+    @app_commands.describe(
+        횟수="한 번에 몰아서 던질 횟수 (안 적으면 1판 · 몰아 던지면 희귀 확률이 낮아져요)")
+    @app_commands.choices(횟수=[
+        app_commands.Choice(name="1번 (한 판씩 · 희귀 확률 그대로)", value=1),
+        # ⚠️ 선택지 이름에 **확률 숫자를 손으로 적지 않아요.** 벌칙 상수를 바꾸면
+        #    여기가 거짓이 돼요. 정확한 수치는 `/낚시확률`이 계산해서 보여줘요.
+        app_commands.Choice(name="5번 몰아 던지기", value=5),
+        app_commands.Choice(name="10번 몰아 던지기", value=10),
+        app_commands.Choice(name="남은 횟수 전부 몰아 던지기", value=0),
+    ])
     @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
-    async def fish(self, interaction: discord.Interaction):
-        await run_cast(interaction, edit=False)
+    async def fish(self, interaction: discord.Interaction,
+                   횟수: app_commands.Choice[int] | None = None):
+        """🎣 한 판 또는 **몰아 던지기**(8차).
+
+        ⚠️ 선택지는 `BATCH_SIZES`와 맞춰 두세요. 데코레이터엔 f-string을 못 써서
+           손으로 적을 수밖에 없는 자리인데, `test_fishing.py`가 둘이 어긋나면 잡아요."""
+        await run_cast(interaction, edit=False,
+                       batch=(횟수.value if 횟수 else 1))
 
     @app_commands.command(name="어항", description="낚아둔 물고기를 봐요.")
     @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
@@ -996,6 +1249,32 @@ class Fishing(commands.Cog):
                    "다음 판매로 넘어가요"),
             inline=False,
         )
+        # ⭐ 🎣 몰아 던지기 벌칙을 **표로** 보여줘요(8차). 🚨 숫자는 전부
+        #    `fish_data`에서 계산해요 — 상수를 바꾸면 이 표가 따라와요.
+        if fish_data.BATCH_RARITY_PENALTY:
+            rows = []
+            for n in (1, *fish_data.BATCH_SIZES, my_cap):
+                if n < 1 or (n != 1 and n <= max(fish_data.BATCH_SIZES, default=0)
+                             and n != my_cap and n not in fish_data.BATCH_SIZES):
+                    continue
+                f = fish_data.batch_rarity_factor(n)
+                ch = fish_data.grade_chance(f)
+                rare = sum(v for g, v in ch.items() if g != fish_data.COMMON_GRADE)
+                label = "한 판씩" if n == 1 else f"{n}번 몰아"
+                rows.append(
+                    f"**{label}** — 희귀 이상 **{rare * 100:.2f}%** · "
+                    f"전설 {ch['전설'] * 100:.3f}% · "
+                    f"1회 평균 {fish_data.expected_coin_per_cast(f):.2f}코인")
+            embed.add_field(
+                name="🎣 몰아 던지면 희귀 확률이 낮아져요",
+                value=("\n".join(dict.fromkeys(rows))
+                       + f"\n　└ 묶음 1회마다 희귀 이상 가중치 "
+                         f"**−{fish_data.BATCH_RARITY_PENALTY:.0%}** "
+                         f"(최대 −{1 - fish_data.BATCH_RARITY_FLOOR:.0%}까지)\n"
+                         "　└ 📏 **치수는 안 깎여요** — 최대어는 등급이 먼저라 "
+                         "전설·최대어를 노리면 한 판씩 던지는 게 유리해요"),
+                inline=False,
+            )
         embed.add_field(
             name="📏 같은 어종도 치수가 값을 갈라요",
             value=("위 등급 값 범위의 **아래쪽~위쪽**을 치수가 정해요.\n"

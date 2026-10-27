@@ -103,12 +103,56 @@ def _top_sync(wk: str, by: str, limit: int) -> list[dict]:
 # ------------------------------------------------------------------
 # 여기부터 async (동기 pymongo를 그대로 부르면 이벤트 루프가 멈춰요)
 # ------------------------------------------------------------------
+def _record_catches_sync(user_id, caught: int, key: str | None,
+                         size: int | None, rank: int) -> None:
+    """🎣 몰아 던지기 — N마리를 **한 번의 왕복으로** 적립해요. (8차)
+
+    `key`/`size`/`rank`는 그 묶음에서 **제일 좋은 한 마리**예요
+    (`fishing_store._record_casts_sync`가 골라서 넘겨줘요).
+
+    🚨 `record_catch`를 N번 부르면 Atlas 왕복이 N×2회예요 — 30번 몰아 던지면 60회라
+       결과 화면이 그만큼 늦어요.
+    🚨 주간 최대어는 **등급(rank) 먼저, 같으면 치수**로 비교해요(`/낚시대회`가 그 규칙)."""
+    wk = week_key()
+    did = _doc_id(wk, user_id)
+
+    _week.update_one(
+        {"_id": did},
+        {
+            "$inc": {"caught": max(0, caught)},
+            "$setOnInsert": {"week": wk, "userId": str(user_id), "sold": 0},
+        },
+        upsert=True,
+    )
+    if key is None:
+        return
+
+    doc = _week.find_one({"_id": did}, {"bestRank": 1, "bestSize": 1}) or {}
+    prev_rank = int(doc.get("bestRank") or 0)
+    prev_size = int(doc.get("bestSize") or 0)
+    better = (rank > prev_rank) or (rank == prev_rank and (size or 0) > prev_size)
+    if better:
+        _week.update_one(
+            {"_id": did},
+            {"$set": {"bestKey": key, "bestSize": size or 0, "bestRank": rank}},
+        )
+
+
 async def record_catch(user_id, key: str | None, size: int | None, rank: int) -> None:
     """🚨 실패해도 **예외를 올리지 않아요.** 낚시 본 흐름을 막으면 안 돼요."""
     try:
         await asyncio.to_thread(_record_catch_sync, user_id, key, size, rank)
     except Exception:  # noqa: BLE001
         log.warning("🎣 주간 기록 적립 실패 (user=%s)", user_id, exc_info=True)
+
+
+async def record_catches(user_id, caught: int, key: str | None,
+                         size: int | None, rank: int) -> None:
+    """🎣 몰아 던지기 묶음 적립. 🚨 실패해도 **예외를 올리지 않아요.**"""
+    try:
+        await asyncio.to_thread(_record_catches_sync, user_id, caught, key, size, rank)
+    except Exception:  # noqa: BLE001
+        log.warning("🎣 주간 묶음 적립 실패 (user=%s)", user_id, exc_info=True)
 
 
 async def add_sold(user_id, coins: int) -> None:

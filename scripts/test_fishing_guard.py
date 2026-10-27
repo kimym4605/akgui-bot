@@ -64,7 +64,9 @@ async def main():
     release = asyncio.Event()
     calls = []
 
-    async def slow_cast(interaction, *, edit):
+    # ⚠️ `batch`는 8차 몰아 던지기 인자예요. 스텁이 안 받으면 `run_cast`가
+    #    `TypeError`로 터져서 **가드 자체가 검증되지 않아요.**
+    async def slow_cast(interaction, *, edit, batch=1):
         calls.append(interaction.user.id)
         await release.wait()
         return True
@@ -98,7 +100,7 @@ async def main():
     print("\n⒞ 판이 끝나면 다시 던질 수 있다")
     check("가드가 비워졌다", USER_A not in fishing._casting)
 
-    async def quick_cast(interaction, *, edit):
+    async def quick_cast(interaction, *, edit, batch=1):
         calls.append(interaction.user.id)
         return True
 
@@ -109,7 +111,7 @@ async def main():
     # ── ⒟ 🚨 예외가 나도 갇히지 않는다 ──────────────────────────────────
     print("\n⒟ 🚨 안쪽에서 예외가 나도 플래그가 풀린다")
 
-    async def boom_cast(interaction, *, edit):
+    async def boom_cast(interaction, *, edit, batch=1):
         raise RuntimeError("낚시 도중 터짐 시뮬레이션")
 
     fishing._run_cast = boom_cast

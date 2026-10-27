@@ -162,67 +162,148 @@ def _quota_sync(user_id) -> tuple[int, int]:
     return used, _cap_sync(user_id)
 
 
+def _use_rods_sync(user_id, want: int) -> tuple[int, int, str | None]:
+    """내구도와 하루 횟수를 **한꺼번에 최대 `want`개** 소모해요. (8차 몰아 던지기)
+
+    돌려주는 건 **(실제로 받은 횟수, 남은 내구도, 막힌 이유)**예요. 0개를 받았으면
+    이유가 `"no_rod"`(낚시대 없음) · `"cap"`(하루 상한) · `"race"`(경쟁에 계속 짐)예요.
+
+    ⭐ `want=1`이면 한 판 낚시예요 — **경로를 하나로 합쳐뒀어요.** 캐스트를 깎는
+    코드가 두 벌이면 한쪽만 고치는 사고가 나요(이 저장소에서 반복된 종류예요).
+
+    🚨 **조건부 update 하나로** 깎아요. "읽고 → 확인하고 → 쓰기"로 하면 빠르게 두 번
+       누를 때 상한을 넘겨 던지거나 내구도가 음수가 돼요.
+    🚨 상한 조건은 **`$lte: cap - k`** 예요. `$lt`로 걸면 k를 더한 뒤 상한을 **1 넘겨요**
+       (한 판씩 깎을 때는 `$lt`가 맞았는데, k개를 더하는 순간 경계가 달라져요).
+    🚨 상한은 `_cap_sync`로 구해요 — `DAILY_CAST_CAP`을 직접 보면 7차 연속 출석
+       보너스를 무시하고 20에서 막아요.
+    ⚠️ 경쟁에 져서 0건이면 **다시 읽고 재시도**해요(그 사이에 남은 수가 줄었어요).
+    ⚠️ 날짜가 바뀐 첫 캐스트는 `$inc`가 아니라 `$set`으로 리셋해야 해서 쿼리가 둘이에요
+       (`$ne`는 필드가 없는 문서에도 걸려서 첫 낚시도 받아줘요)."""
+    uid = _uid(user_id)
+    today = today_iso()
+    cap = _cap_sync(user_id)
+    rod = 0
+
+    for _ in range(3):
+        doc = _fish.find_one(
+            {"_id": uid}, {"rod": 1, "cast_date": 1, "casts_today": 1}) or {}
+        rod = int(doc.get("rod") or 0)
+        fresh = doc.get("cast_date") == today
+        used = int(doc.get("casts_today") or 0) if fresh else 0
+        room = (cap - used) if cap else want
+        k = max(0, min(want, rod, room))
+        if k <= 0:
+            # ⭐ 낚시대가 없으면서 상한도 찼으면 **상한을 먼저** 알려줘요 — 그 사람에게
+            #    "낚시대를 사라"고 하면 오늘은 못 쓰는 걸 사게 돼요.
+            if cap and used >= cap:
+                return 0, rod, "cap"
+            return 0, rod, "no_rod"
+
+        if fresh:
+            cond: dict = {"_id": uid, "rod": {"$gte": k}, "cast_date": today}
+            if cap:
+                cond["casts_today"] = {"$lte": cap - k}
+            got = _fish.find_one_and_update(
+                cond, {"$inc": {"rod": -k, "casts_today": k}},
+                return_document=ReturnDocument.AFTER)
+        else:
+            got = _fish.find_one_and_update(
+                {"_id": uid, "rod": {"$gte": k}, "cast_date": {"$ne": today}},
+                {"$inc": {"rod": -k}, "$set": {"cast_date": today, "casts_today": k}},
+                return_document=ReturnDocument.AFTER)
+        if got is not None:
+            return k, int(got.get("rod") or 0), None
+
+    log.warning("🎣 캐스트 차감이 경쟁에 계속 졌어요 (user=%s want=%s)", user_id, want)
+    return 0, rod, "race"
+
+
+def _give_back_rods_sync(user_id, n: int) -> None:
+    """🎣 묶음을 통째로 되돌려요 — 챔질을 놓쳤을 때. 내구도 n + 하루 횟수 n. (8차)
+
+    🚨 하루 횟수는 **오늘자일 때만** 깎아요. 자정을 넘겨 돌려주면 어제 몫으로
+    **오늘 공짜 캐스트**가 생겨요(`_give_back_rod_sync`와 같은 이유).
+    🚨 `casts_today`가 n보다 적으면 **있는 만큼만** 깎아요. 조건 없이 `-n`을 하면
+       음수가 돼서 **다음 날 상한이 그만큼 늘어나요.**"""
+    if n <= 0:
+        return
+    uid = _uid(user_id)
+    _fish.update_one({"_id": uid}, {"$inc": {"rod": n}}, upsert=True)
+
+    today = today_iso()
+    doc = _fish.find_one({"_id": uid}, {"cast_date": 1, "casts_today": 1}) or {}
+    if doc.get("cast_date") != today:
+        return
+    back = min(n, int(doc.get("casts_today") or 0))
+    if back > 0:
+        _fish.update_one(
+            {"_id": uid, "cast_date": today, "casts_today": {"$gte": back}},
+            {"$inc": {"casts_today": -back}})
+
+
+def _record_casts_sync(user_id, casts: int,
+                       catches: list[tuple[str, int]]) -> tuple[str, int, int] | None:
+    """🎣 몰아 던지기 결과를 **한 번의 update로** 기록해요. (8차)
+
+    `catches`는 `(어종key, 치수)` 목록, `casts`는 던진 총 횟수예요(놓친 판까지 셈).
+    돌려주는 건 그 묶음에서 제일 좋은 놈 `(key, size, rank)` — 주간 대회가 써요.
+
+    🚨 `record_cast`를 N번 부르면 Atlas 왕복이 **N×2회**예요(최고기록 조회까지).
+       30번 몰아 던지면 60회라 결과 화면이 그만큼 늦어요.
+    🚨 같은 어종이 여러 마리면 `$push`에 **`$each`로 모아야** 해요. 같은 키로
+       `$push`를 두 번 쓰면 MongoDB가 `ConflictingUpdateOperators`로 거절해요."""
+    if casts <= 0 and not catches:
+        return None
+    update: dict = {"$inc": {"casts": casts}}
+    best: tuple[str, int, int] | None = None
+
+    if catches:
+        from utils.fish_data import GRADE_ORDER
+
+        def _rank(key: str) -> int:
+            grade = BY_KEY[key][0]
+            return len(GRADE_ORDER) - GRADE_ORDER.index(grade)
+
+        update["$inc"]["caught"] = len(catches)
+        push: dict = {}
+        for key, size in catches:
+            push.setdefault(f"tank.{key}", {"$each": []})["$each"].append(size)
+        update["$push"] = push
+
+        bkey, bsize = max(catches, key=lambda kv: (_rank(kv[0]), kv[1] or 0))
+        brank = _rank(bkey)
+        best = (bkey, bsize, brank)
+
+        doc = _fish.find_one({"_id": _uid(user_id)}, {"best": 1}) or {}
+        prev = doc.get("best") or {}
+        prev_rank, prev_size = int(prev.get("rank", 0)), int(prev.get("size") or 0)
+        if brank > prev_rank or (brank == prev_rank and (bsize or 0) > prev_size):
+            update["$set"] = {"best": {"key": bkey, "rank": brank, "size": bsize}}
+
+    _fish.update_one({"_id": _uid(user_id)}, update, upsert=True)
+    return best
+
+
 def _use_rod_sync(user_id) -> tuple[int | None, str | None]:
-    """내구도를 1 깎고 하루 횟수를 1 세요. **(남은 내구도, 막힌 이유)**를 줘요.
+    """한 판 낚시 — 내구도 1 + 하루 횟수 1 소모. **(남은 내구도, 막힌 이유)**를 줘요.
 
     이유는 성공이면 `None`, 낚시대가 없으면 `"no_rod"`, 하루 상한에 걸리면 `"cap"`
     이에요. 상한에 걸렸을 땐 내구도를 **안 깎아요**(낚시대가 그대로 남아요).
 
-    🚨 **내구도와 하루 횟수를 한 번의 update로 같이** 움직여요. "읽고 → 확인하고 →
-    쓰기"로 하면 빠르게 두 번 누를 때 상한을 넘겨 던지거나 내구도가 음수가 돼요.
-    (같은 이유로 `_buy_rod_sync`도 조건부 update 하나로 돼 있어요.)
+    ⭐ **실제 차감은 `_use_rods_sync(user_id, 1)` 한 곳에서만** 일어나요(8차에 합쳤어요).
+    캐스트를 깎는 코드가 두 벌이면 상한·날짜리셋·동시성 중 하나를 한쪽만 고치는
+    사고가 나요 — 이 저장소에서 반복된 종류예요. 조건부 update·날짜 리셋·7차
+    연속 출석 보너스 처리는 전부 그쪽 주석에 있어요.
 
-    ⚠️ 쿼리가 **두 개**인 건 날짜 리셋 때문이에요. 하나로 합칠 방법이 없어요 —
-    "오늘자 카운터를 늘린다"와 "날짜가 바뀌었으니 1로 리셋한다"는 서로 다른 조건과
-    서로 다른 연산(`$inc` vs `$set`)이라서요. 순서는 **반드시 오늘자 먼저**예요.
-    반대로 두면 날짜가 바뀐 첫 캐스트가 아니라 **매번** 리셋 쪽에 걸려요.
-
-    🚨 `{"cast_date": {"$ne": today}}`는 **필드가 없는 문서에도 걸려요**(MongoDB의
-    `$ne`는 missing을 포함해요). 그래서 낚시를 처음 하는 사람도 2번 쿼리가 받아줘요."""
-    today = today_iso()
-    uid = _uid(user_id)
-    # 🚨 **상한을 먼저 구해요**(7차). 사람마다 다르니 `DAILY_CAST_CAP`을 조건에 그대로
-    #    넣으면 보너스를 받은 사람이 20에서 막혀요.
-    # ⚠️ 읽기 1~2번이 늘지만 이 함수는 이미 스레드에서 돌고, 호출부가 `defer`를
-    #    **먼저** 해둬요(`cogs/fishing.py`의 3초 토큰 주석). 그래서 안전해요.
-    cap = _cap_sync(user_id)
-
-    # 1) 오늘 이미 던진 적이 있고 상한에 안 걸렸으면 → 둘 다 원자적으로
-    cond: dict = {"_id": uid, "rod": {"$gte": 1}, "cast_date": today}
-    if cap:
-        cond["casts_today"] = {"$lt": cap}
-    doc = _fish.find_one_and_update(
-        cond,
-        {"$inc": {"rod": -1, "casts_today": 1}},
-        return_document=ReturnDocument.AFTER,
-    )
-    if doc is not None:
-        return int(doc.get("rod", 0) or 0), None
-
-    # 2) 날짜가 바뀌었거나 오늘이 첫 캐스트면 → 카운터를 1로 리셋하면서 차감
-    doc = _fish.find_one_and_update(
-        {"_id": uid, "rod": {"$gte": 1}, "cast_date": {"$ne": today}},
-        {"$inc": {"rod": -1}, "$set": {"cast_date": today, "casts_today": 1}},
-        return_document=ReturnDocument.AFTER,
-    )
-    if doc is not None:
-        return int(doc.get("rod", 0) or 0), None
-
-    # 3) 둘 다 안 걸렸으면 **왜** 막혔는지 알려줘요.
-    #
-    # ⚠️ 여기는 읽기만 해요. 위 두 쿼리가 이미 "안 던졌다"를 확정했으니, 이 읽기가
-    #    경쟁 상태에 져도 **안내문이 조금 틀릴 뿐** 횟수나 코인은 안 틀려요.
-    # ⭐ 낚시대가 없으면서 상한도 찼으면 **상한을 먼저** 알려줘요 — 그 사람에게
-    #    "낚시대를 사라"고 하면 오늘은 못 쓰는 걸 사게 돼요.
-    doc = _fish.find_one({"_id": uid}, {"rod": 1, "cast_date": 1, "casts_today": 1}) or {}
-    rod = int(doc.get("rod", 0) or 0)
-    used = int(doc.get("casts_today", 0) or 0) if doc.get("cast_date") == today else 0
-    # ⚠️ 위 조건부 update와 **같은 `cap`**을 써요. 여기서 `DAILY_CAST_CAP`을 보면
-    #    보너스를 받은 사람이 21번째 캐스트에서 "상한이에요"를 보는데 실제로는
-    #    던질 수 있는 모순이 생겨요(안내문만 틀리는 게 아니라 못 던지게 돼요).
-    if cap and used >= cap:
-        return rod, "cap"
-    return None, "no_rod"
+    ⚠️ 반환이 **2-튜플**이고 `_use_rods_sync`는 **3-튜플**이에요. 섞어 받으면
+       `blocked`가 숫자가 돼서 상한도 품절도 안 걸리고 그냥 던져져요."""
+    granted, rod_left, reason = _use_rods_sync(user_id, 1)
+    if granted >= 1:
+        return rod_left, None
+    # ⚠️ 경쟁에 계속 진 경우(`"race"`)도 호출부엔 "못 던졌다"로 보여야 해요.
+    #    옛 계약엔 그 사유가 없어서 낚시대 쪽으로 합쳐요(화면 안내가 가장 가깝아요).
+    return (rod_left, reason) if reason in ("cap",) else (None, reason or "no_rod")
 
 
 def _give_back_rod_sync(user_id) -> None:
@@ -385,6 +466,35 @@ async def use_rod(user_id) -> tuple[int | None, str | None]:
     `if left is None:`으로 받으면 튜플은 항상 참이라 **상한도 품절도 안 걸리고
     그냥 던져져요.** 호출부를 고칠 때 이 주석을 지우지 마세요."""
     return await asyncio.to_thread(_use_rod_sync, user_id)
+
+
+async def use_rods(user_id, want: int) -> tuple[int, int, str | None]:
+    """🎣 몰아 던지기 — 내구도 + 하루 횟수를 **최대 `want`개** 한꺼번에 소모. (8차)
+
+    **(실제로 받은 횟수, 남은 내구도, 막힌 이유)** — 3-튜플이에요.
+
+    🚨 `use_rod`(한 판)과 **반환 모양이 달라요**(2-튜플 vs 3-튜플). 섞어 받으면
+    `blocked` 자리에 숫자가 들어가서 **상한도 품절도 안 걸리고 그냥 던져져요.**
+    ⭐ 요청한 만큼 못 받을 수 있어요(상한·내구도가 모자랄 때). 받은 수만큼만
+       굴리고, **화면에는 받은 수를 적어야** 해요."""
+    return await asyncio.to_thread(_use_rods_sync, user_id, want)
+
+
+async def give_back_rods(user_id, n: int) -> None:
+    """🎣 묶음을 통째로 되돌려요 (챔질을 놓쳤을 때). 내구도 n + 하루 횟수 n."""
+    await asyncio.to_thread(_give_back_rods_sync, user_id, n)
+
+
+async def record_casts(user_id, casts: int,
+                       catches: list[tuple[str, int]]) -> None:
+    """🎣 몰아 던지기 결과를 한 번에 기록해요(어항 + 누적 + 주간 대회). (8차)
+
+    🚨 **주간 대회 적립을 여기서 해요.** `record_cast`와 마찬가지로 호출부에서 또
+    부르면 `caught`가 두 배로 세어져요(2026-10-18에 실제로 그랬어요)."""
+    best = await asyncio.to_thread(_record_casts_sync, user_id, casts, catches)
+    if catches:
+        bkey, bsize, brank = best if best else (None, None, 0)
+        await fishing_week.record_catches(user_id, len(catches), bkey, bsize, brank)
 
 
 async def cast_quota(user_id) -> tuple[int, int]:

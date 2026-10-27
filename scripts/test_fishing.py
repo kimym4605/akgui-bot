@@ -327,6 +327,17 @@ async def _fake_record_catch(*a, **k):
 
 
 fishing_store.fishing_week.record_catch = _fake_record_catch
+# 🚨 8차 몰아 던지기가 쓰는 **묶음 적립도 같이** 갈아끼워요. 빠뜨리면 묶음 테스트가
+#    진짜 Atlas(없으면 localhost)로 붙어서 캐스트마다 5초씩 멈춰요 — 10-19와
+#    **똑같은 사고**예요. 저장소에 훅을 하나 더 붙였으면 여기도 보세요.
+_week_batch_calls = []
+
+
+async def _fake_record_catches(*a, **k):
+    _week_batch_calls.append(a)
+
+
+fishing_store.fishing_week.record_catches = _fake_record_catches
 
 U = "777"
 
@@ -773,11 +784,16 @@ _fish_fn = next((f for c in _tree.body if isinstance(c, _ast.ClassDef)
                  for f in c.body
                  if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))
                  and f.name == "fish"), None)
+# ⚠️ **docstring은 코드로 세지 않아요.** 처음엔 `len(body) == 1`로 썼는데, 8차에
+#    `/낚시`에 설명을 붙이자 FAIL이 났어요 — 설명은 "로직 복붙"이 아니에요.
+_fish_body = [st for st in (_fish_fn.body if _fish_fn else [])
+              if not (isinstance(st, _ast.Expr) and isinstance(st.value, _ast.Constant)
+                      and isinstance(st.value.value, str))]
 check("/낚시는 run_cast에 그대로 넘긴다 (로직 복붙 없음)",
-      _fish_fn is not None and len(_fish_fn.body) == 1
+      _fish_fn is not None and len(_fish_body) == 1
       and any(getattr(c.func, "id", "") == "run_cast"
               for c in _ast.walk(_fish_fn) if isinstance(c, _ast.Call)),
-      f"본문 {len(_fish_fn.body) if _fish_fn else '?'}줄")
+      f"docstring 뺀 본문 {len(_fish_body)}줄")
 
 # 🚨 연타 방어: 두 번째 클릭은 **run_cast까지 가지 않아야** 해요.
 _again_cls = next(c for c in _tree.body
@@ -911,11 +927,14 @@ _defer_line = next((n.lineno for n in _ast.walk(_run_fn)
                     and getattr(n.func, "attr", "") == "defer"), None)
 _userod_line = next((n.lineno for n in _ast.walk(_run_fn)
                      if isinstance(n, _ast.Call)
-                     and getattr(n.func, "attr", "") == "use_rod"), None)
-check("🚨 defer가 use_rod보다 **먼저** 있다 (3초 안에 받아둔다)",
+                     and getattr(n.func, "attr", "") == "use_rods"), None)
+# 🚨 8차에 cog가 `use_rod` → **`use_rods`**(묶음 겸용)로 바뀠어요. 함수 이름만
+#    보는 검사라, 이름을 안 따라가면 `None`이 되어 **아무것도 검증하지 않고**
+#    FAIL/통과가 뒤바뀌어요. 그래서 "못 찾았으면 실패"도 같이 봐요.
+check("🚨 defer가 use_rods보다 **먼저** 있다 (3초 안에 받아둔다)",
       _defer_line is not None and _userod_line is not None
       and _defer_line < _userod_line,
-      f"defer {_defer_line}줄 / use_rod {_userod_line}줄")
+      f"defer {_defer_line}줄 / use_rods {_userod_line}줄")
 
 # 🚨 첫 화면을 `interaction.response.*`로 띄우면 다시 3초 안에 묶여요.
 #    `defer()` 뒤에는 **반드시** `edit_original_response`로 고쳐야 해요.
@@ -973,22 +992,22 @@ class _DeadInter:
 
 
 _use_rod_calls = []
-_real_use_rod = fishing.fishing_store.use_rod
+_real_use_rod = fishing.fishing_store.use_rods
 
 
-async def _spy_use_rod(uid):
+async def _spy_use_rod(uid, want=1):
     _use_rod_calls.append(uid)
     return 5
 
 
-fishing.fishing_store.use_rod = _spy_use_rod
+fishing.fishing_store.use_rods = _spy_use_rod
 try:
     _ok = asyncio.run(fishing.run_cast(_DeadInter(1), edit=True))
     check("🚨 토큰이 죽었으면 **내구도를 건드리지 않는다**",
-          _use_rod_calls == [], f"use_rod가 {len(_use_rod_calls)}번 불렸어요")
+          _use_rod_calls == [], f"use_rods가 {len(_use_rod_calls)}번 불렸어요")
     check("못 던졌다고 알려준다 (False)", _ok is False, f"반환 {_ok!r}")
 finally:
-    fishing.fishing_store.use_rod = _real_use_rod
+    fishing.fishing_store.use_rods = _real_use_rod
 
 
 # 정상 경로도 **끝까지** 돌려봐요. 순서만 맞아도 kwarg 하나 어긋나면 실사용에서
@@ -1029,11 +1048,12 @@ class _RecInter:
 
 
 _store_patch = {
-    # ⚠️ `use_rod`를 **느리게** 만들어요. 고친 코드의 핵심이 "DB가 느려도 괜찮다"라,
+    # ⚠️ `use_rods`를 **느리게** 만들어요. 고친 코드의 핵심이 "DB가 느려도 괜찮다"라,
     #    빠른 가짜로만 돌리면 정작 그 성질을 안 건드려요.
     # 🚨 반환은 **(남은 내구도, 막힌 이유)** 튜플이에요(2026-10-20). 옛 형태(`4`)로
     #    두면 `left, blocked = ...`가 TypeError로 터져요.
-    "use_rod": lambda uid: (4, None),
+    # 🚨 8차부터 **3-튜플**이에요 (받은 수, 남은 내구도, 막힌 이유).
+    "use_rods": lambda uid, want=1: (1, 4, None),
     "cast_quota": lambda uid: (3, fish_data.DAILY_CAST_CAP),
     "record_cast": lambda uid, key, size: None,
     "give_back_rod": lambda uid: None,
@@ -1051,7 +1071,7 @@ def _mk(fn, delay=0.0):
 
 
 for _k, _fn in _store_patch.items():
-    setattr(fishing.fishing_store, _k, _mk(_fn, 0.05 if _k == "use_rod" else 0.0))
+    setattr(fishing.fishing_store, _k, _mk(_fn, 0.05 if _k == "use_rods" else 0.0))
 
 # 찌·입질 대기를 짧게 줄여요(테스트가 몇 초씩 멈추지 않게).
 _saved_timing = (fishing.BITE_MIN, fishing.BITE_MAX, fishing.STRIKE_WAIT)
@@ -1630,6 +1650,225 @@ check("🚨 상한 안내가 DAILY_CAST_CAP을 그대로 박지 않는다 (사�
       "오늘은 **{DAILY_CAST_CAP}번**을 다 던졌어요" not in _src18)
 for _name, _src in (("악귀상점", _src17_shop), ("봇 매니저", _src17_faq)):
     check(f"{_name} 안내도 연속 보너스를 말한다", "STREAK_CAST" in _src)
+
+# ==================================================================
+print("\n[19] 🎣 몰아 던지기 (2026-10-27 8차)")
+# ------------------------------------------------------------------
+# 사용자 요청: "대학생·직장인이 많아 자리잡고 계속 하기 어렵다. 한번에 잡을 수 있는
+# 시스템" + "5번 10번으로 할수록 희귀한 물고기 확률을 낮춰줘".
+#
+# 🚨 여기서 꼭 지켜야 하는 것:
+#   ⒜ **받은 만큼만** 굴린다 — 요청보다 적게 받았는데 요청 수로 굴리면 **없는 코인**이
+#      발행돼요. 상한·내구도가 모자랄 때가 그 경우예요.
+#   ⒝ 묶음도 **같은 `DAILY_CAST_CAP` 할당량**을 쓴다(천장이 하나여야 해요).
+#   ⒞ 희귀 벌칙이 **묶음 크기에 따라** 걸리고, **치수는 안 깎인다.**
+#   ⒟ 챔질을 놓치면 **묶음 전체 환불**(손해 0).
+BS = fish_data.BATCH_SIZES
+print(f"  묶음 선택지 {BS} + 남은 전부 · 캐스트당 "
+      f"-{fish_data.BATCH_RARITY_PENALTY:.0%} · 바닥 {fish_data.BATCH_RARITY_FLOOR:.0%}")
+
+# ── ⒞ 벌칙 계산 ──────────────────────────────────────────────────
+check("한 판(1회)은 벌칙이 없다", fish_data.batch_rarity_factor(1) == 1.0)
+check("0·음수도 벌칙 없음(1.0)",
+      fish_data.batch_rarity_factor(0) == 1.0
+      and fish_data.batch_rarity_factor(-3) == 1.0)
+_prev = 1.0
+for _n in (2, *BS, 20, 30):
+    _f = fish_data.batch_rarity_factor(_n)
+    check(f"{_n}번 묶음 배수 {_f:.2f} ≤ 앞 묶음", _f <= _prev + 1e-9, f"{_f:.3f}")
+    _prev = _f
+check(f"🚨 바닥({fish_data.BATCH_RARITY_FLOOR:.0%}) 아래로 안 내려간다",
+      fish_data.batch_rarity_factor(10_000) == fish_data.BATCH_RARITY_FLOOR,
+      f"{fish_data.batch_rarity_factor(10_000):.3f}")
+# 🚨 위 검사는 **상수를 상수와 비교**해서 바닥값 자체가 틀려도 통과해요(거짓 통과를
+#    역방향 확인에서 실제로 봤어요 — `FLOOR=0`으로 바꿨는데 종료코드 0이었어요).
+#    그래서 "바닥이 **쓸만한 값인지**"를 따로 봐요.
+#    → [[feedback_loose_assertions_false_pass]]
+check("🚨 바닥이 0보다 크다 (0이면 큰 묶음에서 희귀가 **전멸**해요)",
+      fish_data.BATCH_RARITY_FLOOR > 0, str(fish_data.BATCH_RARITY_FLOOR))
+_floor_chance = fish_data.grade_chance(fish_data.BATCH_RARITY_FLOOR)
+_floor_rare = sum(v for g, v in _floor_chance.items()
+                  if g != fish_data.COMMON_GRADE)
+_base_rare = sum(v for g, v in fish_data.grade_chance(1.0).items()
+                 if g != fish_data.COMMON_GRADE)
+check("🚨 바닥에서도 희귀 이상이 한 판의 **1/4 이상** 남는다 (死기능 방지)",
+      _floor_rare >= _base_rare * 0.25,
+      f"바닥 {_floor_rare * 100:.2f}% vs 한 판 {_base_rare * 100:.2f}%")
+check("🚨 바닥에서도 전설이 0이 아니다", _floor_chance["전설"] > 0,
+      f"{_floor_chance['전설'] * 100:.4f}%")
+# ⭐ 벌칙이 **너무 세면** 아무도 안 써요(바쁜 사람용으로 만든 기능인데 死상품이 돼요).
+check("⭐ 바닥에서도 1캐스트 수익이 한 판의 80% 이상",
+      fish_data.expected_coin_per_cast(fish_data.BATCH_RARITY_FLOOR)
+      >= fish_data.expected_coin_per_cast() * 0.80,
+      f"{fish_data.expected_coin_per_cast(fish_data.BATCH_RARITY_FLOOR):.2f} vs "
+      f"{fish_data.expected_coin_per_cast():.2f}코인")
+
+_w1 = fish_data.grade_weights(1.0)
+_wb = fish_data.grade_weights(0.5)
+check("🚨 일반 가중치는 **안 건드린다** (깎은 몫이 저절로 일반으로 간다)",
+      _wb[fish_data.COMMON_GRADE] == _w1[fish_data.COMMON_GRADE])
+check("희귀 이상만 깎인다",
+      all(_wb[g] < _w1[g] for g in GRADE_ORDER if g != fish_data.COMMON_GRADE))
+_c1, _cb = fish_data.grade_chance(1.0), fish_data.grade_chance(0.5)
+check("🚨 꽝이 생기지 않는다 (확률 합이 1)", abs(sum(_cb.values()) - 1.0) < 1e-9,
+      f"{sum(_cb.values()):.6f}")
+check("일반 확률은 **올라간다**", _cb[fish_data.COMMON_GRADE] > _c1[fish_data.COMMON_GRADE])
+check("전설 확률은 내려간다", _cb["전설"] < _c1["전설"])
+_rare1 = sum(v for g, v in _c1.items() if g != fish_data.COMMON_GRADE)
+_rareb = sum(v for g, v in _cb.items() if g != fish_data.COMMON_GRADE)
+print(f"  희귀 이상: 한 판 {_rare1*100:.2f}% → 바닥 {_rareb*100:.2f}% "
+      f"({_rareb/_rare1-1:+.0%}) · 1회 평균 "
+      f"{fish_data.expected_coin_per_cast():.2f} → "
+      f"{fish_data.expected_coin_per_cast(0.5):.2f}코인")
+
+# 🚨 **실제 추첨이 벌칙을 따르는가** — 수식만 맞고 `roll_catch`가 안 쓰면 거짓이에요
+_N = 40_000
+_rng = Random(8)
+_rare_hits = sum(
+    1 for _ in range(_N)
+    if BY_KEY[fishing.roll_catch(_rng, rarity_factor=0.5)][0] != fish_data.COMMON_GRADE)
+_expected = _rareb * _N
+check("🚨 roll_catch가 실제로 벌칙을 반영한다 (몬테카를로 ±15%)",
+      abs(_rare_hits - _expected) < _expected * 0.15,
+      f"실측 {_rare_hits}건 vs 기대 {_expected:.0f}건")
+_rng2 = Random(8)
+_rare_full = sum(
+    1 for _ in range(_N)
+    if BY_KEY[fishing.roll_catch(_rng2)][0] != fish_data.COMMON_GRADE)
+check("🚨 기본값(벌칙 없음)은 더 많이 나온다", _rare_full > _rare_hits,
+      f"벌칙없음 {_rare_full} vs 바닥 {_rare_hits}")
+
+# ── ⒝ 묶음 차감이 상한을 넘지 않는가 ────────────────────────────
+BU = "batch-user"
+fake.docs.pop(BU, None)
+fake_attend.docs.pop(BU, None)          # 연속 보너스 없음 = 상한 CAP
+for _ in range((CAP // ROD_DURABILITY) + 3):
+    run(fishing_store.buy_rod(BU, ROD_DURABILITY))
+_g1, _left1, _r1 = run(fishing_store.use_rods(BU, 5))
+check("5개 요청하면 5개 받는다", (_g1, _r1) == (5, None), f"{_g1}개 / {_r1}")
+check("내구도가 5 깎인다", _left1 == (CAP // ROD_DURABILITY + 3) * ROD_DURABILITY - 5,
+      str(_left1))
+check("오늘 횟수가 5 센다", run(fishing_store.cast_quota(BU))[0] == 5,
+      str(run(fishing_store.cast_quota(BU))[0]))
+
+# 🚨 상한을 넘겨 달라고 하면 **남은 만큼만** 줘야 해요
+_g2, _, _r2 = run(fishing_store.use_rods(BU, CAP * 3))
+check(f"🚨 상한({CAP})을 넘겨 요청하면 남은 {CAP - 5}개만 준다",
+      (_g2, _r2) == (CAP - 5, None), f"{_g2}개 / {_r2}")
+check("🚨 그래서 오늘 횟수가 상한을 **정확히** 채운다",
+      run(fishing_store.cast_quota(BU))[0] == CAP,
+      f"{run(fishing_store.cast_quota(BU))[0]}회 (상한 {CAP})")
+_g3, _, _r3 = run(fishing_store.use_rods(BU, 5))
+check("다 쓴 뒤엔 0개 + cap", (_g3, _r3) == (0, "cap"), f"{_g3}개 / {_r3}")
+
+# 내구도가 모자라면 그만큼만
+BR = "batch-rod-short"
+fake.docs.pop(BR, None)
+fake_attend.docs.pop(BR, None)
+run(fishing_store.buy_rod(BR, SMALL_ROD_DURABILITY))      # 3회뿐
+_g4, _left4, _r4 = run(fishing_store.use_rods(BR, 10))
+check(f"🚨 내구도가 {SMALL_ROD_DURABILITY}회뿐이면 그만큼만 준다",
+      (_g4, _left4, _r4) == (SMALL_ROD_DURABILITY, 0, None), f"{_g4}개 남{_left4} / {_r4}")
+_g5, _, _r5 = run(fishing_store.use_rods(BR, 10))
+check("낚시대가 비면 0개 + no_rod", (_g5, _r5) == (0, "no_rod"), f"{_g5}개 / {_r5}")
+
+# ⭐ 7차 연속 보너스가 묶음에도 적용되는가
+BB = "batch-bonus"
+fake.docs.pop(BB, None)
+fake_attend.set_streak(BB, fish_data.STREAK_CAST_EVERY * 999)
+for _ in range(((CAP + BMAX) // ROD_DURABILITY) + 3):
+    run(fishing_store.buy_rod(BB, ROD_DURABILITY))
+_g6, _, _ = run(fishing_store.use_rods(BB, CAP + BMAX + 50))
+check(f"⭐ 연속 보너스를 받으면 묶음도 {CAP + BMAX}개까지 받는다",
+      _g6 == CAP + BMAX, f"{_g6}개")
+fake_attend.docs.pop(BB, None)
+
+# ── ⒟ 환불 ───────────────────────────────────────────────────────
+BK = "batch-refund"
+fake.docs.pop(BK, None)
+fake_attend.docs.pop(BK, None)
+run(fishing_store.buy_rod(BK, ROD_DURABILITY))
+_g7, _left7, _ = run(fishing_store.use_rods(BK, 7))
+run(fishing_store.give_back_rods(BK, _g7))
+check("🚨 묶음 환불이 내구도를 전부 돌려준다",
+      run(fishing_store.rod_state(BK))[0] == ROD_DURABILITY,
+      str(run(fishing_store.rod_state(BK))[0]))
+check("🚨 묶음 환불이 하루 횟수도 전부 돌려준다",
+      run(fishing_store.cast_quota(BK))[0] == 0,
+      f"{run(fishing_store.cast_quota(BK))[0]}회")
+# 🚨 가진 것보다 많이 돌려달라고 해도 **음수가 되면 안 돼요** (다음 날 상한이 늘어남)
+run(fishing_store.give_back_rods(BK, 99))
+check("🚨 과도한 환불에도 하루 횟수가 음수가 안 된다",
+      run(fishing_store.cast_quota(BK))[0] == 0,
+      f"{run(fishing_store.cast_quota(BK))[0]}회")
+
+# ── 기록: 한 번의 update로 N마리 ─────────────────────────────────
+BX = "batch-record"
+fake.docs.pop(BX, None)
+_items = [("f01", 15), ("f01", 19), ("f11", 70), ("f21", 100)]
+run(fishing_store.record_casts(BX, len(_items), _items))
+_st = run(fishing_store.get(BX))
+check("묶음 기록이 어항에 전부 들어간다",
+      sum(len(v) for v in _st["tank"].values()) == len(_items),
+      str(_st["tank"]))
+check("🚨 같은 어종 2마리가 각자 치수로 남는다",
+      sorted(_st["tank"]["f01"]) == [15, 19], str(_st["tank"].get("f01")))
+check("누적 캐스트/잡은 수가 맞다",
+      (_st["casts"], _st["caught"]) == (len(_items), len(_items)),
+      f"{_st['casts']}/{_st['caught']}")
+_best = _st.get("best") or {}
+check("🚨 묶음 최고 기록은 **등급이 먼저** (f21 대물 > f11 희귀)",
+      _best.get("key") == "f21", str(_best))
+
+# ── ⒜ 화면: 받은 만큼만 굴리는가 (실제로 돌려봐요) ───────────────
+_bsrc = _Path(os.path.join(BOT_DIR, "cogs/fishing.py")).read_text(encoding="utf-8")
+check("🚨 묶음 결과가 `view.batch`(=받은 수)로 굴린다, `want`가 아니다",
+      "for _ in range(n)" in _bsrc and "n = view.batch" in _bsrc)
+check("🚨 `use_rods`의 3-튜플을 제대로 받는다",
+      "granted, left, blocked = await fishing_store.use_rods" in _bsrc)
+check("🚨 묶음 벌칙이 `batch_rarity_factor`를 거친다",
+      "fish_data.batch_rarity_factor(n)" in _bsrc)
+check("🚨 미스를 흉내내지 않는다 (놓침 확률 상수가 없다)",
+      "BATCH_MISS" not in _bsrc and "BATCH_MISS" not in _Path(
+          os.path.join(BOT_DIR, "utils/fish_data.py")).read_text(encoding="utf-8"))
+check("놓치면 묶음 전체를 환불한다", "give_back_rods(uid, n)" in _bsrc)
+
+# `/낚시` 선택지가 BATCH_SIZES와 맞는가 (데코레이터엔 f-string을 못 써서 손으로 적는 자리)
+for _n in BS:
+    check(f"/낚시 선택지에 {_n}번이 있다", f"value={_n}" in _bsrc, )
+check("/낚시 선택지에 '전부'(value=0)가 있다", "value=0" in _bsrc)
+
+# 🚨 CastAgainView가 던질 수 있는 수보다 큰 묶음을 **안 보여주는가**
+_v_small = fishing.CastAgainView(1, rod_left=2, today_left=2)
+_labels_small = [i.label for i in _v_small.children]
+check("🚨 2번 남았으면 5·10번 버튼을 안 보여준다",
+      not any("5번 몰아" in (l or "") or "10번 몰아" in (l or "") for l in _labels_small),
+      str(_labels_small))
+check("2번 남았으면 '남은 2번 전부'는 보여준다",
+      any("남은 2번 전부" in (l or "") for l in _labels_small), str(_labels_small))
+_v_one = fishing.CastAgainView(1, rod_left=1, today_left=1)
+check("🚨 1번 남았으면 묶음 버튼이 아예 없다 ('다시 던지기'와 같아요)",
+      len(_v_one.children) == 1, str([i.label for i in _v_one.children]))
+_v_big = fishing.CastAgainView(1, rod_left=99, today_left=30)
+_labels_big = [i.label for i in _v_big.children]
+check("넉넉하면 5·10·전부가 다 보인다",
+      all(any(f"{n}번 몰아" in (l or "") for l in _labels_big) for n in BS)
+      and any("전부" in (l or "") for l in _labels_big), str(_labels_big))
+check("🚨 '남은 전부' 라벨은 **먼저 바닥나는 쪽**(상한 30)을 적는다",
+      any("남은 30번 전부" in (l or "") for l in _labels_big), str(_labels_big))
+check("묶음 버튼이 전부 콜백을 갖는다",
+      all(getattr(i, "callback", None) is not None for i in _v_big.children))
+
+# 🚨 디스코드 한도: 줄 5개까지, 한 줄에 버튼 5개까지. 넘으면 **400으로 거절**돼서
+#    결과 화면이 아예 안 떠요. `item.row`를 직접 세면 자동 배치가 None이라 틀리니,
+#    discord.py의 실제 레이아웃 엔진을 돌려서 나온 줄을 봐요.
+_rows_big = _v_big.to_components()
+print(f"  레이아웃: {len(_rows_big)}줄 "
+      f"({', '.join(str(len(r.get('components', []))) + '개' for r in _rows_big)})")
+check("🚨 줄이 5개를 넘지 않는다", len(_rows_big) <= 5, f"{len(_rows_big)}줄")
+check("🚨 한 줄에 5개를 넘지 않는다",
+      all(len(r.get("components", [])) <= 5 for r in _rows_big),
+      str([len(r.get("components", [])) for r in _rows_big]))
 
 # ==================================================================
 # 🚨 요약은 **반드시 파일 맨 끝**에 있어야 해요. 여기보다 위에 두면 그 뒤에 추가한
