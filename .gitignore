@@ -7,3 +7,6 @@ venv/
 .env.bak*
 data/
 cookie_test.txt
+
+# 세션 중 쓰는 임시 측정 스크립트 (레포에 남기지 않아요)
+scripts/_tmp_*.py
