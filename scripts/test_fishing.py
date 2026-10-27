@@ -1652,91 +1652,81 @@ for _name, _src in (("악귀상점", _src17_shop), ("봇 매니저", _src17_faq)
     check(f"{_name} 안내도 연속 보너스를 말한다", "STREAK_CAST" in _src)
 
 # ==================================================================
-print("\n[19] 🎣 몰아 던지기 (2026-10-27 8차)")
+print("[19] 🎣 몰아 던지기 (2026-10-27 8차)")
 # ------------------------------------------------------------------
 # 사용자 요청: "대학생·직장인이 많아 자리잡고 계속 하기 어렵다. 한번에 잡을 수 있는
-# 시스템" + "5번 10번으로 할수록 희귀한 물고기 확률을 낮춰줘".
+# 시스템". 실측으로 **막는 건 시간이 아니라 횟수**였어요(하루 20번에 클릭 40회,
+# 순수 대기는 2.3분뿐).
 #
-# 🚨 여기서 꼭 지켜야 하는 것:
+# 🛑 **"묶음이 커질수록 희귀 확률을 낮추기"는 넣었다가 같은 날 되돌렸어요.**
+#    사용자가 먼저 제안해서 수치까지 맞췄는데("5번 10번으로 할수록 희귀도를 낮춰줘"),
+#    **"불합리할 것 같다"로 취소**했어요. 판단이 맞아요 — 벌칙은 바빠서 몰아 던지는
+#    사람에게만 물려서 이 기능의 취지와 정면으로 어긋나요.
+#    그래서 아래 ⒞는 **"기대값이 같아야 한다"**를 검사해요(벌칙의 부활을 막아요).
+#
+# 🚨 꼭 지켜야 하는 것:
 #   ⒜ **받은 만큼만** 굴린다 — 요청보다 적게 받았는데 요청 수로 굴리면 **없는 코인**이
 #      발행돼요. 상한·내구도가 모자랄 때가 그 경우예요.
 #   ⒝ 묶음도 **같은 `DAILY_CAST_CAP` 할당량**을 쓴다(천장이 하나여야 해요).
-#   ⒞ 희귀 벌칙이 **묶음 크기에 따라** 걸리고, **치수는 안 깎인다.**
+#   ⒞ 묶음과 단판의 **확률·기대값이 같다**.
 #   ⒟ 챔질을 놓치면 **묶음 전체 환불**(손해 0).
 BS = fish_data.BATCH_SIZES
-print(f"  묶음 선택지 {BS} + 남은 전부 · 캐스트당 "
-      f"-{fish_data.BATCH_RARITY_PENALTY:.0%} · 바닥 {fish_data.BATCH_RARITY_FLOOR:.0%}")
+print(f"  묶음 선택지 {BS} + 남은 전부 · 확률 벌칙 없음")
 
-# ── ⒞ 벌칙 계산 ──────────────────────────────────────────────────
-check("한 판(1회)은 벌칙이 없다", fish_data.batch_rarity_factor(1) == 1.0)
-check("0·음수도 벌칙 없음(1.0)",
-      fish_data.batch_rarity_factor(0) == 1.0
-      and fish_data.batch_rarity_factor(-3) == 1.0)
-_prev = 1.0
-for _n in (2, *BS, 20, 30):
-    _f = fish_data.batch_rarity_factor(_n)
-    check(f"{_n}번 묶음 배수 {_f:.2f} ≤ 앞 묶음", _f <= _prev + 1e-9, f"{_f:.3f}")
-    _prev = _f
-check(f"🚨 바닥({fish_data.BATCH_RARITY_FLOOR:.0%}) 아래로 안 내려간다",
-      fish_data.batch_rarity_factor(10_000) == fish_data.BATCH_RARITY_FLOOR,
-      f"{fish_data.batch_rarity_factor(10_000):.3f}")
-# 🚨 위 검사는 **상수를 상수와 비교**해서 바닥값 자체가 틀려도 통과해요(거짓 통과를
-#    역방향 확인에서 실제로 봤어요 — `FLOOR=0`으로 바꿨는데 종료코드 0이었어요).
-#    그래서 "바닥이 **쓸만한 값인지**"를 따로 봐요.
-#    → [[feedback_loose_assertions_false_pass]]
-check("🚨 바닥이 0보다 크다 (0이면 큰 묶음에서 희귀가 **전멸**해요)",
-      fish_data.BATCH_RARITY_FLOOR > 0, str(fish_data.BATCH_RARITY_FLOOR))
-_floor_chance = fish_data.grade_chance(fish_data.BATCH_RARITY_FLOOR)
-_floor_rare = sum(v for g, v in _floor_chance.items()
-                  if g != fish_data.COMMON_GRADE)
-_base_rare = sum(v for g, v in fish_data.grade_chance(1.0).items()
-                 if g != fish_data.COMMON_GRADE)
-check("🚨 바닥에서도 희귀 이상이 한 판의 **1/4 이상** 남는다 (死기능 방지)",
-      _floor_rare >= _base_rare * 0.25,
-      f"바닥 {_floor_rare * 100:.2f}% vs 한 판 {_base_rare * 100:.2f}%")
-check("🚨 바닥에서도 전설이 0이 아니다", _floor_chance["전설"] > 0,
-      f"{_floor_chance['전설'] * 100:.4f}%")
-# ⭐ 벌칙이 **너무 세면** 아무도 안 써요(바쁜 사람용으로 만든 기능인데 死상품이 돼요).
-check("⭐ 바닥에서도 1캐스트 수익이 한 판의 80% 이상",
-      fish_data.expected_coin_per_cast(fish_data.BATCH_RARITY_FLOOR)
-      >= fish_data.expected_coin_per_cast() * 0.80,
-      f"{fish_data.expected_coin_per_cast(fish_data.BATCH_RARITY_FLOOR):.2f} vs "
-      f"{fish_data.expected_coin_per_cast():.2f}코인")
+# ── ⒞ 묶음에 확률 벌칙이 없다 (되돌린 결정을 코드에 박아둬요) ────
+_revived = [n for n in ("BATCH_RARITY_PENALTY", "BATCH_RARITY_FLOOR",
+                        "batch_rarity_factor", "batch_coin_per_cast")
+            if hasattr(fish_data, n)]
+check("🛑 묶음 확률 벌칙 장치가 되살아나지 않았다", not _revived,
+      f"되살아난 것: {_revived} — 2026-10-27에 사용자가 '불합리하다'로 되돌렸어요")
 
-_w1 = fish_data.grade_weights(1.0)
-_wb = fish_data.grade_weights(0.5)
-check("🚨 일반 가중치는 **안 건드린다** (깎은 몫이 저절로 일반으로 간다)",
-      _wb[fish_data.COMMON_GRADE] == _w1[fish_data.COMMON_GRADE])
-check("희귀 이상만 깎인다",
-      all(_wb[g] < _w1[g] for g in GRADE_ORDER if g != fish_data.COMMON_GRADE))
-_c1, _cb = fish_data.grade_chance(1.0), fish_data.grade_chance(0.5)
-check("🚨 꽝이 생기지 않는다 (확률 합이 1)", abs(sum(_cb.values()) - 1.0) < 1e-9,
-      f"{sum(_cb.values()):.6f}")
-check("일반 확률은 **올라간다**", _cb[fish_data.COMMON_GRADE] > _c1[fish_data.COMMON_GRADE])
-check("전설 확률은 내려간다", _cb["전설"] < _c1["전설"])
-_rare1 = sum(v for g, v in _c1.items() if g != fish_data.COMMON_GRADE)
-_rareb = sum(v for g, v in _cb.items() if g != fish_data.COMMON_GRADE)
-print(f"  희귀 이상: 한 판 {_rare1*100:.2f}% → 바닥 {_rareb*100:.2f}% "
-      f"({_rareb/_rare1-1:+.0%}) · 1회 평균 "
-      f"{fish_data.expected_coin_per_cast():.2f} → "
-      f"{fish_data.expected_coin_per_cast(0.5):.2f}코인")
+# ⭐ **확률이 같은지를 실제 추첨으로** 확인해요 — 이게 벌칙 부활을 막는 본 검사예요.
+#    상수만 지우고 호출부에 숫자를 박아 넣어도 여기서 걸려요.
+_N = 30_000
+_rng_a, _rng_b = Random(81), Random(81)
+_draw_a = [fishing.roll_catch(_rng_a) for _ in range(_N)]
+_draw_b = [fishing.roll_catch(_rng_b) for _ in range(_N)]
+check("🚨 같은 시드면 결과가 같다 (묶음용 분기가 숨어 있지 않다)",
+      _draw_a == _draw_b)
+_rare_rate = sum(1 for k in _draw_a
+                 if BY_KEY[k][0] != fish_data.COMMON_GRADE) / _N
+_total_w = sum(g["weight"] for g in GRADES.values())
+_expect_rare = sum(g["weight"] for name, g in GRADES.items()
+                   if name != fish_data.COMMON_GRADE) / _total_w
+check("🚨 희귀 이상 비율이 가중치 그대로다 (벌칙 없음 · ±10%)",
+      abs(_rare_rate - _expect_rare) < _expect_rare * 0.10,
+      f"실측 {_rare_rate * 100:.2f}% vs 가중치 {_expect_rare * 100:.2f}%")
+print(f"  희귀 이상: 가중치 {_expect_rare * 100:.2f}% · "
+      f"실측 {_rare_rate * 100:.2f}% (묶음·단판 동일)")
 
-# 🚨 **실제 추첨이 벌칙을 따르는가** — 수식만 맞고 `roll_catch`가 안 쓰면 거짓이에요
-_N = 40_000
-_rng = Random(8)
-_rare_hits = sum(
-    1 for _ in range(_N)
-    if BY_KEY[fishing.roll_catch(_rng, rarity_factor=0.5)][0] != fish_data.COMMON_GRADE)
-_expected = _rareb * _N
-check("🚨 roll_catch가 실제로 벌칙을 반영한다 (몬테카를로 ±15%)",
-      abs(_rare_hits - _expected) < _expected * 0.15,
-      f"실측 {_rare_hits}건 vs 기대 {_expected:.0f}건")
-_rng2 = Random(8)
-_rare_full = sum(
-    1 for _ in range(_N)
-    if BY_KEY[fishing.roll_catch(_rng2)][0] != fish_data.COMMON_GRADE)
-check("🚨 기본값(벌칙 없음)은 더 많이 나온다", _rare_full > _rare_hits,
-      f"벌칙없음 {_rare_full} vs 바닥 {_rare_hits}")
+# 🚨 **안내문에 벌칙이 남으면 거짓**이에요 — 되돌릴 때 제일 잘 빠뜨리는 자리고,
+#    실제로 `/낚시`의 `describe`에 "희귀 확률이 낮아져요"가 남아 있었어요.
+#    ⚠️ 소스를 통째로 grep하면 **주석·docstring까지** 걸려서 못 쓸 검사가 돼요.
+#       (처음에 그렇게 짰다가 "다시 넣지 마세요"라는 주석에 FAIL이 났어요.)
+#       그래서 **사용자에게 실제로 보이는 문구**만 봐요.
+_bad = ("확률이 낮아", "확률을 낮", "희귀도를 낮", "덜 나와")
+
+# ⒜ `/낚시` 명령의 설명·선택지 (디스코드가 그대로 보여주는 글)
+_fish_cmd = fishing.Fishing.fish
+_shown = [str(_fish_cmd._params[k].description) for k in _fish_cmd._params]
+for _k, _param in _fish_cmd._params.items():
+    _shown += [str(c.name) for c in (_param.choices or [])]
+check("🛑 /낚시 설명·선택지에 벌칙 문구가 없다",
+      not [t for t in _shown if any(b in t for b in _bad)],
+      str([t for t in _shown if any(b in t for b in _bad)]))
+check("⭐ /낚시 설명이 '확률은 똑같다'를 말한다",
+      any("똑같" in t for t in _shown), str(_shown))
+
+# ⒝ ❓ 매니저가 **실제로 출력하는** 낚시 안내
+import utils.faq_knowledge as _faq  # noqa: E402
+_fish_topic = next((t for t in _faq.TOPICS if t.key == "fishing"), None)
+check("매니저에 낚시 주제가 있다", _fish_topic is not None)
+if _fish_topic:
+    _body = _fish_topic.text()
+    check("🛑 매니저 낚시 안내에 벌칙 문구가 없다",
+          not [b for b in _bad if b in _body], str([b for b in _bad if b in _body]))
+    check("⭐ 매니저가 '확률도 값도 똑같다'를 말한다", "똑같" in _body)
+    check("⭐ 매니저가 몰아 던지기를 안다", "몰아 던지기" in _body)
 
 # ── ⒝ 묶음 차감이 상한을 넘지 않는가 ────────────────────────────
 BU = "batch-user"
@@ -1826,8 +1816,10 @@ check("🚨 묶음 결과가 `view.batch`(=받은 수)로 굴린다, `want`가 �
       "for _ in range(n)" in _bsrc and "n = view.batch" in _bsrc)
 check("🚨 `use_rods`의 3-튜플을 제대로 받는다",
       "granted, left, blocked = await fishing_store.use_rods" in _bsrc)
-check("🚨 묶음 벌칙이 `batch_rarity_factor`를 거친다",
-      "fish_data.batch_rarity_factor(n)" in _bsrc)
+# 🛑 "묶음 벌칙이 batch_rarity_factor를 거친다"가 있던 자리예요. 벌칙을 되돌리면서
+#    대신 **추첨에 인자를 넘기지 않는지**를 봐요(위 ⒞의 시드 비교와 짝이에요).
+check("🛑 묶음이 roll_catch를 **인자 없이** 부른다 (벌칙 경로가 없다)",
+      "key = roll_catch()" in _bsrc and "roll_catch(rarity_factor" not in _bsrc)
 check("🚨 미스를 흉내내지 않는다 (놓침 확률 상수가 없다)",
       "BATCH_MISS" not in _bsrc and "BATCH_MISS" not in _Path(
           os.path.join(BOT_DIR, "utils/fish_data.py")).read_text(encoding="utf-8"))

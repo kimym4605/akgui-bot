@@ -234,28 +234,29 @@ STREAK_CAST_MAX = 10      # 보너스 최대치 (= 새 발행 천장 · 0으로 
 #
 # 그래서 "한 판을 더 빠르게"가 아니라 **"한 번 눌러 여러 판"**이 맞는 처방이에요.
 # 챔질은 **1회 남겨요** — 없애면 "버튼 누르면 코인"이 돼서 미니게임을 만들어 둔
-# 의미가 사라져요(사용자가 그 이유로 1번을 골랐어요).
+# 의미가 사라져요(사용자가 그 이유로 이 안을 골랐어요).
 #
 # ## 🚨 같은 `DAILY_CAST_CAP` 할당량을 써요
 #
 # 따로 세면 **천장 없는 두 번째 발행 경로**가 생겨요. 상한이 발행의 유일한 천장이에요.
+# 즉 몰아 던지기는 **더 벌게 해주는 게 아니라 같은 횟수를 빨리 쓰게** 해주는 거예요.
 #
-# ## 🚨 희귀 확률을 **몰아 던진 횟수만큼** 낮춰요 (사용자 요청)
+# ## 🛑 "묶음이 커질수록 희귀 확률을 낮추기"는 **넣었다가 뺐어요** (같은 날)
 #
-# 이게 없으면 몰아 던지기가 수동보다 **무조건 유리해서 수동 낚시가 죽어요.**
-# 낮추는 건 **등급뿐이고 치수는 그대로**예요 — 최대어 기록은 등급이 먼저라
-# (`fishing_week`), 전설·대물·최대어를 노리면 여전히 한 판씩 던지는 게 유리해요.
-# 그래서 "바쁜 날엔 몰아서, 노리는 날엔 한 판씩"이 둘 다 살아있어요.
+# 사용자가 먼저 제안해서 만들었고(캐스트당 −5% · 바닥 50% → 전부 몰면 희귀 이상
+# 9.52%→5.00%, 1캐스트 2.10→1.88코인 = −10.6%), 수치까지 다 맞춰 놨는데
+# **사용자가 "불합리할 것 같다"로 되돌렸어요.** 판단이 맞아요 —
+# 벌칙은 **바빠서 몰아 던지는 사람에게만** 물리는 거라, 이 기능을 만든 이유
+# ("자리잡고 못 하는 사람을 돕자")와 정면으로 어긋나요.
 #
-# 🚨 **미스(놓침)를 흉내내지 마세요.** 처음에 "자동이면 미스율 9.5%가 사라져서
-#    발행이 10% 늘어난다"고 판단했는데 **틀렸어요** — 놓친 판은 `give_back_rod`가
-#    하루 횟수까지 돌려줘서(`finish_cast` 주석), 미스는 **소비한 캐스트당 수익에
-#    아무 영향이 없어요.** 흉내내면 "자동인데 왜 놓쳐?"라는 혼란만 남아요.
-#    챔질을 놓쳤을 땐 **묶음 전체를 환불**해요(손해 0).
-BATCH_SIZES = (5, 10)          # 버튼으로 내주는 묶음 (그 외에 '남은 전부')
-BATCH_RARITY_PENALTY = 0.05    # 캐스트 1회당 희귀 이상 가중치 -5%
-BATCH_RARITY_FLOOR = 0.5       # 아무리 몰아도 절반까지만 (0이면 끔 = 벌칙 없음)
-COMMON_GRADE = "일반"          # 🚨 벌칙에서 **빼는** 등급. 여기로 확률이 몰려요
+# 🚨 **다시 제안하지 마세요.** 묶음과 단판의 기대값은 **같아야** 해요.
+#    `scripts/test_fishing.py` [19]가 그걸 검사하고, `BATCH_RARITY_*` 같은 상수가
+#    되살아나면 잡아요.
+# ⭐ 그래도 수동 낚시가 죽지 않는 이유: 묶음은 **치수를 노릴 수 없어요.** 한 판씩
+#    던지면 입질마다 결과를 보며 최대어를 확인하는 재미가 있고, 묶음은 결과가
+#    한꺼번에 나와요. 그리고 상한이 같아서 **몰아 던지면 그날이 빨리 끝나요.**
+BATCH_SIZES = (5, 10)          # 버튼·선택지로 내주는 묶음 (그 외에 '남은 전부')
+COMMON_GRADE = "일반"          # 묶음 결과에서 **희귀 이상만** 따로 적을 때 기준
 
 GRADE_ORDER = ["전설", "대물", "희귀", "일반"]      # 보여줄 때 높은 등급부터
 
@@ -356,34 +357,26 @@ def pieces_of(key: str, size: int | None = None) -> int:
     return int(round(lo_p + (hi_p - lo_p) * ratio))
 
 
-def expected_pieces_per_cast(rarity_factor: float = 1.0) -> float:
+def expected_pieces_per_cast() -> float:
     """1회 던질 때 평균 몇 **조각**이 생기나 (타이밍은 맞혔다고 가정).
 
     ⚠️ 등급 안에서 치수가 **작은 쪽으로 치우쳐** 있어서(`SIZE_SKEW`), 단순히
     범위의 중앙값을 쓰면 과대평가예요. 삼각분포의 평균은 `(lo+hi+mode)/3`이에요.
 
-    `rarity_factor`는 8차 몰아 던지기 벌칙이에요. 기본 1.0 = 수동 한 판 기준이라
-    **기존 호출부는 그대로 맞아요.**"""
-    weights = grade_weights(rarity_factor)
-    total_w = sum(weights.values())
+    ⭐ 🎣 몰아 던지기와 **무관해요** — 묶음이든 한 판이든 기대값이 같아요
+    (희귀 확률 벌칙은 8차에 넣었다가 사용자가 되돌렸어요. 위 상수 주석 참고)."""
+    total_w = sum(g["weight"] for g in GRADES.values())
     out = 0.0
-    for grade, g in GRADES.items():
+    for g in GRADES.values():
         lo, hi = g["pieces"]
         mode = lo + (hi - lo) * SIZE_SKEW
-        out += weights[grade] / total_w * (lo + hi + mode) / 3
+        out += g["weight"] / total_w * (lo + hi + mode) / 3
     return out
 
 
-def expected_coin_per_cast(rarity_factor: float = 1.0) -> float:
+def expected_coin_per_cast() -> float:
     """1회 던질 때 평균 몇 코인이 생기나 (타이밍은 맞혔다고 가정)."""
-    return expected_pieces_per_cast(rarity_factor) / COIN_PIECES
-
-
-def batch_coin_per_cast(casts: int) -> float:
-    """몰아 던질 때 **1캐스트당** 평균 코인. 안내문·리포트가 쓰는 자리예요.
-
-    ⭐ 묶음 크기가 수익을 바꾸는 **유일한 경로**가 이 함수예요(치수·미스는 안 건드려요)."""
-    return expected_coin_per_cast(batch_rarity_factor(casts))
+    return expected_pieces_per_cast() / COIN_PIECES
 
 
 def expected_coin_per_day() -> float:
@@ -406,40 +399,6 @@ def net_issue_per_cast() -> float:
     ⭐ 낚시대값은 큰 것도 소형도 **1코인/캐스트**라(비율을 일부러 맞춰뒀어요) 어느
     낚시대를 쓰든 이 값이 같아요. 비율을 깨면 이 함수가 거짓이 돼요."""
     return expected_coin_per_cast() - ROD_PRICE / ROD_DURABILITY
-
-
-def batch_rarity_factor(casts: int) -> float:
-    """몰아 던진 횟수에 따른 **희귀 이상 가중치 배수**. 1회(수동)면 1.0이에요. (8차)
-
-    🚨 `BATCH_RARITY_FLOOR`에서 멈춰요. 바닥이 없으면 크게 몰아 던질 때 희귀가
-    0에 수렴해서 "몰아 던지면 쓰레기만 나온다"가 돼요 — 그럼 아무도 안 써요.
-    ⚠️ `BATCH_RARITY_FLOOR`를 0으로 두면 벌칙을 끄는 게 아니라 **희귀를 전멸**시켜요.
-       끄려면 `BATCH_RARITY_PENALTY`를 0으로 하세요."""
-    if casts <= 1 or not BATCH_RARITY_PENALTY:
-        return 1.0
-    return max(BATCH_RARITY_FLOOR, 1.0 - BATCH_RARITY_PENALTY * (casts - 1))
-
-
-def grade_weights(rarity_factor: float = 1.0) -> dict[str, float]:
-    """등급별 추첨 가중치. `rarity_factor < 1`이면 **희귀 이상만** 깎아요. (8차)
-
-    ⭐ 깎은 몫을 `COMMON_GRADE`에 더하지 않아요 — `random.choices`가 가중치를
-    알아서 정규화하니, 희귀 쪽만 줄이면 그만큼 확률이 일반으로 **저절로** 옮겨가요.
-    (더하면 이중으로 반영돼요.)
-    🚨 **꽝을 만들지 않아요.** 1차 설계의 꽝 60%는 1회당 수익만 낮추고 총 발행은
-    못 막았어요 — 되살리지 마세요."""
-    return {
-        grade: (info["weight"] if grade == COMMON_GRADE
-                else info["weight"] * rarity_factor)
-        for grade, info in GRADES.items()
-    }
-
-
-def grade_chance(rarity_factor: float = 1.0) -> dict[str, float]:
-    """등급별 **확률**(0~1). 안내문이 쓰라고 뺐어요 — 손으로 계산하지 마세요."""
-    w = grade_weights(rarity_factor)
-    total = sum(w.values())
-    return {g: v / total for g, v in w.items()} if total else {g: 0.0 for g in w}
 
 
 def streak_cast_bonus(streak: int) -> int:

@@ -190,8 +190,7 @@ MISS_COLOR = 0x6B7280
 _GRADE_KEYS = {g: [f["key"] for f in rows] for g, rows in FISH.items()}
 
 
-def roll_catch(rng: random.Random | None = None,
-               rarity_factor: float = 1.0) -> str:
+def roll_catch(rng: random.Random | None = None) -> str:
     """한 번 챔질에 **성공했을 때** 뭐가 잡히나.
 
     ⚠️ **꽝이 없어요**(2026-10-17 2차 설계). 타이밍만 맞히면 반드시 물고기가 나와요.
@@ -204,14 +203,15 @@ def roll_catch(rng: random.Random | None = None,
 
     못 잡는 경우는 이제 **타이밍 실패뿐**이고, 그건 내 실수지 운이 아니에요.
 
-    🚨 **`rarity_factor`는 몰아 던지기 벌칙이에요**(8차). 1.0이 한 판 낚시고, 묶음이
-    커지면 1보다 작아져서 희귀 이상이 덜 나와요. 가중치 계산은
-    `fish_data.grade_weights` 한 곳에만 둬요 — 여기서 직접 곱하면 안내문
-    (`/낚시확률`)과 실제 추첨이 갈려요."""
+    🛑 **묶음 크기로 희귀를 깎는 인자를 다시 넣지 마세요.** 8차에 넣었다가 같은 날
+    사용자가 "불합리하다"로 되돌렸어요 — 벌칙은 **바빠서 몰아 던지는 사람에게만**
+    물려서, 몰아 던지기를 만든 이유("자리잡고 못 하는 사람을 돕자")와 어긋나요.
+    몰아 던지기와 한 판은 **기대값이 같아야** 해요.
+    → `utils/fish_data.BATCH_SIZES` 위 주석 · `test_fishing.py` [19]가 검사해요."""
     rng = rng or random
-    weights = fish_data.grade_weights(rarity_factor)
-    grades = list(weights)
-    grade = rng.choices(grades, weights=[weights[g] for g in grades], k=1)[0]
+    grades = list(GRADES)
+    weights = [GRADES[g]["weight"] for g in grades]
+    grade = rng.choices(grades, weights=weights, k=1)[0]
     return rng.choice(_GRADE_KEYS[grade])
 
 
@@ -443,9 +443,9 @@ async def finish_batch(interaction: discord.Interaction, view: "FishingView") ->
     - 🚨 **미스를 흉내내지 않아요.** 놓친 판은 하루 횟수까지 돌려주니(`finish_cast`
       주석) 미스는 **소비한 캐스트당 수익에 영향이 없어요** — 흉내내면 "자동인데
       왜 놓쳐?"라는 혼란만 남아요.
-    - 🚨 희귀 이상 확률만 `batch_rarity_factor`로 낮춰요. **치수는 그대로**예요 —
-      최대어는 등급이 먼저라(`fishing_week`), 전설·최대어를 노리면 여전히 한 판씩
-      던지는 게 유리해요. 그게 수동 낚시를 살려두는 장치예요.
+    - 🛑 **확률 벌칙이 없어요.** 8차에 묶음 크기에 따라 희귀를 깎는 규칙을 넣었다가
+      같은 날 사용자가 되돌렸어요("불합리하다"). 바빠서 몰아 던지는 사람에게만
+      물리는 벌칙이라 기능의 취지와 어긋나요. **다시 넣지 마세요.**
 
     ⚠️ 기록은 `record_casts` **한 번**으로 끝내요. `record_cast`를 N번 부르면
        Atlas 왕복이 N×2회라 30판이면 결과 화면이 몇 초씩 늦어요."""
@@ -479,10 +479,11 @@ async def finish_batch(interaction: discord.Interaction, view: "FishingView") ->
         return
 
     # ── 성공: n판을 굴려요 ────────────────────────────────────────────
-    factor = fish_data.batch_rarity_factor(n)
+    # 🚨 `n`은 **받은 수**(`view.batch` = `granted`)예요. 요청한 수로 굴리면
+    #    받지도 않은 캐스트로 물고기를 만들어서 **없는 코인을 발행**해요.
     catches: list[tuple[str, int]] = []
     for _ in range(n):
-        key = roll_catch(rarity_factor=factor)
+        key = roll_catch()
         catches.append((key, roll_size(key)))
 
     await fishing_store.record_casts(uid, n, catches)
@@ -555,10 +556,8 @@ async def finish_batch(interaction: discord.Interaction, view: "FishingView") ->
                    + (f"\n-# 🔥 연속 출석 +{bonus}" if bonus > 0 else "")),
             inline=True,
         )
-    embed.set_footer(
-        text=(f"몰아 던져서 희귀 이상 확률이 {1 - factor:.0%} 낮았어요 "
-              "· 노릴 땐 한 판씩 던지세요" if factor < 1.0 else
-              "/물고기판매 로 한 번에 팔아요"))
+    embed.set_footer(text="확률은 한 판씩 던질 때와 똑같아요 "
+                          "· /물고기판매 로 한 번에 팔아요")
 
     next_view = (CastAgainView(uid, view.rod_left, today_left)
                  if view.rod_left else BuyRodView(uid))
@@ -567,8 +566,8 @@ async def finish_batch(interaction: discord.Interaction, view: "FishingView") ->
     except discord.HTTPException:
         await interaction.followup.send(embed=embed, view=next_view, ephemeral=True)
 
-    log.info("🎣 몰아 던지기: %s / %d판 %d마리 %.1f코인 (배수 %.2f)",
-             uid, n, len(catches), total_pieces / COIN_PIECES, factor)
+    log.info("🎣 몰아 던지기: %s / %d판 %d마리 %.1f코인",
+             uid, n, len(catches), total_pieces / COIN_PIECES)
 
 
 class CastAgainView(discord.ui.View):
@@ -817,18 +816,19 @@ async def _run_cast(interaction: discord.Interaction, *, edit: bool,
     view.rod_left = left
     view.batch = granted
     if granted > 1:
-        # ⭐ 묶음이면 **몇 판인지와 벌칙을 먼저** 보여줘요. 결과에서야 알면
-        #    "왜 희귀가 안 나오지?"가 돼요 — 값을 미리 밝히는 게 공정해요.
-        factor = fish_data.batch_rarity_factor(granted)
+        # ⭐ 묶음이면 **몇 판인지를 먼저** 보여줘요. 요청보다 적게 받았을 수 있어서
+        #    (상한·내구도가 모자랄 때) "내가 누른 수"가 아니라 **받은 수**를 적어요.
         embed = discord.Embed(
             title=f"🎣 {granted}번 몰아 던졌어요",
             description=("찌를 지켜보세요... **입질이 오면 한 번만 챔질!**\n"
                          f"그 한 번으로 **{granted}판**이 전부 판정돼요."),
             color=WAIT_COLOR,
         )
+        # 🛑 "희귀 확률이 N% 낮아져요"가 있던 자리예요. 8차에 벌칙을 넣었다가
+        #    사용자가 되돌렸어요 — **확률이 같다는 걸 명시**해요(안 적으면
+        #    "몰아 던지면 손해 아닌가?"를 각자 추측해요).
         embed.set_footer(
-            text=f"몰아 던지면 희귀 이상 확률이 {1 - factor:.0%} 낮아져요 "
-                 "· 놓치면 횟수를 전부 돌려받아요")
+            text="확률은 한 판씩 던질 때와 똑같아요 · 놓치면 횟수를 전부 돌려받아요")
     else:
         embed = discord.Embed(
             title="🎣 찌를 던졌어요",
@@ -989,11 +989,12 @@ class Fishing(commands.Cog):
 
     @app_commands.command(name="낚시", description="찌를 던져 물고기를 낚아요. (낚시대가 필요해요)")
     @app_commands.describe(
-        횟수="한 번에 몰아서 던질 횟수 (안 적으면 1판 · 몰아 던지면 희귀 확률이 낮아져요)")
+        횟수="한 번에 몰아서 던질 횟수 (안 적으면 1판 · 확률은 한 판씩과 똑같아요)")
     @app_commands.choices(횟수=[
-        app_commands.Choice(name="1번 (한 판씩 · 희귀 확률 그대로)", value=1),
-        # ⚠️ 선택지 이름에 **확률 숫자를 손으로 적지 않아요.** 벌칙 상수를 바꾸면
-        #    여기가 거짓이 돼요. 정확한 수치는 `/낚시확률`이 계산해서 보여줘요.
+        app_commands.Choice(name="1번 (한 판씩)", value=1),
+        # ⚠️ 선택지 이름에 **숫자나 확률을 손으로 적지 않아요.** 8차에 "희귀 확률
+        #    그대로"라고 적어뒀는데, 벌칙을 되돌리면서 그 말이 **벌칙이 있다는 뜻으로
+        #    읽히는** 자리가 됐어요. 수치 안내는 `/낚시확률`이 계산해서 해요.
         app_commands.Choice(name="5번 몰아 던지기", value=5),
         app_commands.Choice(name="10번 몰아 던지기", value=10),
         app_commands.Choice(name="남은 횟수 전부 몰아 던지기", value=0),
@@ -1249,30 +1250,22 @@ class Fishing(commands.Cog):
                    "다음 판매로 넘어가요"),
             inline=False,
         )
-        # ⭐ 🎣 몰아 던지기 벌칙을 **표로** 보여줘요(8차). 🚨 숫자는 전부
-        #    `fish_data`에서 계산해요 — 상수를 바꾸면 이 표가 따라와요.
-        if fish_data.BATCH_RARITY_PENALTY:
-            rows = []
-            for n in (1, *fish_data.BATCH_SIZES, my_cap):
-                if n < 1 or (n != 1 and n <= max(fish_data.BATCH_SIZES, default=0)
-                             and n != my_cap and n not in fish_data.BATCH_SIZES):
-                    continue
-                f = fish_data.batch_rarity_factor(n)
-                ch = fish_data.grade_chance(f)
-                rare = sum(v for g, v in ch.items() if g != fish_data.COMMON_GRADE)
-                label = "한 판씩" if n == 1 else f"{n}번 몰아"
-                rows.append(
-                    f"**{label}** — 희귀 이상 **{rare * 100:.2f}%** · "
-                    f"전설 {ch['전설'] * 100:.3f}% · "
-                    f"1회 평균 {fish_data.expected_coin_per_cast(f):.2f}코인")
+        # ⭐ 🎣 몰아 던지기 안내(8차). 🛑 여기 "희귀 확률이 낮아져요" 표가 있었는데
+        #    벌칙을 되돌리면서 **같이 지웠어요.** 안내문만 남으면 거짓이 돼요.
+        #    🚨 "확률이 똑같다"를 **명시**해야 해요 — 안 적으면 "몰아 던지면
+        #       손해 아닌가?"를 각자 추측해요(그게 기능을 안 쓰게 만들어요).
+        if fish_data.BATCH_SIZES:
+            picks = " · ".join(f"`{n}번`" for n in fish_data.BATCH_SIZES)
             embed.add_field(
-                name="🎣 몰아 던지면 희귀 확률이 낮아져요",
-                value=("\n".join(dict.fromkeys(rows))
-                       + f"\n　└ 묶음 1회마다 희귀 이상 가중치 "
-                         f"**−{fish_data.BATCH_RARITY_PENALTY:.0%}** "
-                         f"(최대 −{1 - fish_data.BATCH_RARITY_FLOOR:.0%}까지)\n"
-                         "　└ 📏 **치수는 안 깎여요** — 최대어는 등급이 먼저라 "
-                         "전설·최대어를 노리면 한 판씩 던지는 게 유리해요"),
+                name="🎣 몰아 던지기 — 한 번 눌러 여러 판",
+                value=(f"`/낚시 횟수:` 에서 {picks} · `남은 전부`를 고르거나, "
+                       "결과 화면의 **몰아 던지기** 버튼을 눌러요.\n"
+                       "　└ 입질을 기다려 **한 번만 챔질**하면 묶음 전체가 판정돼요\n"
+                       "　└ ⭐ **확률·값은 한 판씩 던질 때와 똑같아요** "
+                       "(몰아 던져서 손해 보는 건 없어요)\n"
+                       f"　└ 하루 상한({my_cap}번)은 **똑같이** 써요 — 더 벌리는 게 "
+                       "아니라 **빨리 쓰는** 거예요\n"
+                       "　└ 챔질을 놓치면 **묶음 전체를 돌려받아요**"),
                 inline=False,
             )
         embed.add_field(
