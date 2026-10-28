@@ -4,7 +4,8 @@
 
     {_id: uid, tank: {어종key: [치수...]}, casts: 총 던진 횟수, caught: 잡은 수,
      sold: 판 코인, dust: 남은 조각, rod: 남은 내구도,
-     cast_date: "YYYY-MM-DD", casts_today: 그날 던진 횟수}
+     cast_date: "YYYY-MM-DD", casts_today: 그날 던진 횟수,
+     batch_uses: 🎣 몰아 던지기를 누른 횟수, batch_casts: 그걸로 받은 판수 (둘 다 누적)}
 
 🚨 **`_id`가 유저 ID예요** — `userId` 필드는 없어요. 조회 스크립트를 짤 때
 `{"userId": ...}`로 찾으면 조용히 0건이 나와요.
@@ -57,11 +58,16 @@ def _uid(user_id) -> str:
 # ------------------------------------------------------------------
 # 🎣 낚시대 (2026-10-17 2차 설계 · 2026-10-20 6차에 하루 상한 추가)
 #
-# 문서에 네 개를 둬요:
+# 문서에 여섯 개를 둬요:
 #   `rod`         남은 내구도 (낚시대 1개 = 10, 소형 = 3)
 #   `rod_date`    마지막으로 산 날짜 (제한에 안 쓰고 이상 패턴 볼 때만)
 #   `cast_date`   하루 상한을 세는 기준 날짜 (KST)
 #   `casts_today` 그날 던진 횟수
+#   `batch_uses`  🎣 몰아 던지기를 **몇 번 눌렀나** (9차 계측 · 누적, 리셋 안 해요)
+#   `batch_casts` 그걸로 **받아낸 판수** 합계 (9차 계측 · 누적)
+#
+# ⭐ `batch_*`는 **쓰이는지 재기 위한 것뿐**이고 제한에 쓰지 않아요. 날짜별로 안 나눠요 —
+#    세션마다 재서 차분을 보면 추이가 나와요(`report_economy.py`가 찍어요).
 #
 # 🚨 **전부 조건부 update 한 번으로** 처리해요. "읽고 → 확인하고 → 쓰기"로 하면 빠르게
 #    두 번 누를 때 상한을 넘겨 던지거나 내구도가 음수가 돼요.
@@ -200,17 +206,31 @@ def _use_rods_sync(user_id, want: int) -> tuple[int, int, str | None]:
                 return 0, rod, "cap"
             return 0, rod, "no_rod"
 
+        # ⭐ 🎣 **몰아 던지기 사용량 계측**(9차). `want > 1`이면 묶음으로 들어온 거예요.
+        #    `log.info`만 찍고 있었는데 **그걸로는 셀 수 없었어요** — `flyctl logs`가 최근
+        #    100줄만 주고, 단판엔 로그가 아예 없어서 대조군도 없어요. 2026-10-28에 배포
+        #    하루 뒤 "쓰이는지"를 재려다 못 쟀어요. 그래서 DB에 남겨요.
+        #    ⭐ **이미 돌리는 조건부 update에 얹어요 — Atlas 왕복이 안 늘어나요.**
+        #    🚨 `k`가 아니라 **`want`로 판단해요.** 5번을 눌렀는데 1판만 남아 `k=1`이 된
+        #       경우도 "기능을 쓴 것"이에요(재려는 값은 도달 여부예요).
+        #    ⚠️ `batch_casts`는 **받아낸 판수**예요. 챔질을 놓쳐 `_give_back_rods_sync`가
+        #       묶음을 통째로 되돌려도 **안 깎아요** — "눌렀지만 놓친" 것도 사용이에요.
+        inc: dict = {"rod": -k}
+        if want > 1:
+            inc["batch_uses"] = 1
+            inc["batch_casts"] = k
+
         if fresh:
             cond: dict = {"_id": uid, "rod": {"$gte": k}, "cast_date": today}
             if cap:
                 cond["casts_today"] = {"$lte": cap - k}
             got = _fish.find_one_and_update(
-                cond, {"$inc": {"rod": -k, "casts_today": k}},
+                cond, {"$inc": {**inc, "casts_today": k}},
                 return_document=ReturnDocument.AFTER)
         else:
             got = _fish.find_one_and_update(
                 {"_id": uid, "rod": {"$gte": k}, "cast_date": {"$ne": today}},
-                {"$inc": {"rod": -k}, "$set": {"cast_date": today, "casts_today": k}},
+                {"$inc": inc, "$set": {"cast_date": today, "casts_today": k}},
                 return_document=ReturnDocument.AFTER)
         if got is not None:
             return k, int(got.get("rod") or 0), None

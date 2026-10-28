@@ -287,4 +287,38 @@ print(f"\n[6] 🧊 보호권: {len(inv)}명이 보유 중 / 총 {held}장")
 themes = list(_db["cosmetics"].find({}, {"themes": 1, "theme": 1}))
 owned = sum(len(d.get("themes") or []) for d in themes)
 print(f"    🎨 테마: {len(themes)}명이 구매 / 총 {owned}개 보유")
+
+# ── 7. 🎣 캐스트 상한 · 몰아 던지기 (7·8차 기능이 쓰이는지) ──────────
+#
+# ⭐ 이 섹션이 있는 이유: 2026-10-28에 몰아 던지기가 쓰이는지 **재려다 못 쟀어요.**
+#    `log.info`만 찍고 있었는데 `flyctl logs`는 최근 100줄만 주고, 단판엔 로그가
+#    없어서 대조군도 없었어요. 그래서 `fish.batch_uses`를 남기고 여기서 읽어요.
+# 🚨 `casts_today`는 **`cast_date`가 오늘일 때만** 유효해요. 날짜를 안 보고 세면
+#    어제 숫자를 오늘 것으로 읽어요(실제로 한 번 그렇게 읽었어요).
+print("\n[7] 🎣 캐스트 상한 · 몰아 던지기")
+fish_docs = list(_db["fish"].find(
+    {}, {"cast_date": 1, "casts_today": 1, "batch_uses": 1, "batch_casts": 1, "rod": 1}))
+b_users = [d for d in fish_docs if int(d.get("batch_uses") or 0) > 0]
+b_uses = sum(int(d.get("batch_uses") or 0) for d in b_users)
+b_casts = sum(int(d.get("batch_casts") or 0) for d in b_users)
+if b_uses:
+    print(f"  🎣 몰아 던지기: {b_uses}번 눌림 / {b_casts}판 / {len(b_users)}명 "
+          f"(한 번에 평균 {b_casts / b_uses:.1f}판)")
+else:
+    print("  🎣 몰아 던지기: **0건** — 계측을 넣은 뒤로 아무도 안 썼어요")
+    print("     └ 🚨 계측 배포 전(2026-10-27~28) 사용분은 여기 안 잡혀요. 배포 시각부터예요")
+
+fresh = [d for d in fish_docs if d.get("cast_date") == today_iso]
+over = sorted((int(d.get("casts_today") or 0) for d in fresh), reverse=True)
+if fresh:
+    print(f"  오늘 던진 사람 {len(fresh)}명 · 상한({DAILY_CAST_CAP})을 넘긴 사람 "
+          f"{sum(1 for c in over if c > DAILY_CAST_CAP)}명 "
+          f"(= 🔥 연속 출석 보너스가 실제로 쓰인 수)")
+    print(f"     └ 그날 캐스트 분포: {over}")
+# ⚠️ 낚시대가 0인데 캐스트가 남은 사람 — 상한을 풀어줘도 **낚시대가 없어서** 못 던져요.
+stuck = [d for d in fish_docs
+         if int(d.get("rod") or 0) == 0 and int(d.get("casts_today") or 0) >= DAILY_CAST_CAP]
+if stuck:
+    print(f"  🪝 낚시대 0 + 상한까지 다 쓴 사람: {len(stuck)}명 "
+          "(캐스트를 더 줘도 낚시대부터 사야 해요)")
 print("\n" + "=" * 72)

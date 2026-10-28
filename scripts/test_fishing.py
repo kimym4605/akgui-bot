@@ -1863,6 +1863,94 @@ check("🚨 한 줄에 5개를 넘지 않는다",
       str([len(r.get("components", [])) for r in _rows_big]))
 
 # ==================================================================
+# [17] 🎣 몰아 던지기 **계측** (9차 · 2026-10-28)
+#
+# ⭐ 이 섹션이 있는 이유: 배포 하루 뒤에 "묶음이 쓰이는지"를 재려다 **못 쟀어요.**
+#    `log.info`만 찍고 있었는데 `flyctl logs`는 최근 100줄만 주고, 단판엔 로그가
+#    아예 없어서 대조군도 없었어요. 그래서 `fish.batch_uses`/`batch_casts`를 남겨요.
+# 🚨 **단판이 세어지면 측정이 통째로 무의미해져요**(낚시의 대부분이 단판이에요).
+#    그래서 아래 "단판은 안 센다"가 이 섹션의 핵심 검사예요.
+# ==================================================================
+print("\n[17] 🎣 몰아 던지기 계측")
+
+MU = "metric-batch"
+fake.docs.pop(MU, None)
+fake_attend.docs.pop(MU, None)                     # 보너스 없음 = 상한 CAP
+for _ in range((CAP // ROD_DURABILITY) + 3):
+    run(fishing_store.buy_rod(MU, ROD_DURABILITY))
+
+_g, _, _ = run(fishing_store.use_rods(MU, 5))
+_d = fake.docs[MU]
+check("묶음 5판을 받으면 batch_uses가 1 센다", _d.get("batch_uses") == 1,
+      str(_d.get("batch_uses")))
+check("batch_casts가 **받아낸 판수**(5)를 센다", _d.get("batch_casts") == 5,
+      str(_d.get("batch_casts")))
+
+run(fishing_store.use_rods(MU, 3))
+check("두 번째 묶음에 uses=2 / casts=8로 누적된다",
+      (fake.docs[MU].get("batch_uses"), fake.docs[MU].get("batch_casts")) == (2, 8),
+      f"{fake.docs[MU].get('batch_uses')} / {fake.docs[MU].get('batch_casts')}")
+
+# 🚨 여기가 핵심 — **단판은 세지 않아요.** `_use_rod_sync`는 `use_rods(uid, 1)`로
+#    들어오니 `want > 1`로 가르지 않으면 모든 낚시가 묶음으로 잡혀요.
+_before = dict(fake.docs[MU])
+run(fishing_store.use_rod(MU))
+check("🚨 단판(use_rod)은 batch_uses를 **안 센다**",
+      fake.docs[MU].get("batch_uses") == _before.get("batch_uses"),
+      f"{_before.get('batch_uses')} → {fake.docs[MU].get('batch_uses')}")
+check("🚨 단판은 batch_casts도 안 센다",
+      fake.docs[MU].get("batch_casts") == _before.get("batch_casts"),
+      f"{_before.get('batch_casts')} → {fake.docs[MU].get('batch_casts')}")
+check("⭐ 그래도 단판은 casts_today를 1 센다 (계측이 차감을 안 망쳤다)",
+      fake.docs[MU].get("casts_today") == _before.get("casts_today") + 1,
+      f"{_before.get('casts_today')} → {fake.docs[MU].get('casts_today')}")
+
+# ⭐ 요청보다 적게 받아도(상한·내구도에 걸려 k=1) **기능을 쓴 건 쓴 거예요.**
+MS = "metric-short"
+fake.docs.pop(MS, None)
+fake_attend.docs.pop(MS, None)
+run(fishing_store.buy_rod(MS, SMALL_ROD_DURABILITY))
+run(fishing_store.use_rods(MS, SMALL_ROD_DURABILITY - 1))   # 먼저 거의 다 쓰고
+_gs, _, _ = run(fishing_store.use_rods(MS, 5))              # 5판 요청 → 1판만 남음
+check(f"⭐ 5판 요청에 {_gs}판만 받아도 uses가 늘어난다 (k가 아니라 want로 가른다)",
+      fake.docs[MS].get("batch_uses") == 2 and _gs == 1,
+      f"uses={fake.docs[MS].get('batch_uses')} / granted={_gs}")
+
+# 🚨 **날짜가 바뀐 첫 캐스트는 다른 쿼리**예요(`$inc`가 아니라 `$set`으로 리셋해요).
+#    그쪽 분기에 계측을 빼먹으면 **자정 직후 첫 묶음이 안 세져요** — 하루 한 번씩
+#    조용히 누락되니 눈에 안 띄어요. 그래서 날짜를 과거로 돌려놓고 따로 봐요.
+MD = "metric-newday"
+fake.docs.pop(MD, None)
+fake_attend.docs.pop(MD, None)
+for _ in range((CAP // ROD_DURABILITY) + 3):
+    run(fishing_store.buy_rod(MD, ROD_DURABILITY))
+run(fishing_store.use_rods(MD, 4))
+fake.docs[MD]["cast_date"] = "2000-01-01"        # 어제(=다른 날)로 돌려놓기
+_gd, _, _ = run(fishing_store.use_rods(MD, 6))
+check("🚨 날짜가 바뀐 첫 묶음도 센다 ($set 분기 누락 방지)",
+      (fake.docs[MD].get("batch_uses"), fake.docs[MD].get("batch_casts")) == (2, 10),
+      f"uses={fake.docs[MD].get('batch_uses')} / casts={fake.docs[MD].get('batch_casts')} "
+      f"(granted={_gd})")
+check("⭐ 그 분기에서 casts_today는 리셋돼 새 날짜 몫만 센다",
+      fake.docs[MD].get("casts_today") == _gd, str(fake.docs[MD].get("casts_today")))
+
+# ⚠️ 챔질을 놓쳐 묶음을 통째로 되돌려도 계측은 **안 깎아요** — "눌렀지만 놓친" 것도
+#    사용이에요. 깎으면 "쓰였는데 0건"으로 보여서 재려던 걸 못 재요.
+_pre = dict(fake.docs[MU])
+run(fishing_store.give_back_rods(MU, 3))
+check("⚠️ 묶음 환불에도 batch_uses가 안 깎인다 (의도)",
+      fake.docs[MU].get("batch_uses") == _pre.get("batch_uses"),
+      f"{_pre.get('batch_uses')} → {fake.docs[MU].get('batch_uses')}")
+
+# 🚨 리포트가 이 필드를 **실제로 읽는지** — 필드 이름을 바꾸면 여기서 걸려요.
+_rep = _Path(os.path.join(BOT_DIR, "scripts/report_economy.py")).read_text(
+    encoding="utf-8")
+check("🚨 report_economy.py가 batch_uses를 읽는다",
+      "batch_uses" in _rep and "batch_casts" in _rep)
+check("🚨 리포트가 0건과 '계측 전'을 구분해 말한다",
+      "계측" in _rep and "0건" in _rep)
+
+# ==================================================================
 # 🚨 요약은 **반드시 파일 맨 끝**에 있어야 해요. 여기보다 위에 두면 그 뒤에 추가한
 #    섹션의 실패가 집계되지도, 종료코드에 반영되지도 않아요(2026-10-19에 실제로
 #    [16]을 이 블록 **뒤에** 붙여서 조용히 통과했어요). 새 섹션은 이 위에.
