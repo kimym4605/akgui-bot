@@ -983,9 +983,295 @@ class FishingView(discord.ui.View):
             self.done.set()
 
 
+async def act_tank(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    data = await fishing_store.get(interaction.user.id)
+    tank = data["tank"]
+
+    embed = discord.Embed(title="🪣 내 어항", color=0x3B82F6)
+    if not tank:
+        embed.description = "어항이 비었어요. `/낚시` 로 한 마리 낚아보세요!"
+    else:
+        lines = []
+        for grade in GRADE_ORDER:
+            rows = [(k, s) for k, sizes in tank.items()
+                    if BY_KEY.get(k, ("", ""))[0] == grade for s in sizes]
+            if not rows:
+                continue
+            g = GRADES[grade]
+            lo_p, hi_p = g["pieces"]
+            # 📏 **큰 놈부터** 보여줘요. 어항을 열었을 때 제일 궁금한 게 최대어예요.
+            rows.sort(key=lambda r: -(r[1] or 0))
+            part = " · ".join(
+                f"{BY_KEY[k][1]}" + (f" {s}cm" if s is not None else "")
+                for k, s in rows[:8])
+            if len(rows) > 8:
+                part += f" 외 {len(rows) - 8}마리"
+            lines.append(
+                f"{g['emoji']} **{grade}** "
+                f"({lo_p / COIN_PIECES:.1f}~{hi_p / COIN_PIECES:.1f}코인) — {part}")
+        embed.description = "\n".join(lines)
+
+        total_n = sum(len(v) for v in tank.values())
+        pieces = data["pieces"] + data["dust"]
+        embed.add_field(name="마리 수", value=f"**{total_n}마리**", inline=True)
+        # ⚠️ 실제 지급은 **내림**이에요(나머지는 다음 판매로 넘어가요). 기대를
+        #    부풀리지 않게 정확한 값과 받을 코인을 같이 보여줘요.
+        embed.add_field(
+            name="팔면",
+            value=(f"**{pieces // COIN_PIECES}코인**"
+                   + (f"\n-# (정확히 {pieces / COIN_PIECES:.1f} · "
+                      f"남는 {pieces % COIN_PIECES / COIN_PIECES:.1f}은 다음에)"
+                      if pieces % COIN_PIECES else "")),
+            inline=True)
+
+    # 🎣 낚시대 상태를 제일 먼저 보여줘요 - "몇 번 더 던질 수 있나"가
+    #    낚시에서 제일 궁금한 정보예요.
+    #
+    # ⚠️ 전엔 "부서졌어요 (내일 다시)"를 띄웠는데, 하루 제한을 푼 뒤로는
+    #    **거짓 안내**예요. 지금은 바로 또 살 수 있어요.
+    left, _bought_today = await fishing_store.rod_state(interaction.user.id)
+    rod = (f"**{left}/{ROD_DURABILITY}번** 남음" if left
+           else f"없어요 (`/악귀상점` {ROD_PRICE}코인)")
+    embed.add_field(name="🎣 낚시대", value=rod, inline=True)
+
+    # ⭐ 하루 상한(2026-10-20 6차). 낚시대 남은 횟수와 **별개**라 따로 보여줘요 —
+    #    "낚시대는 8번 남았는데 왜 못 던지냐"를 막는 자리예요.
+    used, cap = await fishing_store.cast_quota(interaction.user.id)
+    if cap:
+        # ⭐ 7차: 연속 출석 보너스를 받고 있으면 그 몫을 따로 적어요.
+        _b = cap - DAILY_CAST_CAP
+        embed.add_field(
+            name="오늘 남은 횟수",
+            value=((f"**{max(0, cap - used)}/{cap}번**" if used < cap
+                    else "**다 썼어요**\n-# 내일 자정(한국 시간)에 채워져요")
+                   + (f"\n-# 🔥 연속 출석 +{_b}" if _b > 0 else "")),
+            inline=True)
+
+    hit = f"{data['caught']}/{data['casts']}" if data["casts"] else "0/0"
+    embed.add_field(name="챔질 성공률", value=f"{hit}", inline=True)
+    if data.get("best"):
+        bg, bn = BY_KEY.get(data["best"]["key"], ("?", "?"))
+        embed.add_field(name="최고 기록",
+                        value=f"{GRADES.get(bg, {}).get('emoji', '')} {bn}", inline=True)
+    if data["sold"]:
+        embed.add_field(name="누적 판매", value=f"**{data['sold']}코인**", inline=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+async def act_sell(interaction: discord.Interaction) -> None:
+    # ⚠️ defer부터 ephemeral이어야 해요. 공개로 defer하면 "생각 중..." 자리가
+    #    채널에 남아서, 결과만 비공개로 보내봐야 흔적이 섞여요.
+    await interaction.response.defer(ephemeral=True)
+
+    # 🚨 **비우면서 내용을 받아와요**(원자적). 읽고 나서 비우면 그 사이에 낚은
+    #    물고기가 증발해요.
+    # ⚠️ **3개를 받아야 해요** (tank, coins, dust). 치수 시스템에서 `sell_all`이
+    #    잔돈까지 돌려주게 바뀌었는데 여기를 2개로 두는 바람에
+    #    `ValueError: too many values to unpack`으로 **판매가 통째로 죽었어요**
+    #    (2026-10-17 유저 신고). 테스트가 store만 직접 불러서 못 잡았어요.
+    tank, coins, dust = await fishing_store.sell_all(interaction.user.id)
+    if not tank:
+        await interaction.followup.send(
+            "어항이 비었어요. `/낚시` 로 한 마리 낚아보세요!", ephemeral=True)
+        return
+
+    try:
+        balance = await coin_wallet.add(interaction.user.id, coins, reason=COIN_LOG_NOTE)
+    except Exception:
+        # 🚨 코인이 안 들어갔으면 물고기를 반드시 되돌려요. 잔돈까지 같이요.
+        await fishing_store.restore(interaction.user.id, tank, dust)
+        log.exception("물고기 판매 실패 - 어항을 되돌렸어요 (user=%s)", interaction.user.id)
+        await interaction.followup.send(
+            "판매 중 문제가 생겼어요. **물고기는 어항에 그대로 있어요.**", ephemeral=True)
+        return
+
+    # 🎣 주간 대회의 💰 최다 수익도 `fishing_store.add_sold` 안에서 같이 쌓여요.
+    #    🚨 여기서 또 부르면 `sold`가 2배가 돼요(수익 순위가 통째로 틀려져요).
+    await fishing_store.add_sold(interaction.user.id, coins)
+
+    lines = []
+    for grade in GRADE_ORDER:
+        rows = [(k, sz) for k, sizes in tank.items()
+                if BY_KEY.get(k, ("", ""))[0] == grade for sz in sizes]
+        if rows:
+            g = GRADES[grade]
+            sub = sum(pieces_of(k, sz) for k, sz in rows)
+            big = max((sz for _, sz in rows if sz is not None), default=None)
+            lines.append(
+                f"{g['emoji']} **{grade}** {len(rows)}마리 — "
+                f"{sub / COIN_PIECES:.1f}코인"
+                + (f" (최대 {big}cm)" if big else ""))
+
+    embed = discord.Embed(
+        title="🪙 물고기를 팔았어요!",
+        description="\n".join(lines),
+        color=0xFFC850,
+    )
+    embed.add_field(name="받은 코인", value=f"**+{coins}개**", inline=True)
+    embed.add_field(name="보유 악귀코인", value=f"**{balance}개**", inline=True)
+    # 🚨 남은 조각을 **반드시 알려줘요.** 안 그러면 "3.7코인어치인데 3개만 받았다"가
+    #    떼먹힌 걸로 보여요. 다음 판매에 더해진다는 걸 명시해요.
+    if dust:
+        embed.add_field(name="다음에 더해져요",
+                        value=f"**{dust / COIN_PIECES:.1f}코인**", inline=True)
+    embed.set_footer(text="어항이 비었어요 · /낚시 로 다시 채워보세요")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+def _panel_embed() -> discord.Embed:
+    """🎣 상설 패널 — 낚시터 채널에 **공개로 박아두는** 안내예요.
+
+    🚨 사람별 값(잔액·남은 횟수·내 어항)을 **넣지 않아요.** 메시지가 하나뿐이라 누구의
+       값을 적어도 나머지 전원에게 거짓이 돼요. 그건 버튼이 본인에게만 보이게 띄워줘요.
+    🚨 **숫자를 손으로 적지 않아요.** 2026-10-23에 `#🤖｜봇-사용법`의 낚시 등급표가
+       인상 전 값으로 7일간 남아 수익을 1/3 낮게 말한 적이 있어요. 전부 상수·계산
+       함수에서 꺼내요. → [[feedback_sync_discord_guides_after_deploy]]
+    ⚠️ 등급별 확률·값은 여기 안 적어요 — `/낚시확률`이 계산해서 보여줘요(같은 이유로
+       한 번 거짓이 된 표예요).
+    """
+    embed = discord.Embed(
+        title="🎣 낚시터",
+        description=(
+            "물고기를 낚아 팔면 악귀코인이 돼요.\n"
+            "**아래 버튼을 누르면 그 자리에서 바로 돼요** — 누른 사람에게만 보여요."
+        ),
+        color=0x3B82F6,
+    )
+    embed.add_field(
+        name="처음이면 이 순서대로",
+        value=(
+            f"**1.** 🪝 **소형 낚시대**({fish_data.SMALL_ROD_PRICE}코인 · "
+            f"{fish_data.SMALL_ROD_DURABILITY}번)를 사요 — 제일 싸게 시작해요\n"
+            "**2.** 🎣 **던지기** → 입질이 오면 **챔질!** 을 눌러요\n"
+            "**3.** 💰 **전부 팔기** 로 잡은 걸 코인으로 바꿔요"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="얼마나 벌려요?",
+        value=(
+            f"낚시대 하나({fish_data.ROD_PRICE}코인 · {fish_data.ROD_DURABILITY}번)로 평균 "
+            f"**{fish_data.expected_coin_per_day():.0f}코인**쯤 벌려요 "
+            f"(낚시대값을 빼면 **+{fish_data.net_issue_per_rod():.0f}코인**)\n"
+            f"　└ 🪝 소형도 **횟수당 값이 똑같아요** — 싸게 시작하는 것뿐이고 손해는 없어요"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="하루 몇 번까지?",
+        value=(
+            f"기본 **{DAILY_CAST_CAP}번** (한국 시간 자정에 채워져요)\n"
+            f"　└ 🔥 연속 출석 **{fish_data.STREAK_CAST_EVERY}일마다 "
+            f"+{fish_data.STREAK_CAST_BONUS}번** (최대 +{fish_data.STREAK_CAST_MAX}번 = "
+            f"하루 {DAILY_CAST_CAP + fish_data.STREAK_CAST_MAX}번)\n"
+            f"　└ 🎣 **몰아 던지기**는 챔질 한 번으로 여러 판 — 확률은 한 판씩과 똑같아요\n"
+            f"　└ 상한에 걸려도 **낚시대는 안 없어져요** (다음 날 이어서 써요)"
+        ),
+        inline=False,
+    )
+    embed.set_footer(
+        text="이 패널은 항상 여기 있어요 · 명령어로도 돼요: "
+             "/낚시 · /어항 · /물고기판매 · /낚시왕 · /낚시확률")
+    return embed
+
+
+class FishingPanelView(discord.ui.View):
+    """🎣 낚시터 채널에 **항상 떠 있는** 공개 패널이에요 (2026-10-31).
+
+    ## 왜 이게 필요한가 — 벽은 **가격이 아니었어요**
+
+    2026-10-30 실측: 최근 7일 코인 활동자 **29명 중 12명이 낚시를 한 번도 안 했어요.**
+    그런데 그중 돈이 없어서 못 하는 사람은 **1명뿐**이고(2코인), 나머지는
+    **10 · 16 · 17 · 19 · 42 · 49 · 68 · 97코인**을 들고 있었어요. 97코인 가진 사람이
+    낚시를 안 해요. 🪝소형(3코인)도 이미 10-18에 넣어서 75%가 살 수 있어요.
+    → **가격을 더 내려도 풀릴 게 없어요.** 문턱은 `/낚시`를 **쳐야 한다는 것**이에요.
+
+    🚨 `🎣｜낚시터` **방은 이미 있었어요.** topic에 명령어가 나열돼 있었고 고정 메시지도
+    있었는데 **버튼이 0줄**이었어요. 🪙 악귀상점이 22일째 0건이던 게 방으로 꺼내 깨졌는데,
+    통한 건 "방"이 아니라 **방 + 누를 수 있는 버튼**이었어요. 그 절반이 빠져 있던 자리예요.
+    같은 진단을 💡건의·📅일정·❓매니저에서 이미 세 번 찍었어요.
+    → [[feedback_pickup_plaintext_not_slash_command]]
+
+    ## 🚨 영속 뷰 규칙 (셋 중 하나만 빠져도 재시작 뒤 버튼이 죽어요)
+    1. `timeout=None`
+    2. 버튼마다 **고정 `custom_id`** (`akgui:fish:*`)
+    3. `cog_load`에서 `bot.add_view(FishingPanelView())`
+    → `scripts/test_fishing.py`가 관문에서 셋 다 검사해요.
+
+    ## 🚨🚨 던지기는 **반드시 `edit=False`**
+    `run_cast(edit=True)`는 `interaction.edit_original_response`로 **버튼이 달려 있던
+    메시지**를 고쳐요. 패널 버튼에서 그러면 **상설 패널이 찌 화면으로 덮여 사라져요.**
+    `edit=False`면 누른 사람에게만 보이는 새 ephemeral 화면이 떠요(`/낚시`와 같아요).
+
+    ## 🚨 상태를 `self`에 담지 마세요
+    이 객체는 **봇 전체에 하나뿐**이라 모든 사람이 공유해요. 누른 사람은
+    `interaction.user`로만 알아내고, 답은 전부 ephemeral이에요.
+    """
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        # 🚨 **가격을 라벨에 손으로 적지 않아요.** 데코레이터엔 f-string을 못 쓰니
+        #    여기서 상수로 덮어써요 — 상수만 바꾸면 버튼까지 따라와요.
+        #    (🪙 상점 패널과 같은 방식이에요)
+        self.rod.label = f"낚시대 {ROD_PRICE}코인"
+        self.small_rod.label = f"소형 낚시대 {SMALL_ROD_PRICE}코인"
+
+    @discord.ui.button(label="던지기", emoji="🎣", style=discord.ButtonStyle.success,
+                       custom_id="akgui:fish:cast", row=0)
+    async def cast(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 🚨 edit=False — 위 docstring 참고. True면 이 패널이 사라져요.
+        await run_cast(interaction, edit=False, batch=1)
+
+    @discord.ui.button(label="몰아 던지기 (남은 전부)", emoji="🎣",
+                       style=discord.ButtonStyle.primary,
+                       custom_id="akgui:fish:cast_all", row=0)
+    async def cast_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # `batch=0`이 "남은 전부"예요(상한과 내구도 중 먼저 바닥나는 쪽까지).
+        await run_cast(interaction, edit=False, batch=0)
+
+    @discord.ui.button(label="소형 낚시대", emoji="🪝", style=discord.ButtonStyle.secondary,
+                       custom_id="akgui:fish:rod_small", row=1)
+    async def small_rod(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _panel_buy_rod(interaction, small=True)
+
+    @discord.ui.button(label="낚시대", emoji="🎣", style=discord.ButtonStyle.secondary,
+                       custom_id="akgui:fish:rod", row=1)
+    async def rod(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _panel_buy_rod(interaction, small=False)
+
+    @discord.ui.button(label="어항", emoji="🪣", style=discord.ButtonStyle.secondary,
+                       custom_id="akgui:fish:tank", row=2)
+    async def tank(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await act_tank(interaction)
+
+    @discord.ui.button(label="전부 팔기", emoji="💰", style=discord.ButtonStyle.secondary,
+                       custom_id="akgui:fish:sell", row=2)
+    async def sell(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await act_sell(interaction)
+
+
+async def _panel_buy_rod(interaction: discord.Interaction, *, small: bool) -> None:
+    """패널에서 낚시대를 사요.
+
+    ⚠️ `cogs/akgui_shop.act_buy_rod`를 **그대로 빌려 써요.** 여기서 ack→구매→안내를
+    다시 짜면 안내 문구가 상점과 갈려요(구매 로직 자체는 어차피 `purchase_rod`
+    하나뿐이지만, 갈리는 건 늘 그 **껍데기**예요).
+    🚨 임포트를 함수 안에서 해요 — 모듈 맨 위에서 하면 `akgui_shop`이 `purchase_rod`를
+    쓰느라 이 모듈을 다시 불러서 순환이 생겨요(그쪽도 같은 이유로 안에서 임포트해요)."""
+    from cogs.akgui_shop import act_buy_rod
+
+    await act_buy_rod(interaction, small=small)
+
+
 class Fishing(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    async def cog_load(self):
+        # 🚨 이게 없으면 재시작 뒤 패널 버튼을 눌러도 봇이 custom_id를 알아보지
+        #    못해서 **아무 반응이 없어요**(에러도 안 나요).
+        self.bot.add_view(FishingPanelView())
 
     @app_commands.command(name="낚시", description="찌를 던져 물고기를 낚아요. (낚시대가 필요해요)")
     @app_commands.describe(
@@ -1012,140 +1298,12 @@ class Fishing(commands.Cog):
     @app_commands.command(name="어항", description="낚아둔 물고기를 봐요.")
     @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
     async def tank(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        data = await fishing_store.get(interaction.user.id)
-        tank = data["tank"]
-
-        embed = discord.Embed(title="🪣 내 어항", color=0x3B82F6)
-        if not tank:
-            embed.description = "어항이 비었어요. `/낚시` 로 한 마리 낚아보세요!"
-        else:
-            lines = []
-            for grade in GRADE_ORDER:
-                rows = [(k, s) for k, sizes in tank.items()
-                        if BY_KEY.get(k, ("", ""))[0] == grade for s in sizes]
-                if not rows:
-                    continue
-                g = GRADES[grade]
-                lo_p, hi_p = g["pieces"]
-                # 📏 **큰 놈부터** 보여줘요. 어항을 열었을 때 제일 궁금한 게 최대어예요.
-                rows.sort(key=lambda r: -(r[1] or 0))
-                part = " · ".join(
-                    f"{BY_KEY[k][1]}" + (f" {s}cm" if s is not None else "")
-                    for k, s in rows[:8])
-                if len(rows) > 8:
-                    part += f" 외 {len(rows) - 8}마리"
-                lines.append(
-                    f"{g['emoji']} **{grade}** "
-                    f"({lo_p / COIN_PIECES:.1f}~{hi_p / COIN_PIECES:.1f}코인) — {part}")
-            embed.description = "\n".join(lines)
-
-            total_n = sum(len(v) for v in tank.values())
-            pieces = data["pieces"] + data["dust"]
-            embed.add_field(name="마리 수", value=f"**{total_n}마리**", inline=True)
-            # ⚠️ 실제 지급은 **내림**이에요(나머지는 다음 판매로 넘어가요). 기대를
-            #    부풀리지 않게 정확한 값과 받을 코인을 같이 보여줘요.
-            embed.add_field(
-                name="팔면",
-                value=(f"**{pieces // COIN_PIECES}코인**"
-                       + (f"\n-# (정확히 {pieces / COIN_PIECES:.1f} · "
-                          f"남는 {pieces % COIN_PIECES / COIN_PIECES:.1f}은 다음에)"
-                          if pieces % COIN_PIECES else "")),
-                inline=True)
-
-        # 🎣 낚시대 상태를 제일 먼저 보여줘요 - "몇 번 더 던질 수 있나"가
-        #    낚시에서 제일 궁금한 정보예요.
-        #
-        # ⚠️ 전엔 "부서졌어요 (내일 다시)"를 띄웠는데, 하루 제한을 푼 뒤로는
-        #    **거짓 안내**예요. 지금은 바로 또 살 수 있어요.
-        left, _bought_today = await fishing_store.rod_state(interaction.user.id)
-        rod = (f"**{left}/{ROD_DURABILITY}번** 남음" if left
-               else f"없어요 (`/악귀상점` {ROD_PRICE}코인)")
-        embed.add_field(name="🎣 낚시대", value=rod, inline=True)
-
-        # ⭐ 하루 상한(2026-10-20 6차). 낚시대 남은 횟수와 **별개**라 따로 보여줘요 —
-        #    "낚시대는 8번 남았는데 왜 못 던지냐"를 막는 자리예요.
-        used, cap = await fishing_store.cast_quota(interaction.user.id)
-        if cap:
-            # ⭐ 7차: 연속 출석 보너스를 받고 있으면 그 몫을 따로 적어요.
-            _b = cap - DAILY_CAST_CAP
-            embed.add_field(
-                name="오늘 남은 횟수",
-                value=((f"**{max(0, cap - used)}/{cap}번**" if used < cap
-                        else "**다 썼어요**\n-# 내일 자정(한국 시간)에 채워져요")
-                       + (f"\n-# 🔥 연속 출석 +{_b}" if _b > 0 else "")),
-                inline=True)
-
-        hit = f"{data['caught']}/{data['casts']}" if data["casts"] else "0/0"
-        embed.add_field(name="챔질 성공률", value=f"{hit}", inline=True)
-        if data.get("best"):
-            bg, bn = BY_KEY.get(data["best"]["key"], ("?", "?"))
-            embed.add_field(name="최고 기록",
-                            value=f"{GRADES.get(bg, {}).get('emoji', '')} {bn}", inline=True)
-        if data["sold"]:
-            embed.add_field(name="누적 판매", value=f"**{data['sold']}코인**", inline=True)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await act_tank(interaction)
 
     @app_commands.command(name="물고기판매", description="어항에 든 물고기를 전부 팔아요.")
     @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
     async def sell(self, interaction: discord.Interaction):
-        # ⚠️ defer부터 ephemeral이어야 해요. 공개로 defer하면 "생각 중..." 자리가
-        #    채널에 남아서, 결과만 비공개로 보내봐야 흔적이 섞여요.
-        await interaction.response.defer(ephemeral=True)
-
-        # 🚨 **비우면서 내용을 받아와요**(원자적). 읽고 나서 비우면 그 사이에 낚은
-        #    물고기가 증발해요.
-        # ⚠️ **3개를 받아야 해요** (tank, coins, dust). 치수 시스템에서 `sell_all`이
-        #    잔돈까지 돌려주게 바뀌었는데 여기를 2개로 두는 바람에
-        #    `ValueError: too many values to unpack`으로 **판매가 통째로 죽었어요**
-        #    (2026-10-17 유저 신고). 테스트가 store만 직접 불러서 못 잡았어요.
-        tank, coins, dust = await fishing_store.sell_all(interaction.user.id)
-        if not tank:
-            await interaction.followup.send(
-                "어항이 비었어요. `/낚시` 로 한 마리 낚아보세요!", ephemeral=True)
-            return
-
-        try:
-            balance = await coin_wallet.add(interaction.user.id, coins, reason=COIN_LOG_NOTE)
-        except Exception:
-            # 🚨 코인이 안 들어갔으면 물고기를 반드시 되돌려요. 잔돈까지 같이요.
-            await fishing_store.restore(interaction.user.id, tank, dust)
-            log.exception("물고기 판매 실패 - 어항을 되돌렸어요 (user=%s)", interaction.user.id)
-            await interaction.followup.send(
-                "판매 중 문제가 생겼어요. **물고기는 어항에 그대로 있어요.**", ephemeral=True)
-            return
-
-        # 🎣 주간 대회의 💰 최다 수익도 `fishing_store.add_sold` 안에서 같이 쌓여요.
-        #    🚨 여기서 또 부르면 `sold`가 2배가 돼요(수익 순위가 통째로 틀려져요).
-        await fishing_store.add_sold(interaction.user.id, coins)
-
-        lines = []
-        for grade in GRADE_ORDER:
-            rows = [(k, sz) for k, sizes in tank.items()
-                    if BY_KEY.get(k, ("", ""))[0] == grade for sz in sizes]
-            if rows:
-                g = GRADES[grade]
-                sub = sum(pieces_of(k, sz) for k, sz in rows)
-                big = max((sz for _, sz in rows if sz is not None), default=None)
-                lines.append(
-                    f"{g['emoji']} **{grade}** {len(rows)}마리 — "
-                    f"{sub / COIN_PIECES:.1f}코인"
-                    + (f" (최대 {big}cm)" if big else ""))
-
-        embed = discord.Embed(
-            title="🪙 물고기를 팔았어요!",
-            description="\n".join(lines),
-            color=0xFFC850,
-        )
-        embed.add_field(name="받은 코인", value=f"**+{coins}개**", inline=True)
-        embed.add_field(name="보유 악귀코인", value=f"**{balance}개**", inline=True)
-        # 🚨 남은 조각을 **반드시 알려줘요.** 안 그러면 "3.7코인어치인데 3개만 받았다"가
-        #    떼먹힌 걸로 보여요. 다음 판매에 더해진다는 걸 명시해요.
-        if dust:
-            embed.add_field(name="다음에 더해져요",
-                            value=f"**{dust / COIN_PIECES:.1f}코인**", inline=True)
-        embed.set_footer(text="어항이 비었어요 · /낚시 로 다시 채워보세요")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await act_sell(interaction)
 
     @app_commands.command(name="낚시왕", description="누가 제일 많이 벌었는지 봐요.")
     @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
@@ -1297,6 +1455,39 @@ class Fishing(commands.Cog):
         #    그대로 두면 `InteractionResponded`로 터져요(7차에 defer를 넣으면서 같이
         #    고쳤어요 — AST 검사로는 안 잡히는 종류라 테스트가 실제로 돌려봐요).
         await interaction.followup.send(embed=embed)
+
+    @app_commands.command(
+        name="낚시패널",
+        description="[서버 소유자 전용] 이 채널에 낚시 패널을 박아둬요 (항상 떠 있어요).",
+    )
+    async def panel(self, interaction: discord.Interaction):
+        """🎣 상설 패널을 **지금 이 채널에** 올려요. (🪙 `/상점패널`과 같은 방식이에요)
+
+        ⚠️ `/채널설정`을 쓰지 않아요 — 이건 "명령어를 어디서 쓸 수 있나"가 아니라
+           **메시지를 한 번 박는** 일이에요. 채널을 옮기고 싶으면 옛 메시지를 지우고
+           새 채널에서 다시 치면 돼요.
+        📌 올린 뒤 **고정(핀)** 해두면 새로 온 사람도 바로 찾아요."""
+        if interaction.guild is None or interaction.user.id != interaction.guild.owner_id:
+            await interaction.response.send_message(
+                "이 명령어는 서버 소유자만 쓸 수 있어요.", ephemeral=True
+            )
+            return
+
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "텍스트 채널에서 써주세요.", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            f"🎣 {channel.mention} 에 낚시 패널을 올렸어요.\n"
+            "-# 메시지를 **고정(핀)** 해두면 새로 온 사람도 바로 찾아요. "
+            "옮기려면 그 메시지를 지우고 다른 채널에서 다시 치면 돼요.",
+            ephemeral=True,
+        )
+        await channel.send(embed=_panel_embed(), view=FishingPanelView())
+        log.info("🎣 낚시 패널 게시: 채널 %s", channel.id)
 
 
 async def setup(bot: commands.Bot):

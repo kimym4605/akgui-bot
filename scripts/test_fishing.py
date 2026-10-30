@@ -692,6 +692,11 @@ PUBLIC_OK = {
     "rates",         # 🎣 /낚시확률 — 확률·값 공개. 뒤섞일 내 판이 없고, 공개여야
                      #    옆사람이 보고 알게 돼요(`/카드확률`도 공개예요).
                      #    발견 경로가 좁은 게 지금 낚시의 실제 문제예요.
+    "panel",         # 🎣 /낚시패널 — 상설 패널을 채널에 **공개로 박는** 게 목적이에요.
+                     #    ephemeral로 보내면 아무도 못 보니 기능 자체가 없어져요.
+                     #    ⚠️ 명령어를 쓴 사람에게 가는 답은 여전히 ephemeral이고,
+                     #    공개인 건 `channel.send(...)` 하나뿐이에요 — 아래 [11-패널]이
+                     #    그 둘을 각각 확인해요(면제를 넣었으니 대신 조건을 박아둬요).
 }
 
 # 🚨 **클래스 안만 훑으면 안 돼요.** `run_cast`/`finish_cast`가 모듈 함수로 빠지면서
@@ -763,6 +768,128 @@ if True:
 check("🚨 /낚시·/어항·/물고기판매의 모든 응답이 ephemeral", not leaks,
       "공개로 남은 곳: " + ", ".join(leaks) if leaks else "")
 check("/낚시왕은 공개 (순위표)", "leaderboard" in PUBLIC_OK)
+
+# ==================================================================
+print("\n[11-패널] 🎣 낚시터 상설 패널")
+# ------------------------------------------------------------------
+# 왜 생겼나: 2026-10-30 실측에서 **활동자 29명 중 12명이 낚시를 한 번도 안 했는데**,
+# 돈이 없어서 못 하는 사람은 1명뿐이고 나머지는 10~97코인을 들고 있었어요.
+# 벽은 가격이 아니라 `/낚시`를 **쳐야 한다는 것**이었어요. 방(`🎣｜낚시터`)은 이미
+# 있었고 **버튼이 0줄**이었어요 — 🪙 상점이 통한 건 방 + 버튼 둘 다였어요.
+_panel_cls = next((c for c in _tree.body if isinstance(c, _ast.ClassDef)
+                   and c.name == "FishingPanelView"), None)
+check("FishingPanelView가 있다", _panel_cls is not None)
+check("timeout=None (재시작 뒤에도 살아야 해요)",
+      fishing.FishingPanelView().timeout is None)
+
+_panel_view = fishing.FishingPanelView()
+_btn_ids = [b.custom_id for b in _panel_view.children]
+check("버튼이 6개", len(_btn_ids) == 6, str(len(_btn_ids)))
+check("버튼마다 고정 custom_id가 있다 (없으면 재시작 뒤 죽어요)",
+      all(_btn_ids) and all(str(i).startswith("akgui:fish:") for i in _btn_ids),
+      str(_btn_ids))
+check("custom_id가 겹치지 않는다", len(set(_btn_ids)) == len(_btn_ids), str(_btn_ids))
+
+# 🚨 **패널 버튼은 스스로 응답하지 않아요 — 위임 한 줄이어야 해요.**
+#    `act_tank`/`act_sell`/`run_cast`가 **안에서 먼저 `defer`를 해요.** 버튼에서
+#    또 `defer`나 `send_message`를 하면 `InteractionResponded`로 터지는데, 그건
+#    AST 응답검사([11])로는 안 잡혀요(`ephemeral=True`를 달면 통과해버려요).
+#    ⚠️ 2026-10-31 역방향 확인에서 실제로 이 빈틈이 드러났어요 — 버튼에 defer를
+#       끼워 넣었는데 전부 초록불이었어요.
+_panel_btns = [f for f in _panel_cls.body
+               if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+               and f.name != "__init__"]
+check("패널 버튼 핸들러가 6개", len(_panel_btns) == 6, str(len(_panel_btns)))
+for _b in _panel_btns:
+    _bb = [st for st in _b.body
+           if not (isinstance(st, _ast.Expr) and isinstance(st.value, _ast.Constant)
+                   and isinstance(st.value.value, str))]
+    check(f"패널 버튼 {_b.name}은 위임 한 줄 (직접 응답 금지)",
+          len(_bb) == 1, f"본문 {len(_bb)}줄")
+
+# 🚨 cog_load에서 add_view를 안 하면 재시작 뒤 눌러도 **아무 반응이 없어요**(에러도 안 나요).
+#    ⚠️ 글자 검사(`"add_view" in src`)로 하면 주석·docstring에 걸려 통과해요 —
+#       2026-10-27에 🪙 상점에서 실제로 그렇게 거짓 통과했어요. 그래서 AST로 봐요.
+_cog_cls = next(c for c in _tree.body
+                if isinstance(c, _ast.ClassDef) and c.name == "Fishing")
+_cog_load = next((f for f in _cog_cls.body
+                  if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+                  and f.name == "cog_load"), None)
+check("cog_load에서 add_view(FishingPanelView())를 부른다",
+      _cog_load is not None and any(
+          getattr(c.func, "attr", "") == "add_view"
+          and any(getattr(a.func, "id", "") == "FishingPanelView"
+                  for a in c.args if isinstance(a, _ast.Call))
+          for c in _ast.walk(_cog_load) if isinstance(c, _ast.Call)))
+
+# 🚨🚨 **패널의 던지기는 반드시 `edit=False`.** `run_cast(edit=True)`는
+#    `interaction.edit_original_response`로 **버튼이 달려 있던 메시지**를 고쳐요.
+#    패널에서 그러면 상설 패널이 찌 화면으로 덮여 **사라져요.**
+_panel_casts = [c for c in _ast.walk(_panel_cls) if isinstance(c, _ast.Call)
+                and getattr(c.func, "id", "") == "run_cast"]
+check("패널에서 run_cast를 부르는 곳이 2군데 (던지기 · 몰아 던지기)",
+      len(_panel_casts) == 2, str(len(_panel_casts)))
+check("🚨 패널의 run_cast는 전부 edit=False (True면 패널이 사라져요)",
+      all(any(k.arg == "edit" and getattr(k.value, "value", None) is False
+              for k in c.keywords) for c in _panel_casts),
+      str([[(k.arg, getattr(k.value, "value", None)) for k in c.keywords]
+           for c in _panel_casts]))
+
+# 🚨 패널에서 공개로 나가는 건 `channel.send` **하나뿐**이어야 해요.
+#    명령어를 쓴 사람에게 가는 답은 여전히 ephemeral이에요(PUBLIC_OK 면제의 대가).
+_panel_fn = next(f for f in _cog_cls.body
+                 if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+                 and f.name == "panel")
+_sends = [c for c in _ast.walk(_panel_fn) if isinstance(c, _ast.Call)
+          and getattr(c.func, "attr", "") in ("send", "send_message")]
+_public = [c for c in _sends
+           if not any(k.arg == "ephemeral" and getattr(k.value, "value", None) is True
+                      for k in c.keywords)]
+check("/낚시패널에서 공개 전송은 1개뿐", len(_public) == 1,
+      f"{len(_public)}개 (line {[c.lineno for c in _public]})")
+check("그 공개 전송이 channel.send 다 (interaction 응답이 아니다)",
+      len(_public) == 1 and getattr(_public[0].func.value, "id", "") == "channel")
+check("그 전송에 패널 뷰가 붙어 있다",
+      len(_public) == 1 and any(
+          k.arg == "view" and getattr(getattr(k.value, "func", None), "id", "")
+          == "FishingPanelView" for k in _public[0].keywords))
+check("/낚시패널은 서버 소유자만 (아무나 패널을 뿌리면 안 돼요)",
+      any(getattr(a, "attr", "") == "owner_id"
+          for a in _ast.walk(_panel_fn) if isinstance(a, _ast.Attribute)))
+
+# 🚨 **패널 글에 숫자를 손으로 적으면 안 돼요.** 2026-10-23에 `#🤖｜봇-사용법`의 낚시
+#    등급표가 인상 전 값으로 7일간 남아 수익을 1/3 낮게 말했어요. 상수를 바꿨을 때
+#    글이 따라오는지를 여기서 봐요(안 따라오면 아래 숫자들이 안 맞아 FAIL이에요).
+_emb = fishing._panel_embed()
+_emb_text = (_emb.description or "") + "".join(
+    (f.name or "") + (f.value or "") for f in _emb.fields) + (_emb.footer.text or "")
+check("_panel_embed()는 인자를 안 받는다 (= 사람별 값을 넣을 수 없다)",
+      fishing._panel_embed.__code__.co_argcount == 0)
+for _label, _val in [("소형 낚시대값", fish_data.SMALL_ROD_PRICE),
+                     ("낚시대값", fish_data.ROD_PRICE),
+                     ("내구도", fish_data.ROD_DURABILITY),
+                     ("하루 상한", fish_data.DAILY_CAST_CAP),
+                     ("보너스 포함 천장",
+                      fish_data.DAILY_CAST_CAP + fish_data.STREAK_CAST_MAX)]:
+    check(f"패널 글의 {_label}이 상수와 같다 ({_val})", str(_val) in _emb_text)
+check("패널 글에 등급별 확률표를 적지 않았다 (/낚시확률이 계산해서 보여줘요)",
+      "%" not in _emb_text, _emb_text[:80])
+
+# 🚨 어항·판매를 모듈 함수로 뺐으니, 명령어는 **위임 한 줄**이어야 해요
+#    (로직 복붙이 생기면 한쪽만 고치는 사고가 나요 — `/낚시`와 같은 규칙이에요).
+for _cmd, _act in [("tank", "act_tank"), ("sell", "act_sell")]:
+    check(f"{_act}가 모듈 함수로 빠져 있다", callable(getattr(fishing, _act, None)))
+    _f = next((f for f in _cog_cls.body
+               if isinstance(f, (_ast.AsyncFunctionDef, _ast.FunctionDef))
+               and f.name == _cmd), None)
+    _body = [st for st in (_f.body if _f else [])
+             if not (isinstance(st, _ast.Expr) and isinstance(st.value, _ast.Constant)
+                     and isinstance(st.value.value, str))]
+    check(f"/{_cmd}은 {_act}에 그대로 넘긴다 (로직 복붙 없음)",
+          _f is not None and len(_body) == 1
+          and any(getattr(c.func, "id", "") == _act
+                  for c in _ast.walk(_f) if isinstance(c, _ast.Call)),
+          f"docstring 뺀 본문 {len(_body)}줄")
 
 # ==================================================================
 print("\n[12] 🎣 다시 던지기")
