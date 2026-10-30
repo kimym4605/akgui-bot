@@ -89,12 +89,15 @@ def can_enter_locked_room(member: discord.abc.User | None) -> bool:
     return any(normalize_role_name(r.name) in ROOM_ENTRY_ROLE_NAMES for r in member.roles)
 
 
-def staff_role_labels(guild: discord.Guild | None) -> str:
+def staff_role_labels(guild: discord.Guild | None, names: frozenset[str] | None = None) -> str:
     """안내 문구에 쓸 역할 이름 목록이에요. **서버에 실제로 있는 이름을 그대로** 보여줘요
-    (여기서 이름을 다시 타이핑하면 이모지가 바뀔 때마다 안내문이 거짓이 돼요)."""
+    (여기서 이름을 다시 타이핑하면 이모지가 바뀔 때마다 안내문이 거짓이 돼요).
+
+    `names`를 주면 그 집합만 봐요. 안 주면 운영진 전체(`STAFF_ROLE_NAMES`)예요."""
     if guild is None:
         return "운영진"
-    found = [r.name for r in guild.roles if normalize_role_name(r.name) in STAFF_ROLE_NAMES]
+    wanted = names if names is not None else STAFF_ROLE_NAMES
+    found = [r.name for r in guild.roles if normalize_role_name(r.name) in wanted]
     if not found:
         return "운영진"
     # 위에 있는 역할부터 보여주고, 6개를 다 늘어놓으면 문장이 길어지니 3개까지만 적어요.
@@ -102,6 +105,23 @@ def staff_role_labels(guild: discord.Guild | None) -> str:
     if len(found) > 3:
         return " · ".join(found[:3]) + f" 등 운영진 {len(found)}개 역할"
     return " · ".join(found)
+
+
+def room_entry_role_labels(guild: discord.Guild | None) -> str:
+    """`/방만들기` 안내문에 "누가 초대 없이 들어올 수 있는지" 적을 때 쓰는 이름 목록이에요.
+
+    🚨 **이름을 안내문에 직접 타이핑하지 말고 이걸 쓰세요.** 2026-10-18에 안내문이 7일간
+    거짓이었던 적이 있어요 — 코드가 내는 값과 안내문이 따로 놀면 그런 일이 또 나요.
+
+    ⚠️ `staff_role_labels`처럼 3개에서 자르지 않고 **전부 적어요.** 방장에게는 "몇 개 역할"이
+    아니라 **누가** 들어올 수 있는지가 필요하고, 🎉 이벤트 담당은 안 들어온다는 것도 거기서
+    드러나요. (5개라 다 적어도 한 줄이에요)"""
+    if guild is None:
+        return "운영진"
+    # 위에 있는 역할부터 적어요(👑 방장이 먼저). `guild.roles`는 낮은 순서부터예요.
+    found = [r.name for r in reversed(guild.roles)
+             if normalize_role_name(r.name) in ROOM_ENTRY_ROLE_NAMES]
+    return " · ".join(found) if found else "운영진"
 
 
 def restrict_to_staff(label: str = "이 명령어", hint: str = ""):

@@ -270,6 +270,49 @@ check(
     staff_check.can_enter_locked_room(FakeMember(["폐관수련방장"])) is False,
 )
 
+print("10) /방만들기 안내문이 '운영진은 들어올 수 있다'를 말한다")
+labels = staff_check.room_entry_role_labels(GUILD)
+check("🎉 이벤트 담당은 안 적는다", "이벤트" not in labels, labels)
+check(
+    "5개를 자르지 않고 다 적는다",
+    all(lab in labels for lab in ENTRY_ROLE_LABELS) and "개 역할" not in labels,
+    labels,
+)
+check("👑 방장이 맨 앞이다", labels.startswith("👑 방장"), labels)
+check("한 줄에 들어갈 길이다", len(labels) <= 80, f"{len(labels)}자: {labels}")
+check("역할 이름이 다 바뀌면 그냥 '운영진'", staff_check.room_entry_role_labels(renamed) == "운영진")
+check("서버를 모르면(None) 그냥 '운영진'", staff_check.room_entry_role_labels(None) == "운영진")
+check(
+    "운영진 전체 목록(/팀짜기용)은 그대로 6개다",
+    "6개 역할" in staff_check.staff_role_labels(GUILD),
+    staff_check.staff_role_labels(GUILD),
+)
+
+# 🚨 안내문은 create_room 안에서 조립돼서 여기서 불러볼 수가 없어요. 그래서 **그 함수 본문이
+#    이 헬퍼를 실제로 쓰는지**를 봐요. 주석·독스트링을 먼저 떼요 — 안 떼면 위에 적어둔
+#    설명 문구에 걸려서 거짓 통과해요(2026-10-27에 실제로 당한 함정이에요).
+import re  # noqa: E402
+
+src = open(os.path.join(BOT_DIR, "utils", "dynamic_room.py"), encoding="utf-8").read()
+body = src[src.index("    async def create_room("):]
+body = body[: body.index("\n    async def ", 10)]
+code_only = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+code_only = re.sub(r'""".*?"""', "", code_only, flags=re.S)
+check(
+    "create_room이 room_entry_role_labels를 쓴다",
+    "room_entry_role_labels(" in code_only,
+    "안내문이 운영진 입장을 말하지 않으면 '승인해야 들어올 수 있어요'가 거짓이 돼요",
+)
+check(
+    "그 문구를 실제로 보내는 메시지에 끼워넣는다",
+    "{staff_text}" in code_only,
+    "변수만 만들고 안 쓰면 안내문은 그대로 거짓이에요",
+)
+check(
+    "create_room이 권한표 조립 함수를 쓴다",
+    "build_room_overwrites(" in code_only,
+)
+
 print()
 if failures:
     print(f"❌ 실패 {len(failures)}건: {failures}")

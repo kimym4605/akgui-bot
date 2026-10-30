@@ -698,6 +698,13 @@ class DynamicRoomEngine:
 
         capacity_text = f" (최대 {인원수}명)" if 인원수 else ""
         minutes = ROOM_EXPIRE_SECONDS // 60
+        # 🚨 이 한 줄이 없으면 바로 아래 "승인해야 들어올 수 있어요"가 **거짓말**이 돼요.
+        # (운영진은 들어올 수 있으니까요. 이 기능이 생기기 전에도 관리자 권한으로 이미 그랬어요)
+        # 🚨 역할 이름을 여기 타이핑하지 말 것 — 서버에서 읽어 와요.
+        staff_text = (
+            f"🛡️ 단, **{staff_check.room_entry_role_labels(interaction.guild)}**은 "
+            f"초대 없이 들어올 수 있어요.\n"
+        )
         mute_text = (
             "🔇 **입장시 뮤트**가 켜져 있어요. `/방신청`으로 들어오는 사람은 마이크가 막힌 채로 입장하고, "
             "방 채팅에 뜨는 **🔊 발언 허용** 버튼을 눌러줘야 말할 수 있어요. "
@@ -707,6 +714,7 @@ class DynamicRoomEngine:
         await interaction.followup.send(
             f"{emoji} {room_label}을 만들었어요! {channel.mention}{capacity_text}\n"
             f"다른 사람들은 방을 볼 수는 있지만, `/방초대`로 직접 초대하거나 `/방신청`을 받아서 승인해야 들어올 수 있어요.\n"
+            f"{staff_text}"
             f"{mute_text}"
             f"(⏳ {minutes}분 안에 아무도 안 들어오면 자동으로 사라져요 · 방이 완전히 비면 바로 사라져요 · "
             f"방장이 나가면 {OWNER_LEAVE_GRACE_SECONDS}초 후 자동으로 사라져요)",
