@@ -50,7 +50,7 @@ from utils.pokemon_store import _db  # noqa: E402
 #    다른 소각률을 말하는 일이 실제로 있었어요(2026-10-18). 여기를 고치지 말고 거기를 고치세요.
 from utils.coin_ledger import (  # noqa: E402
     GAMBLE_ADD, GAMBLE_SPEND, REDIST_ADD, REDIST_SPEND, REFUND_ADD,
-    classify, kst_of, wallet_balances,
+    classify, kst_of, wallet_balances, wallet_by_user,
 )
 
 KST = timezone(timedelta(hours=9))
@@ -176,6 +176,28 @@ if balances:
     for t in (5, 12, 15, 30):
         print(f"  {t:2d}코인 이상: {sum(1 for b in balances if b >= t):2d}명")
 
+    # ⭐ **활동자만 따로 본다 (2026-10-30 추가).**
+    #
+    # 🚨 위 48명은 **봇을 스친 사람 전원**이에요(`coin_reset_backup`에 남은 떠난 사람까지).
+    #    그래서 "지갑 중앙값 10.0 · 낚시대를 못 사는 사람 46%"를 그대로 읽고 **"낚시 진입이
+    #    막혔다"고 보고했는데 틀렸어요.** 최근 7일 활동자만 보면 중앙값이 **19.0**이고
+    #    낚시대(10코인)를 못 사는 사람은 29명 중 6명이에요.
+    # ⚠️ 같은 함정을 미션 완료율에서 이미 당했어요(분모가 '스친 사람 전원'이라 14%로 부풀었다).
+    #    → **분모를 말할 때는 "그게 누구인가"를 같이 적을 것.**
+    _active_since = (TODAY - timedelta(days=7))
+    _last_seen: dict = {}
+    for _l in _db["coin_log"].find({}, {"_id": 1, "to": 1, "from": 1}):
+        _d = kst_of(_l["_id"]).date()
+        for _u in (_l.get("to"), _l.get("from")):
+            if _u and (str(_u) not in _last_seen or _d > _last_seen[str(_u)]):
+                _last_seen[str(_u)] = _d
+    _act = sorted(v for u, v in wallet_by_user(_db).items()
+                  if _last_seen.get(u) and _last_seen[u] >= _active_since and v >= 0)
+    if _act:
+        print(f"  ─ 최근 7일 코인 활동자 {len(_act)}명만: "
+              f"중앙값 {statistics.median(_act):.1f} · 평균 {sum(_act)/len(_act):.1f} "
+              f"(휴면 {len(balances) - len(_act)}명 제외)")
+
     # 🚨 **집중도.** 총량이 회복돼도 한 사람이 다 갖고 있으면 아무 의미가 없어요.
     top = sorted(balances, reverse=True)
     total = sum(balances) or 1
@@ -296,6 +318,9 @@ print(f"    🎨 테마: {len(themes)}명이 구매 / 총 {owned}개 보유")
 # 🚨 `casts_today`는 **`cast_date`가 오늘일 때만** 유효해요. 날짜를 안 보고 세면
 #    어제 숫자를 오늘 것으로 읽어요(실제로 한 번 그렇게 읽었어요).
 print("\n[7] 🎣 캐스트 상한 · 몰아 던지기")
+from utils.fish_data import ROD_PRICE as _ROD_PRICE  # noqa: E402
+_wallets = wallet_by_user(_db)
+_wallet_of = lambda uid: _wallets.get(uid, 0)  # noqa: E731
 fish_docs = list(_db["fish"].find(
     {}, {"cast_date": 1, "casts_today": 1, "batch_uses": 1, "batch_casts": 1, "rod": 1}))
 b_users = [d for d in fish_docs if int(d.get("batch_uses") or 0) > 0]
@@ -316,9 +341,18 @@ if fresh:
           f"(= 🔥 연속 출석 보너스가 실제로 쓰인 수)")
     print(f"     └ 그날 캐스트 분포: {over}")
 # ⚠️ 낚시대가 0인데 캐스트가 남은 사람 — 상한을 풀어줘도 **낚시대가 없어서** 못 던져요.
-stuck = [d for d in fish_docs
-         if int(d.get("rod") or 0) == 0 and int(d.get("casts_today") or 0) >= DAILY_CAST_CAP]
+# 🚨 **`fresh`에서 센다(`fish_docs`가 아니다).** 2026-10-30에 여기가 `fish_docs`여서
+#    10-29·10-27에 상한을 쓴 사람까지 오늘 것으로 세고 **2명을 4명으로** 불렀다.
+#    바로 위 [7] 머리 주석이 그걸 경고하고 있었는데 이 줄만 안 지켰다.
+#    → "늘었다/줄었다"를 말하는 숫자는 **날짜 필터를 거쳤는지 매번 확인할 것.**
+stuck = [d for d in fresh if int(d.get("rod") or 0) == 0
+         and int(d.get("casts_today") or 0) >= DAILY_CAST_CAP]
 if stuck:
     print(f"  🪝 낚시대 0 + 상한까지 다 쓴 사람: {len(stuck)}명 "
           "(캐스트를 더 줘도 낚시대부터 사야 해요)")
+    # ⭐ 지갑을 같이 찍는다. 2026-10-30에 이 2명이 **92·195코인**을 들고 있었다 —
+    #    "낚시대를 못 사서 막혔다"가 아니라 **안 산 것**이라, 가격을 내려도 안 풀린다.
+    _stuck_bal = sorted(_wallet_of(str(d["_id"])) for d in stuck)
+    print(f"     └ 그 사람들 지갑: {_stuck_bal} "
+          f"(🚨 {_ROD_PRICE}코인 이상이면 '못 사는' 게 아니라 '안 사는' 것)")
 print("\n" + "=" * 72)

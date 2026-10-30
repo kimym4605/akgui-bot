@@ -62,6 +62,17 @@ def wallet_balances(db) -> list[int]:
     그래서 집계 규칙을 여기 하나로 모아요(복제했다가 두 리포트가 95.6% vs 80.9%로
     갈린 전례가 있어요).
     """
+    return sorted(v for v in wallet_by_user(db).values() if v >= 0)
+
+
+def wallet_by_user(db) -> dict[str, int]:
+    """`{유저ID(문자열): 잔액}`. `wallet_balances()`와 **같은 규칙**이에요.
+
+    ⭐ "누가 얼마 갖고 있나"가 필요할 때 쓰세요(2026-10-30 추가). 그걸 리포트에서 다시
+    짜면 집계가 또 갈려요 — 위 docstring의 95.6% vs 80.9% 사고가 그렇게 났어요.
+
+    ⭐ 처음 쓴 자리: "낚시대 0 + 상한 소진" 2명이 **92·195코인**을 들고 있던 걸 드러냈어요.
+    "못 사서 막혔다"로 읽던 숫자가 실은 **안 산 것**이라, 가격을 내려도 안 풀려요."""
     by_user: dict[str, int] = {}
     for name in WALLET_COLLECTIONS:
         for doc in db[name].find({"coin": {"$exists": True}}, {"coin": 1}):
@@ -69,7 +80,7 @@ def wallet_balances(db) -> list[int]:
             # 순서에 기대지 않아요 — 현재값 컬렉션이면 무조건 덮어써요.
             if name == CURRENT_WALLET or uid not in by_user:
                 by_user[uid] = int(doc.get("coin") or 0)
-    return sorted(v for v in by_user.values() if v >= 0)
+    return by_user
 
 
 def classify(entry: dict) -> str:
