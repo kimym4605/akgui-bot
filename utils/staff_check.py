@@ -34,6 +34,24 @@ STAFF_ROLE_NAMES = frozenset({
     "이벤트담당",
 })
 
+# 🚪 잠긴 통화방(`/방만들기`)에 들어갈 수 있는 역할이에요. 위 목록에서 🎉 이벤트 담당만 뺐어요
+# (2026-10-30, 사용자 결정 — 이벤트 담당은 남의 개인 방에 들어갈 이유가 없어요).
+#
+# ⚠️ **위 집합에서 빼는 식(`STAFF_ROLE_NAMES - {...}`)으로 쓰지 않았어요.** 그렇게 두면 나중에
+#    운영진 역할이 하나 늘어날 때 아무도 모르게 "남의 잠긴 방 입장 권한"까지 같이 생겨요.
+#    대신 `test_staff_check.py`가 ⒜ 이게 운영진 집합의 부분집합인지 ⒝ 이벤트담당이 빠져 있는지를
+#    봐서, 이름 오타나 한쪽만 고치는 실수를 잡아요.
+#
+# 👑 방장 · 🥈 부방장 · 🛠️ 서버 담당은 `administrator` 권한이 있어서 **지금도 이미** 들어가요.
+# 그래도 여기 적어두는 이유: 나중에 그 역할에서 관리자 권한을 떼도 방 입장이 조용히 깨지지 않아요.
+ROOM_ENTRY_ROLE_NAMES = frozenset({
+    "방장",
+    "부방장",
+    "서버담당",
+    "문의담당",
+    "신고담당",
+})
+
 
 def normalize_role_name(name: str) -> str:
     """이모지·공백·변형선택자를 떼고 한글/영문/숫자만 남겨요."""
@@ -46,6 +64,29 @@ def is_staff(member: discord.abc.User | None) -> bool:
     if member.guild_permissions.administrator:
         return True
     return any(normalize_role_name(role.name) in STAFF_ROLE_NAMES for role in member.roles)
+
+
+def room_entry_roles(guild: discord.Guild | None) -> list[discord.Role]:
+    """잠긴 통화방에 입장 권한을 얹어줄 역할들이에요. (`utils/dynamic_room.py`가 써요)
+
+    ⚠️ 서버에 **실제로 있는** 역할만 돌려줘요. 이름이 바뀌어서 하나도 안 걸리면 빈 목록이
+    나오고, 그러면 방은 예전처럼 잠긴 상태로 만들어져요(기능이 조용히 꺼지는 것이지
+    방이 아무나 들어오는 상태가 되는 게 아니에요 — 안전한 쪽으로 실패해요)."""
+    if guild is None:
+        return []
+    return [r for r in guild.roles if normalize_role_name(r.name) in ROOM_ENTRY_ROLE_NAMES]
+
+
+def can_enter_locked_room(member: discord.abc.User | None) -> bool:
+    """이 사람이 "잠긴 방에 그냥 들어갈 수 있는 사람"인가요?
+
+    `administrator`는 채널 권한을 통째로 무시하니까 여기서도 통과예요 — 실제로 👑 방장 ·
+    🥈 부방장 · 🛠️ 서버 담당이 지금까지 들어갈 수 있던 이유가 역할 이름이 아니라 이거였어요."""
+    if not isinstance(member, discord.Member):
+        return False
+    if member.guild_permissions.administrator:
+        return True
+    return any(normalize_role_name(r.name) in ROOM_ENTRY_ROLE_NAMES for r in member.roles)
 
 
 def staff_role_labels(guild: discord.Guild | None) -> str:

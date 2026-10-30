@@ -5,6 +5,8 @@
 - /방만들기 종류:OOO 를 치면 그 사람만의 새 통화방이 즉석에서 만들어져요.
   방은 "보이긴 하지만"(누가 들어가 있는지 다른 사람도 확인 가능) 아무나 바로 들어올 순 없어요.
   = @everyone: 채널은 보임(view_channel=True), 입장은 불가(connect=False)
+- 단, **운영진은 초대·신청 없이 바로 들어갈 수 있어요**(2026-10-30). 방을 만들 때 운영진 역할에
+  입장 허용을 같이 얹어요. 자세한 이유는 `_apply_room_entry_roles` 위 주석을 보세요.
 - 방장은 두 가지 방법으로 사람을 들일 수 있어요:
   1. /방초대 @사람  → 방장이 바로 초대(즉시 입장 허용)
   2. /방신청 방장:@사람 → 아무나 입장 신청을 보낼 수 있고, 방장한테 수락/거절 버튼이 있는
@@ -31,7 +33,7 @@ import os
 import discord
 from discord.ext import commands
 
-from utils import room_store
+from utils import room_store, staff_check
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +41,67 @@ ROOM_EXPIRE_SECONDS = 600  # 방을 만들고 이 시간 안에 아무도 안 �
 REQUEST_TIMEOUT_SECONDS = 600  # 입장 신청 알림(수락/거절 버튼)이 유효한 시간
 OWNER_LEAVE_GRACE_SECONDS = 10  # 방장이 나간 뒤 이 시간 뒤에 방을 자동으로 닫아요.
 RENAME_WAIT_SECONDS = 2  # 방 이름이 이 시간 안에 바뀌면 "바꿨어요", 늦어지면 "곧 반영돼요"라고 안내해요.
+
+
+# ============================================================
+# 🚪 운영진의 잠긴 방 입장 (2026-10-30)
+# ------------------------------------------------------------
+# ⭐ **왜 역할 overwrite인가 (실측해서 알아낸 것):**
+# 👑 방장 · 🥈 부방장 · 🛠️ 서버 담당은 **지금까지도 잠긴 방에 그냥 들어갔어요.** 봇이 열어준 게
+# 아니라 그 역할에 `administrator`가 있어서예요 — 관리자는 채널 overwrite를 통째로 무시해요.
+# 반대로 📩 문의 담당 · ⚖️ 신고 담당은 관리자가 없어서 **실제로 막혀 있었어요.**
+#
+# 🚨 `멤버 이동`(move_members) 권한으로도 못 들어와요 — 끌어오려면 **목표 채널의 연결 권한이
+#    필요**해서, 자기 자신을 잠긴 방으로 끌어올 수 없어요. ("이동 권한 있으니 되겠지"는 틀려요)
+# 🚨 해결책으로 역할에 `administrator`를 주면 **서버 전체 권한이 열려요.** 그래서 서버 권한은
+#    손대지 않고, 봇이 만드는 방에만 `connect` 허용을 얹어요.
+# ⚠️ `send_messages`까지 주는 이유: 음성채널 채팅(text-in-voice)은 연결 권한이 없으면 막혀요.
+#    (`_grant_entry_on_join` 주석의 2026-09-05 신고가 바로 그 증상이었어요)
+def _apply_room_entry_roles(overwrites: dict, guild: discord.Guild) -> int:
+    """`overwrites` 딕셔너리에 운영진 역할의 입장 허용을 **덮어써요**. 얹은 역할 수를 돌려줘요.
+
+    ⚠️ 카테고리 권한을 이미 물려받은 뒤에 불러야 해요 — 같은 역할에 카테고리가 걸어둔 제한이
+    있으면 그걸 이기고 들어가는 게 의도예요."""
+    roles = staff_check.room_entry_roles(guild)
+    for role in roles:
+        ow = overwrites.get(role) or discord.PermissionOverwrite()
+        ow.update(view_channel=True, connect=True, speak=True, send_messages=True)
+        overwrites[role] = ow
+    return len(roles)
+
+
+def build_room_overwrites(guild: discord.Guild, owner, category) -> dict:
+    """새 방에 걸 권한표를 만들어요. (`create_room`이 디스코드에 그대로 넘겨요)
+
+    ⭐ 함수로 떼어낸 이유는 **검사할 수 있게** 하려고예요(2026-10-30). 여기서 맞춰야 하는 게
+    네 가지인데(카테고리 상속 · @everyone 잠금 · 방장 허용 · 운영진 허용) 서로 덮어쓰는
+    순서까지 맞아야 해서, 눈으로는 틀린 걸 못 잡아요. `scripts/test_room_staff_entry.py`가 봐요.
+
+    ⚠️ `overwrites=`를 직접 넘기면 디스코드가 **카테고리 권한 동기화를 대체**해버려요.
+    그래서 예전엔 카테고리에 걸어둔 제한(예: 랭크방 카테고리의 `신입 역할 채널보기 차단`)이
+    봇이 만든 방에는 안 걸려서, 신입도 방 목록을 볼 수 있었어요. (2026-09-05 수정)
+    카테고리 권한을 먼저 그대로 물려받고, 그 위에 방 전용 권한을 얹어요.
+    """
+    overwrites: dict = {}
+    if category is not None:
+        overwrites.update(category.overwrites)
+
+    # @everyone: 목록에는 보이되 아무나 못 들어오게(잠금). 카테고리에 이미 @everyone 제한이
+    # 있으면 그걸 지우지 않고 이 두 개만 덮어써요.
+    everyone = guild.default_role
+    everyone_ow = overwrites.get(everyone) or discord.PermissionOverwrite()
+    everyone_ow.update(view_channel=True, connect=False)
+    overwrites[everyone] = everyone_ow
+
+    owner_ow = overwrites.get(owner) or discord.PermissionOverwrite()
+    owner_ow.update(view_channel=True, connect=True, speak=True, send_messages=True)
+    overwrites[owner] = owner_ow
+
+    # 🚪 운영진은 초대·신청 없이 바로 들어갈 수 있게 역할 권한을 같이 얹어요. (2026-10-30)
+    # 🚨 @everyone 잠금보다 **뒤**에 와야 해요 — 디스코드는 개인·역할 허용이 @everyone 거부를
+    #    이기지만, 그건 권한표에 둘 다 들어있을 때 얘기예요. 여기서 덮어써 지워버리면 안 돼요.
+    _apply_room_entry_roles(overwrites, guild)
+    return overwrites
 
 
 def _engine_from(client: discord.Client) -> "DynamicRoomEngine | None":
@@ -490,6 +553,7 @@ class DynamicRoomEngine:
         stored = room_store.load_all()  # {channel_id: {"owner_id", "kind"}}
         recovered = 0
         cleaned = 0
+        backfilled = 0
 
         released = 0
         for channel_id, info in stored.items():
@@ -548,10 +612,40 @@ class DynamicRoomEngine:
                 if not m.bot:
                     await self._grant_entry_on_join(channel, m)
 
+            # 🚪 이 기능이 생기기 **전에 만들어진 방**에는 운영진 역할 권한이 없어요.
+            # 배포 직후 이미 열려 있던 방에서 못 들어가는 일이 없게 여기서 얹어줘요.
+            # (방은 비면 사라지니 하루면 전부 새 방이 돼요. 그래서 이 보정은 배포 직후에만 일해요)
+            if await self._backfill_room_entry_roles(channel):
+                backfilled += 1
+
         log.info(
             f"🔊 즉석생성형 통화방 복구 완료: {recovered}개 복구, {cleaned}개 정리됨"
-            f"{f', 남아있던 음소거 {released}건 해제' if released else ''}."
+            f"{f', 남아있던 음소거 {released}건 해제' if released else ''}"
+            f"{f', 🚪 운영진 입장 권한 {backfilled}개 방에 보정' if backfilled else ''}."
         )
+
+    async def _backfill_room_entry_roles(self, channel: discord.VoiceChannel) -> bool:
+        """이미 열려 있는 방에 운영진 입장 권한을 얹어요. 실제로 고쳤으면 True.
+
+        ⚠️ **이미 다 얹혀 있으면 아무것도 안 보내요.** 방 하나당 역할 수만큼 디스코드를 찌르는
+        일이라, 봇이 재시작될 때마다 멀쩡한 방을 다시 쓰면 그게 그대로 한도를 먹어요."""
+        changed = False
+        for role in staff_check.room_entry_roles(channel.guild):
+            if channel.overwrites_for(role).connect:
+                continue  # 이미 들어갈 수 있는 역할이에요
+            try:
+                await channel.set_permissions(
+                    role,
+                    view_channel=True,
+                    connect=True,
+                    speak=True,
+                    send_messages=True,
+                    reason="운영진 입장 권한 보정 (이 기능이 생기기 전에 만들어진 방)",
+                )
+                changed = True
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                log.warning(f"⚠️ '{channel.name}'에 {role.name} 입장 권한을 얹지 못했어요.")
+        return changed
 
     # ============================================================
     # 슬래시 명령어 로직 (cog가 그대로 호출)
@@ -582,26 +676,8 @@ class DynamicRoomEngine:
                 return
             self._cleanup_tracking(existing_channel_id)  # 남아있던 오래된 기록 정리
 
-        everyone = interaction.guild.default_role
         category = self._get_category(interaction.guild, kind)
-
-        # ⚠️ `overwrites=`를 직접 넘기면 디스코드가 **카테고리 권한 동기화를 대체**해버려요.
-        # 그래서 예전엔 카테고리에 걸어둔 제한(예: 랭크방 카테고리의 `신입 역할 채널보기 차단`)이
-        # 봇이 만든 방에는 안 걸려서, 신입도 방 목록을 볼 수 있었어요. (2026-09-05 수정)
-        # 카테고리 권한을 먼저 그대로 물려받고, 그 위에 방 전용 권한을 얹어요.
-        overwrites: dict = {}
-        if category is not None:
-            overwrites.update(category.overwrites)
-
-        # @everyone: 목록에는 보이되 아무나 못 들어오게(잠금). 카테고리에 이미 @everyone 제한이
-        # 있으면 그걸 지우지 않고 이 두 개만 덮어써요.
-        everyone_ow = overwrites.get(everyone) or discord.PermissionOverwrite()
-        everyone_ow.update(view_channel=True, connect=False)
-        overwrites[everyone] = everyone_ow
-
-        owner_ow = overwrites.get(interaction.user) or discord.PermissionOverwrite()
-        owner_ow.update(view_channel=True, connect=True, speak=True, send_messages=True)
-        overwrites[interaction.user] = owner_ow
+        overwrites = build_room_overwrites(interaction.guild, interaction.user, category)
 
         try:
             channel = await interaction.guild.create_voice_channel(
@@ -683,6 +759,15 @@ class DynamicRoomEngine:
             if channel_id is not None:
                 self._cleanup_tracking(channel_id)
             await interaction.followup.send(f"{방장.display_name}님은 지금 열려있는 방이 없어요.", ephemeral=True)
+            return
+
+        # 🚪 운영진은 역할 권한으로 바로 들어가요. `overwrites_for`는 **개인** 권한만 보니까
+        # 여기서 따로 걸러주지 않으면, 들어갈 수 있는 사람이 방장에게 쓸데없는 신청을 보내요.
+        if staff_check.can_enter_locked_room(interaction.user):
+            await interaction.followup.send(
+                f"신청하지 않아도 운영진은 바로 들어갈 수 있어요. {channel.mention}에 입장해보세요.",
+                ephemeral=True,
+            )
             return
 
         current_overwrite = channel.overwrites_for(interaction.user)
@@ -880,6 +965,13 @@ class DynamicRoomEngine:
         """
         if channel.overwrites_for(member).connect:
             return  # 초대/신청으로 이미 권한이 있는 사람 (방장 포함)
+
+        # 🚪 운영진은 **역할** 권한으로 이미 들어올 수 있어요(관리자이거나 방에 역할 overwrite가
+        # 얹혀 있어요). 그런데 바로 위 검사는 `overwrites_for(member)` = **그 사람 개인** 권한만
+        # 봐서 역할 쪽을 못 봐요. 그대로 두면 운영진이 들어올 때마다 쓸모없는 개인 권한을 쓰고
+        # 나갈 때 또 지우느라 디스코드를 두 번씩 찔러요(동작은 같지만 낭비예요).
+        if staff_check.can_enter_locked_room(member):
+            return
 
         room_label = self.label_for(channel.id)
         try:
