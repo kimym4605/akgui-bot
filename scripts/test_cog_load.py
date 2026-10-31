@@ -156,6 +156,39 @@ async def main():
     except Exception as exc:
         failed.append(f"bot.add_view 실패: {type(exc).__name__}: {exc}")
 
+    # ============================================================
+    # 🚨🚨 상설 패널들이 **정말 봇에 등록됐는지** 본다 (2026-10-31 추가).
+    #
+    # `cog_load`에서 `bot.add_view(...)`를 빼먹으면 재시작 뒤 버튼을 눌러도 봇이
+    # custom_id를 알아보지 못해서 **아무 반응이 없어요**(에러도 안 나요). 그래서
+    # 로그로도, 유저 신고로도 늦게 발견돼요.
+    #
+    # 🚨 각 패널의 전용 테스트는 `bot.add_view(view)`를 **직접 불러** "받아들이는지"만
+    #    보고, cog_load가 실제로 등록하는지는 **소스 문자열**로만 봐요. 문자열이 있어도
+    #    cog_load가 조건부로 건너뛰면 못 잡아요. 여기서 **진짜 등록 결과**를 봐요.
+    # ============================================================
+    registered_ids = {
+        str(getattr(item, "custom_id", ""))
+        for pv in bot.persistent_views for item in pv.children
+    }
+    print(f"\n상설 패널 영속 뷰 (등록된 뷰 {len(bot.persistent_views)}개):")
+    PANELS = {
+        "🔊 방": ["akgui:room:new:rank", "akgui:room:new:practice",
+                "akgui:room:new:premier", "akgui:room:new:scrim",
+                "akgui:room:options", "akgui:room:invite",
+                "akgui:room:request", "akgui:room:transfer", "akgui:room:close"],
+        "🎴 카드": ["akgui:card:pull1", "akgui:card:pull5", "akgui:card:fuse1",
+                  "akgui:card:fuse_all", "akgui:card:dex"],
+        "🎣 낚시": ["akgui:fish:cast", "akgui:fish:cast_all"],
+    }
+    for label, want in PANELS.items():
+        missing = [c for c in want if c not in registered_ids]
+        if missing:
+            failed.append(f"{label} 패널 버튼이 등록 안 됨(재시작 뒤 먹통): {missing}")
+            print(f"  ❌ {label}: {len(want) - len(missing)}/{len(want)} · 빠짐 {missing}")
+        else:
+            print(f"  ✅ {label}: {len(want)}개 전부 등록")
+
     # 🚨 이 View는 봇 전체에 하나만 등록돼서 모든 팀짜기 메시지가 공유해요.
     # 그래서 편성·팀장·맵 같은 **메시지별 상태를 self에 담아두면 안 돼요.**
     # 빈 View의 속성(discord.py 내부용)과 버튼 자체는 빼고, **우리가 담은 것만** 봐요.
