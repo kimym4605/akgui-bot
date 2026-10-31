@@ -244,9 +244,21 @@ class _CreateButton(discord.ui.Button):
         await self.view.engine.create_room(interaction, self.kind, None, False)
 
 
+def _short_desc(cfg: dict) -> str:
+    """`choice_name`에서 설명만 떼요.
+
+    🚨 `choice_name`은 `"랭크방 (게임 랭크용)"`처럼 **label을 이미 품고 있어요.**
+       그대로 쓰면 패널에 `랭크방 — 랭크방 (게임 랭크용)`으로 두 번 나와요
+       (2026-10-31 게시 미리보기에서 잡았어요)."""
+    name = cfg["choice_name"]
+    if "(" in name and name.endswith(")"):
+        return name[name.index("(") + 1:-1]
+    return name.replace(cfg["label"], "").strip() or name
+
+
 def panel_embed(room_kinds: dict) -> discord.Embed:
     """패널 설명. 🚨 종류 목록을 **손으로 적지 않아요** — ROOM_KINDS에서 만들어요."""
-    lines = [f"{cfg['emoji']} **{cfg['label']}** — {cfg['choice_name']}"
+    lines = [f"{cfg['emoji']} **{cfg['label']}** — {_short_desc(cfg)}"
              for cfg in room_kinds.values()]
     embed = discord.Embed(
         title="🔊 통화방 만들기",

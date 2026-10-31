@@ -116,6 +116,13 @@ ptxt = ast.unparse(panel_fn)
 check("room_kinds" in ptxt, "패널 설명도 ROOM_KINDS에서 만든다")
 for cfg in ROOM_KINDS.values():
     check(cfg["label"] not in ptxt, f"설명에 '{cfg['label']}'을 손으로 안 박았다")
+# 🚨 choice_name은 label을 이미 품고 있어서 그대로 쓰면 이름이 두 번 나온다
+#    ("랭크방 - 랭크방 (게임 랭크용)"). 2026-10-31 게시 미리보기에서 잡았다.
+rendered = room_panel.panel_embed(ROOM_KINDS).description
+for cfg in ROOM_KINDS.values():
+    check(rendered.count(cfg["label"]) == 1,
+          f"'{cfg['label']}'이 설명에 한 번만 나온다",
+          f"{rendered.count(cfg['label'])}번")
 
 print("\n[5] 관리 버튼 — 사람을 골라야 하는 것은 UserSelect로 받는다")
 labels = {i.custom_id: getattr(i, "label", "") for i in view.children}
