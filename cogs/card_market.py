@@ -21,6 +21,21 @@
 | `/카드거래 상대 카드 가격` | 그 사람에게만 거래를 제안해요 (제안하면 도감에서 빠져요) |
 | `/거래함` | 나에게 온 제안을 수락/거절하고, 내가 보낸 제안을 취소해요 |
 
+## 2026-11-01: 🎪 도감에서 바로 팔기
+
+`/카드거래`는 **인자 3개**를 손으로 채워야 했어요. 13일간 거래가 **단 1건**이었어요.
+🎣낚시·🪙상점과 같은 결론이에요 — 막은 건 기능이 아니라 **명령어가 문턱**이었어요
+([[feedback_pickup_plaintext_not_slash_command]]).
+
+그래서 `/도감`에서 카드를 크게 본 화면에 **🎪팔기** 버튼을 달았어요. 상대(선택 메뉴)와
+가격(모달)만 고르면 돼요. 구현은 `cogs/card_gacha.py`의 `SellButton`인데 **로직은
+여기 `make_offer` 하나**를 불러요.
+
+🚨 **에스크로·상대검사·제안 상한을 복사하지 마세요.** `make_offer`를 부르세요.
+🚨 **버튼 경로엔 `app_commands.Range`가 없어요.** 모달은 아무 글자나 들어오니
+   `make_offer` 안의 가격 범위 검사가 **그쪽의 유일한 방어선**이에요
+   (실제로 빼보니 0코인 제안이 그대로 통과했어요 — `scripts/test_card_market_sell.py`).
+
 ## 에스크로
 
 제안하면 **그 자리에서 카드를 회수**하고 취소·거절되면 돌려줘요. 수락될 때만 빼면
@@ -165,6 +180,89 @@ async def _dm(client, user_id, text: str) -> bool:
         return False
 
 
+# ==================================================================
+# 제안 (명령어와 🎪 도감 팔기 버튼이 **같이** 쓰는 한 몸이에요)
+# ==================================================================
+async def make_offer(interaction: discord.Interaction,
+                     buyer: discord.abc.User, key: str, price: int) -> bool:
+    """카드를 회수(에스크로)하고 거래 제안을 넣어요. 성공하면 True.
+
+    🚨 **로직을 복사하지 말고 이걸 부르세요.** 2026-11-01에 도감에 🎪팔기 버튼을
+       달면서 뺐어요. 같은 검사를 두 벌 두면 한쪽만 고쳐져서 갈라져요
+       (`/오상` 안내문이 그래서 두 곳에서 서로 다른 말을 했어요).
+
+    🚨 **부르기 전에 응답을 끝내 두세요**(`defer(ephemeral=True)` 또는 모달 제출).
+       여기서는 `followup`만 써요.
+    """
+    me = interaction.user.id
+    if key not in BY_KEY:
+        await interaction.followup.send(
+            "그런 카드가 없어요. 목록에서 골라주세요.", ephemeral=True)
+        return False
+
+    # 🚨 상대 검사를 **카드 회수보다 먼저** 해요. 뒤에 두면 거절당한 제안마다
+    #    카드를 뺐다 돌려주는 왕복이 생겨서, 중간에 터지면 카드가 떠버려요.
+    if buyer.id == me:
+        await interaction.followup.send(
+            "나한테는 팔 수 없어요. 상대를 골라주세요.", ephemeral=True)
+        return False
+    if buyer.bot:
+        await interaction.followup.send("봇과는 거래할 수 없어요.", ephemeral=True)
+        return False
+    if not (MIN_PRICE <= int(price) <= MAX_PRICE):
+        await interaction.followup.send(
+            f"가격은 **{MIN_PRICE}~{MAX_PRICE}코인** 사이여야 해요.", ephemeral=True)
+        return False
+
+    if await card_market.open_count(me) >= MAX_OFFERS:
+        await interaction.followup.send(
+            f"보낼 수 있는 제안은 한 번에 **{MAX_OFFERS}개**까지예요. "
+            "`/거래함`에서 일부를 취소해주세요.", ephemeral=True)
+        return False
+
+    # 🚨 카드를 **먼저 회수**해요(에스크로). 제안만 해두고 카드를 들고 있으면
+    #    같은 카드를 여러 사람에게 제안해서 전부 수락되는 사고가 나요.
+    if not await card_store.take_card(me, key):
+        await interaction.followup.send(
+            f"**{BY_KEY[key][1]}** 을(를) 갖고 있지 않아요. `/도감`에서 확인해주세요.",
+            ephemeral=True)
+        return False
+
+    try:
+        await card_market.offer(me, buyer.id, key, int(price))
+    except Exception:
+        # 제안이 실패하면 회수한 카드를 반드시 돌려줘요.
+        await card_store.give_card(me, key)
+        log.exception("🤝 거래 제안 실패 - 카드를 돌려줬어요 (user=%s key=%s)", me, key)
+        await interaction.followup.send(
+            "제안에 실패했어요. 카드는 그대로 있어요.", ephemeral=True)
+        return False
+
+    grade, name = BY_KEY[key]
+    embed = discord.Embed(
+        title="🤝 거래를 제안했어요",
+        description=(f"{GRADE_EMOJI[grade]} **{name}** · **{price}코인**\n"
+                     f"상대: {buyer.mention}"),
+        color=GRADE_COLOR[grade],
+    )
+    embed.set_footer(
+        text="상대가 수락하면 코인을 받고 카드가 넘어가요 · /거래함 에서 취소할 수 있어요")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+    sent = await _dm(
+        interaction.client, buyer.id,
+        f"🤝 **{interaction.user.display_name}** 님이 "
+        f"**{name}** 을(를) **{price}코인**에 팔겠다고 제안했어요.\n"
+        f"`/거래함` 에서 수락하거나 거절할 수 있어요.")
+    if not sent:
+        # DM이 막혀 있으면 상대가 제안을 **모를 수 있어요.** 제안은 그대로 두고
+        # 판매자에게만 알려줘요(직접 말하면 되니까요).
+        await interaction.followup.send(
+            "-# ⚠️ 상대에게 DM이 안 갔어요(DM을 막아둔 것 같아요). "
+            "제안은 살아있으니 `/거래함`을 확인하라고 말해주세요.", ephemeral=True)
+    return True
+
+
 class CardMarket(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -205,69 +303,8 @@ class CardMarket(commands.Cog):
         가격: app_commands.Range[int, MIN_PRICE, MAX_PRICE],
     ):
         await interaction.response.defer(ephemeral=True)
-        key = 카드
-        me = interaction.user.id
-        if key not in BY_KEY:
-            await interaction.followup.send(
-                "그런 카드가 없어요. 목록에서 골라주세요.", ephemeral=True)
-            return
-
-        # 🚨 상대 검사를 **카드 회수보다 먼저** 해요. 뒤에 두면 거절당한 제안마다
-        #    카드를 뺐다 돌려주는 왕복이 생겨서, 중간에 터지면 카드가 떠버려요.
-        if 상대.id == me:
-            await interaction.followup.send(
-                "나한테는 팔 수 없어요. 상대를 골라주세요.", ephemeral=True)
-            return
-        if 상대.bot:
-            await interaction.followup.send("봇과는 거래할 수 없어요.", ephemeral=True)
-            return
-
-        if await card_market.open_count(me) >= MAX_OFFERS:
-            await interaction.followup.send(
-                f"보낼 수 있는 제안은 한 번에 **{MAX_OFFERS}개**까지예요. "
-                "`/거래함`에서 일부를 취소해주세요.", ephemeral=True)
-            return
-
-        # 🚨 카드를 **먼저 회수**해요(에스크로). 제안만 해두고 카드를 들고 있으면
-        #    같은 카드를 여러 사람에게 제안해서 전부 수락되는 사고가 나요.
-        if not await card_store.take_card(me, key):
-            await interaction.followup.send(
-                f"**{BY_KEY[key][1]}** 을(를) 갖고 있지 않아요. `/도감`에서 확인해주세요.",
-                ephemeral=True)
-            return
-
-        try:
-            await card_market.offer(me, 상대.id, key, int(가격))
-        except Exception:
-            # 제안이 실패하면 회수한 카드를 반드시 돌려줘요.
-            await card_store.give_card(me, key)
-            log.exception("🤝 거래 제안 실패 - 카드를 돌려줬어요 (user=%s key=%s)", me, key)
-            await interaction.followup.send(
-                "제안에 실패했어요. 카드는 그대로 있어요.", ephemeral=True)
-            return
-
-        grade, name = BY_KEY[key]
-        embed = discord.Embed(
-            title="🤝 거래를 제안했어요",
-            description=(f"{GRADE_EMOJI[grade]} **{name}** · **{가격}코인**\n"
-                         f"상대: {상대.mention}"),
-            color=GRADE_COLOR[grade],
-        )
-        embed.set_footer(
-            text="상대가 수락하면 코인을 받고 카드가 넘어가요 · /거래함 에서 취소할 수 있어요")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-        sent = await _dm(
-            interaction.client, 상대.id,
-            f"🤝 **{interaction.user.display_name}** 님이 "
-            f"**{name}** 을(를) **{가격}코인**에 팔겠다고 제안했어요.\n"
-            f"`/거래함` 에서 수락하거나 거절할 수 있어요.")
-        if not sent:
-            # DM이 막혀 있으면 상대가 제안을 **모를 수 있어요.** 제안은 그대로 두고
-            # 판매자에게만 알려줘요(직접 말하면 되니까요).
-            await interaction.followup.send(
-                "-# ⚠️ 상대에게 DM이 안 갔어요(DM을 막아둔 것 같아요). "
-                "제안은 살아있으니 `/거래함`을 확인하라고 말해주세요.", ephemeral=True)
+        # 실제 로직은 모듈 함수 `make_offer`에 있어요 — 🎪 도감 팔기 버튼이 같이 써요.
+        await make_offer(interaction, 상대, 카드, int(가격))
 
     # ---------------- 거래함 ----------------
     @app_commands.command(name="거래함",

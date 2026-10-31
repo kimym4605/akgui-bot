@@ -76,6 +76,8 @@ from discord.ext import commands
 
 from utils import card_render, card_store, coin_wallet
 from utils.card_data import BY_KEY, CARDS
+from utils.card_market import MAX_PRICE as MARKET_MAX_PRICE
+from utils.card_market import MIN_PRICE as MARKET_MIN_PRICE
 from utils.card_store import (
     CARDS_PER_PULL,
     FUSE_N,
@@ -765,6 +767,107 @@ class CardSelect(discord.ui.Select):
         await self.view.show_card(interaction, self.values[0])  # type: ignore[attr-defined]
 
 
+# ==================================================================
+# 🎪 도감에서 바로 팔기 (2026-11-01)
+# ==================================================================
+# ## 왜
+#
+# `/카드거래 상대:@ 카드:… 가격:…` 는 **인자 3개**를 손으로 채워야 해요. 13일간
+# 거래가 **단 1건**이었어요. 🎣낚시·🪙상점에서 배운 것과 같아요 —
+# 막은 건 기능이 아니라 **명령어 자체가 문턱**이었어요
+# ([[feedback_pickup_plaintext_not_slash_command]]).
+#
+# 그래서 도감에서 카드를 보다 🎪팔기 를 누르면 **상대·가격만** 고르게 해요.
+#
+# ## 🚨 로직은 `cogs.card_market.make_offer` 하나예요
+#
+# 에스크로·상대검사·제안 상한·DM 알림을 여기에 **복사하지 않아요.** 두 벌이 되면
+# 한쪽만 고쳐져서 갈라져요.
+class SellButton(discord.ui.Button):
+    """지금 보고 있는 카드를 팔아요."""
+
+    def __init__(self, key: str, have: int):
+        grade, _name = BY_KEY[key]
+        super().__init__(
+            label="팔기" if have > 1 else "팔기 (마지막 1장)",
+            emoji="🎪",
+            style=discord.ButtonStyle.success,
+            # 🚨 `row`를 박지 않아요. 앞에 들어간 `CardSelect`가 한 줄을 통째로
+            #    먹어서, 같은 줄을 지정하면 `add_item`이 ValueError로 터져요
+            #    (도감 화면 전체가 안 열려요).
+        )
+        self.key = key
+        self.have = have
+
+    async def callback(self, interaction: discord.Interaction):
+        grade, name = BY_KEY[self.key]
+        lines = [f"{GRADE_EMOJI[grade]} **{name}** 을(를) 팔아요.",
+                 "상대를 고르면 가격을 물어볼게요."]
+        if self.have <= 1:
+            lines.append("-# ⚠️ **마지막 1장**이에요. 제안하면 도감에서 빠지고, "
+                         "상대가 거절하면 돌아와요.")
+        await interaction.response.send_message(
+            "\n".join(lines),
+            view=_SellPickView(self.view, self.key),    # type: ignore[arg-type]
+            ephemeral=True,
+        )
+
+
+class _SellBuyerSelect(discord.ui.UserSelect):
+    def __init__(self, parent: "CollectionView", key: str):
+        super().__init__(placeholder="누구에게 팔까요?", min_values=1, max_values=1)
+        self.parent_view = parent
+        self.key = key
+
+    async def callback(self, interaction: discord.Interaction):
+        # 🚨 여기서 **defer 하지 않아요.** 모달은 아직 응답하지 않은 상호작용에만
+        #    띄울 수 있어요(defer하면 `send_modal`이 거부돼요).
+        await interaction.response.send_modal(
+            _PriceModal(self.parent_view, self.key, self.values[0]))
+
+
+class _SellPickView(discord.ui.View):
+    def __init__(self, parent: "CollectionView", key: str):
+        super().__init__(timeout=_VIEW_TIMEOUT)
+        self.add_item(_SellBuyerSelect(parent, key))
+
+
+class _PriceModal(discord.ui.Modal):
+    """가격만 물어봐요. (모달에는 선택 메뉴를 넣을 수 없어서 상대는 앞 단계에서 골라요)"""
+
+    def __init__(self, parent: "CollectionView", key: str,
+                 buyer: discord.abc.User):
+        _grade, name = BY_KEY[key]
+        super().__init__(title=f"🎪 {name[:30]} 팔기")
+        self.parent_view = parent
+        self.key = key
+        self.buyer = buyer
+        self.price = discord.ui.TextInput(
+            label=f"받을 악귀코인 ({MARKET_MIN_PRICE}~{MARKET_MAX_PRICE})",
+            placeholder="예: 30",
+            max_length=len(str(MARKET_MAX_PRICE)),
+            required=True,
+        )
+        self.add_item(self.price)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        raw = str(self.price.value).strip()
+        if not raw.isdigit():
+            await interaction.followup.send(
+                "가격은 **숫자만** 적어주세요. (예: `30`)", ephemeral=True)
+            return
+        # 범위 검사는 `make_offer` 안에 있어요 — 여기서 또 적으면 갈라져요.
+        from cogs.card_market import make_offer
+
+        ok = await make_offer(interaction, self.buyer, self.key, int(raw))
+        if ok:
+            # 🚨 카드가 에스크로로 **빠져나갔어요.** 도감이 들고 있는 숫자를 안 줄이면
+            #    같은 카드를 또 팔려고 눌러요(제안은 `take_card`에서 막히지만
+            #    "있다고 보여주고 실패하는" 꼴이 돼요).
+            self.parent_view.on_card_sold(self.key)
+
+
 class CollectionView(discord.ui.View):
     def __init__(self, user_id: int, counts: dict, since_legend: int):
         super().__init__(timeout=_VIEW_TIMEOUT)
@@ -791,6 +894,24 @@ class CollectionView(discord.ui.View):
         if any(self.counts.get(c["key"]) for c in CARDS[grade]):
             self.add_item(CardSelect(grade, CARDS[grade], self.counts))
 
+    def _build_card(self, key: str):
+        """카드 하나를 크게 본 화면. 등급 화면과 같고 🎪팔기 가 붙어요."""
+        grade, _name = BY_KEY[key]
+        self._build_grade(grade)
+        have = self.counts.get(key, 0)
+        if have > 0:
+            self.add_item(SellButton(key, have))
+
+    def on_card_sold(self, key: str):
+        """제안이 들어가 카드가 에스크로로 빠졌을 때 숫자를 줄여요."""
+        left = self.counts.get(key, 0) - 1
+        if left > 0:
+            self.counts[key] = left
+        else:
+            self.counts.pop(key, None)
+        # 🚨 요약도 **다시 계산**해요. 안 하면 등급 버튼의 `12/83`이 거짓말을 해요.
+        self.summary = card_store.summarize(self.counts)
+
     # ---- 화면 전환 ----
     async def show_overview(self, interaction: discord.Interaction):
         self._build_overview()
@@ -812,6 +933,7 @@ class CollectionView(discord.ui.View):
 
     async def show_card(self, interaction: discord.Interaction, key: str):
         await interaction.response.defer()
+        self._build_card(key)
         grade, name = BY_KEY[key]
         path = card_render.card_file_path(key)
         have = self.counts.get(key, 0)
@@ -827,7 +949,11 @@ class CollectionView(discord.ui.View):
             embed.set_image(url=f"attachment://{key}.webp")
         else:
             embed.description += "\n-# 이미지를 찾지 못했어요."
-        embed.set_footer(text="아래에서 다른 카드를 고르거나 📖 로 돌아갈 수 있어요")
+        if have > 0:
+            embed.set_footer(text="🎪 팔기 로 이 카드를 팔 수 있어요 · "
+                                  "📖 로 돌아가요")
+        else:
+            embed.set_footer(text="아래에서 다른 카드를 고르거나 📖 로 돌아갈 수 있어요")
         await interaction.edit_original_response(embed=embed, attachments=files, view=self)
 
 

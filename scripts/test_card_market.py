@@ -351,6 +351,10 @@ check("상한에 도달하면 더 못 올린다 (cog가 막아요)",
 print("\n[13] 🚨 cog가 상대 검사를 카드 회수보다 먼저 하는가")
 # 순서가 뒤집히면 "나에게 팔기"·"봇에게 팔기"를 시도할 때마다 카드를 뺐다 돌려주는
 # 왕복이 생겨요. 그 사이에 터지면 카드가 떠버려요(에스크로에도, 도감에도 없음).
+#
+# 🚨 2026-11-01에 보는 곳을 **`card_trade` → `make_offer`로 옮겼어요.** 🎪 도감
+#    팔기 버튼을 달면서 로직을 모듈 함수로 뺐고, `card_trade`는 위임 한 줄이 됐어요.
+#    (옛 자리를 계속 보면 `take_card`가 없어서 **조용히 "검사 없음"**이 돼요)
 import ast as _ast2  # noqa: E402
 import inspect as _inspect  # noqa: E402
 
@@ -358,7 +362,7 @@ import cogs.card_market as _cm  # noqa: E402
 
 _fn = _ast2.parse(
     __import__("textwrap").dedent(
-        _inspect.getsource(_cm.CardMarket.card_trade.callback))).body[0]
+        _inspect.getsource(_cm.make_offer))).body[0]
 _self_check_line = _take_line = None
 for _n in _ast2.walk(_fn):
     if isinstance(_n, _ast2.Attribute) and _n.attr == "bot" and _take_line is None:
