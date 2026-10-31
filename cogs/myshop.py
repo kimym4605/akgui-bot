@@ -1884,11 +1884,23 @@ class MyShop(commands.Cog):
         except Exception:  # noqa: BLE001
             pass
 
-    @app_commands.command(name="오상쿠키삭제", description="등록해둔 라이엇 로그인 쿠키를 봇에서 지워요.")
+    # 🚨 **`/티어 계정삭제`와 혼동하기 쉬워요.** 둘은 **다른 데이터**예요:
+    #    여기(`riot_sessions.json`)는 **/오상 로그인 쿠키**,
+    #    `/티어 계정삭제`(`riot_accounts.json`)는 전적·티어 역할용 **닉네임#태그 연동**이에요.
+    #    2026-10-26에 유저가 "발로란트 등록계정 해제"라고만 적고 **어느 쪽인지 몰라
+    #    사람에게 물었어요.** 그래서 설명·응답에서 서로를 안내해요.
+    #    → `scripts/test_account_commands.py`가 이 교차 안내를 지켜요.
+    @app_commands.command(
+        name="오상쿠키삭제",
+        description="/오상 로그인 쿠키를 지워요. (전적·티어 역할용 계정 연동은 그대로)",
+    )
     async def delete_cookie(self, interaction: discord.Interaction):
+        tail = ("\n-# 🎯 `/전적`·티어 역할용 **계정 연동**은 그대로예요 — "
+                "그건 `/티어 계정삭제`로 해제해요.")
         accounts = riot_session_store.list_accounts(interaction.user.id)
         if not accounts:
-            await interaction.response.send_message("등록해둔 쿠키가 없어요.", ephemeral=True)
+            await interaction.response.send_message(
+                "등록해둔 로그인 쿠키가 없어요." + tail, ephemeral=True)
             return
 
         # 계정이 하나뿐이면 물어볼 게 없어요. 예전처럼 바로 지워요.
@@ -1896,17 +1908,20 @@ class MyShop(commands.Cog):
             _forget_account_data(interaction.user.id, accounts[0]["key"])
             riot_session_store.delete_session(interaction.user.id, accounts[0]["key"])
             await interaction.response.send_message(
-                "🗑️ 등록해둔 쿠키를 지웠어요. 이제 `/오상`은 매번 로그인 방식으로 동작해요.", ephemeral=True
+                "🗑️ 등록해둔 **로그인 쿠키**를 지웠어요. "
+                "이제 `/오상`은 매번 로그인 방식으로 동작해요." + tail, ephemeral=True
             )
             return
 
         view = DeleteAccountView(interaction.user.id, accounts)
         await interaction.response.send_message(
             embed=discord.Embed(
-                title="🗑️ 오상 · 등록 해제할 계정",
+                # 🚨 "계정"이라고만 쓰면 `/티어 계정삭제`와 헷갈려요 — **로그인**임을 밝혀요.
+                title="🗑️ 오상 · 로그인 쿠키 지우기",
                 description=(
                     "\n".join(f"• **{account['label']}**" for account in accounts)
-                    + "\n\n지울 계정을 고르세요. 전부 지우려면 아래 버튼을 눌러요."
+                    + "\n\n쿠키를 지울 계정을 고르세요. 전부 지우려면 아래 버튼을 눌러요."
+                    + tail
                 ),
                 color=0xFF4655,
             ),

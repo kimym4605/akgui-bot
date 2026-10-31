@@ -13,7 +13,7 @@ class TierGroup(app_commands.Group):
 
     @app_commands.command(
         name="계정등록",
-        description="본인의 라이엇 계정을 등록해요. (등록해두면 /전적을 닉네임 없이 바로 쓸 수 있고, 이 계정 조회 시에만 티어 역할이 자동 갱신돼요)",
+        description="전적·티어 역할용으로 라이엇 닉네임#태그를 연동해요. (/오상 로그인과 별개예요)",
     )
     @app_commands.describe(
         닉네임="라이엇 아이디 (# 앞부분, 예: Henrik)",
@@ -28,12 +28,27 @@ class TierGroup(app_commands.Group):
             ephemeral=True,
         )
 
-    @app_commands.command(name="계정삭제", description="등록해둔 라이엇 계정 연동을 해제해요.")
+    # 🚨 **`/오상쿠키삭제`와 혼동하기 쉬워요.** 둘은 **다른 데이터**예요:
+    #    여기(`riot_accounts.json`)는 전적·티어 역할용 **닉네임#태그 연동**(23명 사용),
+    #    `/오상쿠키삭제`(`riot_sessions.json`)는 **/오상 로그인 쿠키**예요.
+    #    2026-10-26에 유저가 `#❓봇에게-질문`에 "발로란트 등록계정 해제"라고만 적고
+    #    **어느 쪽인지 몰라 사람에게 물었어요.** 그래서 설명·응답에서 서로를 안내해요.
+    #    → `scripts/test_account_commands.py`가 이 교차 안내를 지켜요.
+    @app_commands.command(
+        name="계정삭제",
+        description="전적·티어 역할용 라이엇 계정 연동을 해제해요. (/오상 로그인 쿠키는 그대로)",
+    )
     async def delete_account_cmd(self, interaction: discord.Interaction):
+        tail = ("\n-# 🔫 `/오상`에 등록해둔 **로그인 쿠키**는 그대로예요 — "
+                "그건 `/오상쿠키삭제`로 지워요.")
         if delete_account(interaction.user.id):
-            await interaction.response.send_message("계정 연동을 해제했어요.", ephemeral=True)
+            await interaction.response.send_message(
+                "✅ 전적·티어 역할용 **계정 연동**을 해제했어요." + tail, ephemeral=True
+            )
         else:
-            await interaction.response.send_message("등록된 계정이 없어요.", ephemeral=True)
+            await interaction.response.send_message(
+                "연동해둔 계정이 없어요." + tail, ephemeral=True
+            )
 
     @app_commands.command(
         name="확인",
