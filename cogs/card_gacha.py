@@ -78,6 +78,7 @@ from utils import card_render, card_store, coin_wallet
 from utils.card_data import BY_KEY, CARDS
 from utils.card_store import (
     CARDS_PER_PULL,
+    FUSE_N,
     GRADE_COLOR,
     GRADE_EMOJI,
     GRADE_ORDER,
@@ -372,6 +373,133 @@ async def do_pull(interaction: discord.Interaction, *, pulls: int = 1,
 
 
 # ============================================================
+# ⚒️ 합성 — 중복 3장을 뽑기와 똑같은 확률로 1장 다시 굴려요 (2026-10-31)
+#
+# 규칙·시뮬레이션 결과는 `utils/card_store.py`의 합성 구역 주석에 있어요.
+# 여기는 **보여주기**만 해요.
+#
+# 🚨 그림은 **레어 이상 + 신규만** 그려요. "전부" 합성은 결과가 50장까지 나오는데
+#    (실측 최다 보유자 = 53회) 그 대부분은 **또 중복인 일반**이에요. 전부 그리면
+#    6열 격자가 9행까지 늘어나 세로 2000px이 되고, 정작 성과(레어·신규)가 묻혀요.
+# ============================================================
+FUSE_ART_MAX = 30     # 그림에 올리는 최대 장수 (10연 = 30장과 같은 상한)
+
+
+def _fuse_embed(results: list[dict], used: dict[str, int], *,
+                summary: dict, dup_left: int) -> discord.Embed:
+    """합성 결과. 받은 카드가 많을 수 있어서 **등급별 집계**를 먼저 보여줘요."""
+    by_grade = {g: [d for d in results if d["grade"] == g] for g in GRADE_ORDER}
+    runs = len(results)
+    rarest = _rarest(results)
+
+    lines = []
+    for grade in GRADE_ORDER:
+        got = by_grade[grade]
+        if not got:
+            continue
+        new_n = sum(1 for d in got if d["is_new"])
+        tail = f" (🆕 신규 {new_n}종)" if new_n else ""
+        lines.append(f"{GRADE_EMOJI[grade]} **{grade} {len(got)}장**{tail}")
+
+    embed = discord.Embed(
+        title=f"⚒️ 합성 {runs}회",
+        description="\n".join(lines),
+        color=GRADE_COLOR.get(rarest, 0x9CA3AF),
+    )
+    # 🚨 재료 장수를 손으로 적지 않아요 — `used`를 더해서 세요(FUSE_N을 고쳐도 따라와요).
+    embed.add_field(
+        name="먹은 재료",
+        value=f"중복 **{sum(used.values())}장** → 새 카드 **{runs}장**",
+        inline=True,
+    )
+    embed.add_field(
+        name="남은 중복",
+        value=(f"**{dup_left}장**" if dup_left >= FUSE_N
+               else f"**{dup_left}장** (합성엔 {FUSE_N}장 필요)"),
+        inline=True,
+    )
+    embed.add_field(
+        name="도감",
+        value=f"**{summary['owned']} / {summary['total']}종**",
+        inline=True,
+    )
+
+    news = [d for d in results if d["is_new"]]
+    if news:
+        embed.add_field(
+            name=f"🆕 처음 얻은 카드 {len(news)}종",
+            value=" · ".join(f"{GRADE_EMOJI[d['grade']]}{d['name']}" for d in news[:20]),
+            inline=False,
+        )
+    return embed
+
+
+async def do_fuse(interaction: discord.Interaction, *, times: int = 1,
+                  ephemeral: bool = True):
+    """합성 `times`회. `times=0`이면 중복이 바닥날 때까지.
+    `/카드합성`과 ⚒️ 패널 버튼이 같이 써요.
+
+    ⚠️ 부르기 전에 `defer()`가 끝나 있어야 해요.
+    ⚠️ **코인을 안 써요** — 재료가 중복 카드예요. 그래서 환불 경로가 없어요
+       (`do_pull`과 다른 점이에요). 실패하면 아무것도 안 바뀌어요."""
+    user_id = interaction.user.id
+
+    try:
+        outcome = await card_store.fuse(user_id, times)
+    except Exception:
+        log.exception("카드 합성 실패 (user=%s)", user_id)
+        await interaction.followup.send(
+            "합성 도중 문제가 생겼어요. **카드는 그대로 있어요** — 잠시 후 다시 해주세요.",
+            ephemeral=True,
+        )
+        return
+
+    if outcome is None:
+        await interaction.followup.send(
+            "방금 다른 합성이 먼저 처리됐어요. **카드는 그대로예요** — 다시 눌러주세요.",
+            ephemeral=True,
+        )
+        return
+
+    results, used = outcome
+    if not results:
+        # 재료 부족. 지금 몇 장인지 같이 알려줘야 "얼마나 더 모아야 하나"를 알아요.
+        state = await card_store.get_collection(user_id)
+        have = card_store.dup_count(state["counts"])
+        await interaction.followup.send(
+            f"합성할 **중복 카드가 모자라요.** 지금 쓸 수 있는 중복이 **{have}장**인데 "
+            f"1회에 **{FUSE_N}장**이 필요해요.\n"
+            f"-# ⚪일반·🔵레어만 재료가 돼요(🟣에픽·🟡레전드는 안 먹어요). "
+            f"각 카드의 **마지막 1장은 남겨둬요** — 도감이 비지 않아요.",
+            ephemeral=True,
+        )
+        return
+
+    state = await card_store.get_collection(user_id)
+    summary = card_store.summarize(state["counts"])
+    dup_left = card_store.dup_count(state["counts"])
+    embed = _fuse_embed(results, used, summary=summary, dup_left=dup_left)
+
+    # 그림엔 성과만 — 레어 이상과 신규. (위 FUSE_ART_MAX 주석 참고)
+    art = [d for d in results if d["grade"] != "일반" or d["is_new"]][:FUSE_ART_MAX]
+    png = await card_render.render_pull(art) if art else None
+    if png is None:
+        await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+    else:
+        file = discord.File(io.BytesIO(png), filename=f"fuse_{user_id}.png")
+        embed.set_image(url=f"attachment://fuse_{user_id}.png")
+        await interaction.followup.send(embed=embed, file=file, ephemeral=ephemeral)
+
+    # 🟡 레전드면 뽑기방에 홍보해요. 뽑기와 **같은 함수**를 써요 — 합성으로 나온 레전드도
+    # 서버에서 가장 귀한 순간이고, 따로 짜면 문구가 갈려요.
+    # ⚠️ 합성 결과는 늘 본인에게만 보이니 `shown_publicly=False`예요(그림도 같이 올라가요).
+    try:
+        await announce_legend(interaction, results, shown_publicly=False, summary=summary)
+    except Exception:
+        log.exception("🟡 레전드 홍보 실패 - 합성 자체는 정상이에요 (user=%s)", user_id)
+
+
+# ============================================================
 # 🎴 뽑기 버튼
 #
 # ⚠️ 평범한 View가 아니라 DynamicItem이에요. 보통 View는 **봇이 재시작되면 죽어요** -
@@ -435,6 +563,101 @@ class GachaButton(
 # 50코인 이상이 4명이라 5연이 "모아서 지르는" 자리로 맞아요. 10연(100코인)은 아직
 # 아무도 못 사서 버튼으로는 안 달고 `/카드뽑기 횟수:10`으로만 열어둬요.
 QUICK_PULLS = 5
+
+
+class CardPanelView(discord.ui.View):
+    """🎴 뽑기방 채널에 **항상 떠 있는** 공개 패널이에요 (2026-10-31).
+
+    ## 왜 이게 필요한가
+
+    🪙 악귀상점이 22일째 0건이던 게 **방 + 버튼**으로 깨졌고, 🎣 낚시터도 방은 있는데
+    버튼이 0줄이어서 같은 걸 달았어요(2026-10-31). 뽑기방도 똑같이 **버튼이 0줄**이에요 —
+    `/카드뽑기`를 쳐야 하고, 이번에 새로 만드는 ⚒️ 합성은 **아무도 모르는 명령어**예요.
+    같은 진단을 💡건의·📅일정·❓매니저에서 이미 세 번 찍었어요.
+    → [[feedback_pickup_plaintext_not_slash_command]]
+
+    ## 🚨 영속 뷰 규칙 (셋 중 하나만 빠져도 재시작 뒤 버튼이 죽어요)
+    1. `timeout=None`
+    2. 버튼마다 **고정 `custom_id`** (`akgui:card:*`)
+    3. `cog_load`에서 `bot.add_view(CardPanelView())`
+    → `scripts/test_card_fusion.py`가 관문에서 셋 다 검사해요.
+
+    ## 🚨 상태를 `self`에 담지 마세요
+    이 객체는 **봇 전체에 하나뿐**이라 모든 사람이 공유해요. 누른 사람은
+    `interaction.user`로만 알아내요.
+
+    ## 🚨 뽑기 결과는 공개, 합성 결과는 본인에게만
+    뽑기는 자랑하는 재미가 있어서 뽑기방이면 공개예요(`_is_card_channel`). 합성은
+    "쓸모없는 중복을 녹이는" 정비 작업이라 채널을 덮을 이유가 없어요 — 늘 ephemeral이에요.
+    단 🟡 레전드가 나오면 **합성이어도 뽑기방에 홍보**돼요(`announce_legend`).
+    """
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        # 🚨 **숫자를 라벨에 손으로 적지 않아요.** 데코레이터엔 f-string을 못 쓰니
+        #    여기서 상수로 덮어써요 — 상수만 바꾸면 버튼까지 따라와요.
+        #    (🎣 낚시 패널·🪙 상점 패널과 같은 방식이에요)
+        self.pull1.label = f"1뽑기 {PULL_PRICE}코인"
+        self.pull5.label = f"{QUICK_PULLS}연속 {PULL_PRICE * QUICK_PULLS}코인"
+        self.fuse1.label = f"합성 (중복 {FUSE_N}장)"
+
+    @discord.ui.button(label="1뽑기", emoji="🎴", style=discord.ButtonStyle.success,
+                       custom_id="akgui:card:pull1", row=0)
+    async def pull1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        public = _is_card_channel(interaction)
+        await interaction.response.defer(ephemeral=not public)
+        await do_pull(interaction, pulls=1, ephemeral=not public)
+
+    @discord.ui.button(label="연속뽑기", emoji="🎴", style=discord.ButtonStyle.primary,
+                       custom_id="akgui:card:pull5", row=0)
+    async def pull5(self, interaction: discord.Interaction, button: discord.ui.Button):
+        public = _is_card_channel(interaction)
+        await interaction.response.defer(ephemeral=not public)
+        await do_pull(interaction, pulls=QUICK_PULLS, ephemeral=not public)
+
+    @discord.ui.button(label="합성", emoji="⚒️", style=discord.ButtonStyle.secondary,
+                       custom_id="akgui:card:fuse1", row=1)
+    async def fuse1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        await do_fuse(interaction, times=1)
+
+    @discord.ui.button(label="몰아 합성 (중복 전부)", emoji="⚒️",
+                       style=discord.ButtonStyle.secondary,
+                       custom_id="akgui:card:fuse_all", row=1)
+    async def fuse_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # `times=0`이 "중복이 바닥날 때까지"예요. 🎣 몰아 던지기와 같은 자리예요 —
+        # 실측 최다 보유자가 **53회**라, 이게 없으면 버튼을 53번 눌러야 해요.
+        await interaction.response.defer(ephemeral=True)
+        await do_fuse(interaction, times=0)
+
+    @discord.ui.button(label="내 도감", emoji="📖", style=discord.ButtonStyle.secondary,
+                       custom_id="akgui:card:dex", row=2)
+    async def dex(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        await show_collection(interaction)
+
+
+def _card_panel_embed() -> discord.Embed:
+    """패널 설명. 🚨 **확률·가격을 손으로 적지 않아요** — 상수에서 만들어요.
+    (2026-10-23에 낚시 등급표가 인상 전 값으로 7일간 남아 수익을 1/3 낮게 말한 적이 있어요)"""
+    total_w = sum(GRADE_WEIGHTS.values())
+    rates = " · ".join(
+        f"{GRADE_EMOJI[g]}{GRADE_WEIGHTS[g] / total_w * 100:g}%" for g in GRADE_ORDER
+    )
+    embed = discord.Embed(
+        title="🎴 악귀카드",
+        description=(
+            f"**{PULL_PRICE}코인에 {CARDS_PER_PULL}장**을 뽑아요. 전부 **{card_store.TOTAL}종**이에요.\n"
+            f"　└ {rates}  (`/카드확률`로 천장까지 공개돼 있어요)\n\n"
+            f"⚒️ **합성** — 쓸모없이 쌓인 **중복 {FUSE_N}장**을 넣으면 "
+            f"**뽑기와 똑같은 확률로 1장**을 다시 굴려요.\n"
+            f"　└ ⚪일반·🔵레어 중복만 재료가 돼요. 각 카드의 **마지막 1장은 안 먹어요**\n"
+            f"　└ 🟣에픽·🟡레전드도 나올 수 있어요. 돌아온 일반도 중복이면 **또 재료**예요"
+        ),
+        color=GRADE_COLOR["레전드"],
+    )
+    embed.set_footer(text="합성 결과는 나만 보여요 · 🟡 레전드는 여기 홍보돼요")
+    return embed
 
 
 class GachaView(discord.ui.View):
@@ -636,9 +859,38 @@ async def _grade_payload(grade: str, counts: dict, summary: dict):
     return embed, None
 
 
+async def show_collection(interaction: discord.Interaction, grade: str | None = None):
+    """📖 내 도감을 보여줘요. `/도감`과 📖 패널 버튼이 같이 써요.
+
+    ⚠️ 부르기 전에 `defer(ephemeral=True)`가 끝나 있어야 해요."""
+    state = await card_store.get_collection(interaction.user.id)
+    counts = state["counts"]
+
+    view = CollectionView(interaction.user.id, counts, state["since_legend"])
+
+    if grade is None:
+        await interaction.followup.send(
+            embed=_overview_embed(view.summary, state["since_legend"], counts),
+            view=view, ephemeral=True,
+        )
+        return
+
+    view._build_grade(grade)
+    embed, file = await _grade_payload(grade, counts, view.summary)
+    # ⚠️ `file=None`을 그대로 넘기면 안 돼요(discord.py 기본값이 MISSING이라
+    #    None을 "파일이 있다"로 봐요). 붙일 게 있을 때만 kwargs에 넣어요.
+    extra = {"file": file} if file else {}
+    await interaction.followup.send(embed=embed, view=view, ephemeral=True, **extra)
+
+
 class CardGacha(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    async def cog_load(self):
+        # 🚨 이게 없으면 재시작 뒤 패널 버튼을 눌러도 봇이 custom_id를 알아보지
+        #    못해서 **아무 반응이 없어요**(에러도 안 나요).
+        self.bot.add_view(CardPanelView())
 
     @app_commands.command(
         name="카드뽑기",
@@ -657,6 +909,56 @@ class CardGacha(commands.Cog):
         await interaction.response.defer()
         await do_pull(interaction, pulls=횟수)
 
+    @app_commands.command(
+        name="카드합성",
+        description=f"쌓인 중복 {FUSE_N}장을 넣어 뽑기와 같은 확률로 카드 1장을 다시 굴려요.",
+    )
+    @restrict_to_channel("card", "CARD_CHANNEL_ID")
+    @app_commands.describe(횟수="몇 번 합성할지 (안 적으면 1회, 0이면 중복이 바닥날 때까지)")
+    async def fuse_cards(
+        self,
+        interaction: discord.Interaction,
+        횟수: app_commands.Range[int, 0, card_store.MAX_FUSES] = 1,
+    ):
+        # DB 왕복 + 이미지 합성이라 3초를 넘겨요.
+        # 합성 결과는 늘 본인에게만 — 쓸모없는 중복을 녹이는 정비 작업이라 채널을
+        # 덮을 이유가 없어요(🟡 레전드만 따로 뽑기방에 홍보돼요).
+        await interaction.response.defer(ephemeral=True)
+        await do_fuse(interaction, times=횟수)
+
+    @app_commands.command(
+        name="카드패널",
+        description="[서버 소유자 전용] 이 채널에 카드 패널을 박아둬요 (항상 떠 있어요).",
+    )
+    async def panel(self, interaction: discord.Interaction):
+        """🎴 상설 패널을 **지금 이 채널에** 올려요. (🎣 `/낚시패널`과 같은 방식이에요)
+
+        ⚠️ `/채널설정`을 쓰지 않아요 — 이건 "명령어를 어디서 쓸 수 있나"가 아니라
+           **메시지를 한 번 박는** 일이에요. 채널을 옮기고 싶으면 옛 메시지를 지우고
+           새 채널에서 다시 치면 돼요.
+        📌 올린 뒤 **고정(핀)** 해두면 새로 온 사람도 바로 찾아요."""
+        if interaction.guild is None or interaction.user.id != interaction.guild.owner_id:
+            await interaction.response.send_message(
+                "이 명령어는 서버 소유자만 쓸 수 있어요.", ephemeral=True
+            )
+            return
+
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "텍스트 채널에서 써주세요.", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            f"🎴 {channel.mention} 에 카드 패널을 올렸어요.\n"
+            "-# 메시지를 **고정(핀)** 해두면 새로 온 사람도 바로 찾아요. "
+            "옮기려면 그 메시지를 지우고 다른 채널에서 다시 치면 돼요.",
+            ephemeral=True,
+        )
+        await channel.send(embed=_card_panel_embed(), view=CardPanelView())
+        log.info("🎴 카드 패널 게시: 채널 %s", channel.id)
+
     @app_commands.command(name="도감", description="내가 모은 악귀카드를 펼쳐 봐요.")
     # 📖 도감은 전용 채널(`#📖｜도감`)이에요. 뽑기 결과로 채널이 덮이지 않게 갈라뒀어요.
     # ⚠️ 설정이 없으면 제한이 풀리니, `fallback_group="card"`로 최소한 뽑기방에는
@@ -671,25 +973,10 @@ class CardGacha(commands.Cog):
     ):
         # 본인 도감이라 ephemeral이에요. 채널이 남의 도감으로 덮이지 않아요.
         await interaction.response.defer(ephemeral=True)
-        state = await card_store.get_collection(interaction.user.id)
-        counts = state["counts"]
-
-        view = CollectionView(interaction.user.id, counts, state["since_legend"])
-
-        if 등급 is None:
-            await interaction.followup.send(
-                embed=_overview_embed(view.summary, state["since_legend"], counts),
-                view=view, ephemeral=True,
-            )
-            return
-
-        grade = 등급.value
-        view._build_grade(grade)
-        embed, file = await _grade_payload(grade, counts, view.summary)
-        # ⚠️ `file=None`을 그대로 넘기면 안 돼요(discord.py 기본값이 MISSING이라
-        #    None을 "파일이 있다"로 봐요). 붙일 게 있을 때만 kwargs에 넣어요.
-        extra = {"file": file} if file else {}
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True, **extra)
+        # 🚨 본체는 `show_collection`이에요 — 📖 패널 버튼이 같은 함수를 써요.
+        #    복붙하면 한쪽만 고쳐져서 화면이 갈려요(🎣 낚시 패널에서 같은 이유로
+        #    `act_tank`/`act_sell`을 모듈 함수로 뺐어요).
+        await show_collection(interaction, 등급.value if 등급 else None)
 
     @app_commands.command(name="카드확률", description="악귀카드 뽑기의 확률과 천장을 공개해요.")
     @restrict_to_channel("card", "CARD_CHANNEL_ID")

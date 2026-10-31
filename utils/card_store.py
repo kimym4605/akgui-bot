@@ -401,3 +401,178 @@ def summarize(counts: dict[str, int]) -> dict:
         "total": TOTAL,
         "cards": sum(counts.values()),   # 중복 포함 총 장수
     }
+
+
+# ==================================================================
+# ⚒️ 합성 — 중복 3장을 **뽑기와 똑같은 확률**로 1장 다시 굴려요 (2026-10-31)
+#
+# ## 왜 만들었나
+# 유저가 직접 요청했어요. `#🎴｜뽑기방` 2026-10-30 00:38 먹구름:
+# "중복이 스발 몇개여" → **"일반카드 합성 기능 만들어주면 안돼냐?"** → "언제 다모으냐...."
+# 실측도 같은 말을 해요 — 보유 807장 중 **445장(55%)이 중복**이고, 🔸일반 24종을 완성한
+# 4명은 쓸모없는 일반 중복을 **90·80·76·75장**씩 쥔 채 에픽이 2~5/30이에요.
+# 해소 수단으로 만든 🎪거래장터는 **22일간 단 1건**이라 사실상 없어요.
+#
+# ## 확률은 뽑기와 **똑같아요** (사용자 결정, 2026-10-31)
+# 내가 "재료보다 위 등급에서만 나오게" 제안했는데 사용자가 **뽑기 확률 그대로**를 골랐어요.
+# ⭐ 그래서 `draw_cards()`를 **그대로 빌려 써요.** 확률표·중복 제외(에픽·레전드는 미보유
+#    에서만)·등급 고갈 처리가 전부 공짜로 따라와요. 껍데기를 복사하면 `/카드확률`이
+#    말하는 값과 합성이 갈려요.
+#
+# 🚨 그래서 **일반이 또 나올 수 있어요**(76.5%). 허탕처럼 보이지만 그게 설계예요 —
+#    돌아온 일반도 중복이면 **다음 합성의 재료**라서 반복하면 중복이 계속 깎여요.
+#    400회 시뮬레이션: 중복 110장 → **53회 합성 → 남은 중복 1.5장**(= 거의 다 녹아요).
+#    그 과정에서 🆕신규 2.6종 · 🔵레어 10.4 · 🟣에픽 1.43 · 🟡레전드 0.21장을 받아요.
+#
+# 🚨 **천장(`since_legend`)은 건드리지 않아요.** 올리지도 깎지도 않아요.
+#    천장은 "뽑기 240장"이라는 **지출**에 대한 보험이고, 합성은 지출이 아니에요.
+#    합성으로 천장을 돌릴 수 있으면 중복만 쌓아서 레전드를 짜낼 수 있게 돼요.
+#    → 아래에서 `draw_cards(counts, 0, ...)`로 **0을 넘겨** 천장이 끼어들지 못하게 하고,
+#      돌려받은 `new_since`는 **버려요**.
+#
+# 🚨 재료는 **`DUPE_OK`(일반·레어) 중복만**이에요. 에픽·레전드도 장터에서 또 사면 2장이
+#    될 수 있는데(`_give_sync` 주석), 그건 귀한 자산이라 실수로 태우면 안 돼요.
+# 🚨 **각 카드의 마지막 1장은 보호해요.** 도감에서 칸이 비는 일은 없어요.
+# ==================================================================
+
+FUSE_N = 3          # 합성 1회에 먹는 중복 장수 (사용자 결정: "합성을 3장으로")
+
+# "전부" 합성의 안전 상한. 중복이 아무리 많아도 한 번에 이 횟수를 넘지 않아요.
+# 지금 최다 보유자가 110장(=53회)이라 넉넉하지만, 무한루프 방어가 목적이에요.
+MAX_FUSES = 200
+
+
+def fuse_materials(counts: dict[str, int], n: int = FUSE_N) -> dict[str, int] | None:
+    """중복에서 재료 `n`장을 고르면 `{key: 장수}`, 모자라면 None.
+
+    **많이 쌓인 것부터** 먹어요 — 한 종류가 7장씩 쌓여 있는 게 불만의 모양이라
+    (실측 최다 `n19` 12장), 골고루 깎으면 그 체감이 안 줄어요.
+    🚨 `v - 1`이에요. 마지막 1장은 도감용으로 남겨요."""
+    dups = sorted(
+        ((v - 1, k) for k, v in counts.items()
+         if v > 1 and BY_KEY.get(k) and BY_KEY[k][0] in DUPE_OK),
+        reverse=True,
+    )
+    if sum(d for d, _ in dups) < n:
+        return None
+
+    take: dict[str, int] = {}
+    need = n
+    for have, key in dups:
+        use = min(have, need)
+        take[key] = use
+        need -= use
+        if need == 0:
+            break
+    return take
+
+
+def fuse_cards(
+    counts: dict[str, int],
+    times: int = 1,
+    rng: random.Random | None = None,
+) -> tuple[list[dict], dict[str, int]]:
+    """합성 `times`회. (받은 카드 목록, 먹은 재료 `{key: 장수}`)
+
+    `times=0`이면 **중복이 바닥날 때까지**(= "전부") 돌려요.
+
+    ⚠️ 한 회마다 `counts`를 갱신해요. 그래야 방금 받은 일반이 다음 회 재료가 되고,
+       에픽이 두 번 나오는 일도 없어요(`draw_cards`와 같은 이유).
+    `counts`는 복사해서 쓰니 호출자의 dict는 안 바뀌어요.
+
+    돌려주는 각 항목은 `draw_cards`와 같은 모양이에요(key/grade/name/is_new/pity).
+    `pity`는 항상 False예요 — 위 주석 참고(합성은 천장을 안 써요)."""
+    rng = rng or random
+    counts = dict(counts)
+    results: list[dict] = []
+    used: dict[str, int] = {}
+    limit = MAX_FUSES if times <= 0 else min(times, MAX_FUSES)
+
+    for _ in range(limit):
+        take = fuse_materials(counts, FUSE_N)
+        if take is None:
+            break
+
+        # 먼저 재료를 깎아요. 이 순서여야 "재료로 쓴 카드가 결과로 또 나오는" 경우에도
+        # 장수가 맞아요.
+        for key, cnt in take.items():
+            counts[key] -= cnt
+            used[key] = used.get(key, 0) + cnt
+
+        # 🚨 since_legend=0 — 천장이 끼어들지 못하게 해요. 반환값은 버려요.
+        drawn, _ = draw_cards(counts, 0, n=1, rng=rng)
+        if not drawn:
+            # 줄 카드가 하나도 없는 상태(도감 완성 + 중복 허용 등급도 고갈).
+            # 먹은 재료를 되돌리고 멈춰요 — **빈손으로 태우면 안 돼요.**
+            for key, cnt in take.items():
+                counts[key] += cnt
+                used[key] -= cnt
+                if used[key] == 0:
+                    del used[key]
+            break
+
+        got = drawn[0]
+        counts[got["key"]] = counts.get(got["key"], 0) + 1
+        results.append(got)
+
+    return results, used
+
+
+def _fuse_sync(user_id, times: int = 1) -> tuple[list[dict], dict[str, int]] | None:
+    """합성하고 저장해요. 동시 실행에 밀리면 None.
+
+    ⚠️ 코인을 안 써요(재료가 중복 카드예요). 그래서 `_pull_sync`와 달리 **환불 개념이
+       없어요** — 실패하면 아무것도 안 바뀌어요.
+    돌려주는 재료가 비어 있고 결과도 비면 "재료 부족"이에요(호출자가 안내해요)."""
+    uid = _uid(user_id)
+
+    for _ in range(_MAX_RETRY):
+        state = _get_sync(uid)
+        results, used = fuse_cards(state["counts"], times)
+        if not results:
+            return [], {}        # 재료 부족 (또는 줄 카드 없음) - 호출자가 안내
+
+        inc: dict[str, int] = {}
+        for key, cnt in used.items():
+            inc[f"counts.{key}"] = inc.get(f"counts.{key}", 0) - cnt
+        for d in results:
+            field = f"counts.{d['key']}"
+            inc[field] = inc.get(field, 0) + 1
+        # 🚨 `draws`는 **안 올려요.** 뽑기 횟수 통계이고 `/카드확률`·천장 안내가 쓰는
+        #    값이라, 합성으로 부풀리면 "몇 장 뽑았나"가 거짓이 돼요.
+        inc = {k: v for k, v in inc.items() if v != 0}
+        if not inc:
+            return [], {}
+
+        # 낙관적 동시성: 먹을 재료가 **지금도 그만큼 있을 때만** 써요.
+        # 🚨 `draws`로 거는 `_pull_sync` 방식은 여기선 못 써요 — 합성은 draws를 안 올려서
+        #    같은 값이 유지되고, 그러면 두 합성이 동시에 통과해 **장수가 음수**가 돼요.
+        flt: dict = {"_id": uid}
+        for key, cnt in used.items():
+            flt[f"counts.{key}"] = {"$gte": cnt}
+
+        res = _cards.update_one(flt, {"$inc": inc})
+        if res.modified_count:
+            return results, used
+        log.info("카드 합성 동시 실행 감지 - 재시도 (user=%s)", uid)
+
+    log.warning("카드 합성 저장이 %d회 모두 밀렸어요 (user=%s)", _MAX_RETRY, uid)
+    return None
+
+
+async def fuse(user_id, times: int = 1) -> tuple[list[dict], dict[str, int]] | None:
+    """중복 카드를 합성해요. `times=0`이면 바닥날 때까지.
+
+    - 성공: `(받은 카드 목록, 먹은 재료 {key: 장수})`
+    - `([], {})`: 재료가 모자라요 -> 안내해주세요
+    - `None`: 동시 실행에 밀렸어요 -> 다시 눌러달라고 안내해주세요
+    """
+    return await asyncio.to_thread(_fuse_sync, user_id, times)
+
+
+def dup_count(counts: dict[str, int]) -> int:
+    """합성에 쓸 수 있는 중복 장수. `DUPE_OK` 등급만, 마지막 1장은 빼고 세요."""
+    return sum(
+        v - 1 for k, v in counts.items()
+        if v > 1 and BY_KEY.get(k) and BY_KEY[k][0] in DUPE_OK
+    )
