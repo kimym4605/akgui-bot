@@ -547,6 +547,58 @@ check("   └ 명령어로만 쓰는 것들은 그대로 남아 있다",
 
 
 # ==================================================================
+# 🚨🚨 서버 미션 **8종 전부** 훅이 걸려 있는지 (2026-10-31)
+#
+# ⭐ **오늘 사고의 재발 방지다.** `create_room` 훅이 끊긴 걸 "어려운 미션"으로 오진할
+#    뻔했고, 실측(8명 배정·0건)이 아니었으면 몰랐다. 훅이 없으면 그 미션은 **영원히
+#    0건**이고, 로그도 에러도 안 남아서 유저 신고로만 드러난다.
+#
+# 🚨 훅은 두 가지 모양 중 하나다:
+#    ⒜ `COMMAND_MISSIONS` 표 (슬래시 명령어 완료 — **버튼은 안 잡힌다**)
+#    ⒝ 소스에서 `on_action("<key>", ...)` / `progress("<key>", ...)` 직접 호출
+#    ⒝ 쪽이 안전하다. 명령어를 패널 버튼으로 꺼낼 거면 **반드시 ⒝로 옮길 것.**
+# ==================================================================
+print("\n🎯 서버 미션 8종 훅 전수 검사")
+import ast as _ast2                                  # noqa: E402
+
+_found: dict[str, list[str]] = {}
+# 🚨 **경로를 정규화해야 한다.** `BOT_DIR`는 `scripts/..` 꼴이라 그대로 walk하면
+#    모든 하위 경로에 `scripts`가 들어가서 **제외 조건이 전부 참**이 된다 → 아무 파일도
+#    안 보고 "훅이 없다"는 **거짓 FAIL** 5건이 났다(2026-10-31에 실제로 당했다).
+_BASE = os.path.abspath(BOT_DIR)
+for _root, _dirs, _files in os.walk(_BASE):
+    _rel = os.path.relpath(_root, _BASE)
+    if any(s in _rel.split(os.sep) for s in (".git", "__pycache__", "scripts", ".venv")):
+        continue
+    for _fn in _files:
+        if not _fn.endswith(".py"):
+            continue
+        _path = os.path.join(_root, _fn)
+        try:
+            _tree = _ast2.parse(open(_path, encoding="utf-8").read())
+        except Exception:  # noqa: BLE001
+            continue
+        for _node in _ast2.walk(_tree):
+            if not isinstance(_node, _ast2.Call):
+                continue
+            _name = getattr(_node.func, "attr", "") or getattr(_node.func, "id", "")
+            if _name not in ("on_action", "progress", "complete", "_complete"):
+                continue
+            for _a in _node.args:
+                if isinstance(_a, _ast2.Constant) and _a.value in mission_store.MISSIONS:
+                    _found.setdefault(_a.value, []).append(
+                        f"{os.path.basename(_path)}:{_node.lineno}")
+for _cmd, _key in mission_store.COMMAND_MISSIONS.items():
+    _found.setdefault(_key, []).append(f"COMMAND_MISSIONS['{_cmd}']")
+
+for _key in mission_store.SERVER_KEYS:
+    _where = _found.get(_key) or []
+    check(f"   {_key}: 훅이 있다 ({', '.join(_where) if _where else '없음'})",
+          bool(_where),
+          "훅이 없으면 이 미션은 영원히 0건이에요 — on_action으로 올려주세요")
+
+
+# ==================================================================
 # 🚨 요약은 **맨 마지막**이어야 해요. 뒤에 섹션을 붙이면 그 FAIL이 집계되지 않아
 #    종료코드가 0으로 나오고 배포 관문이 그냥 통과해요 (2026-10-19에 실제로 그랬어요).
 # ==================================================================
