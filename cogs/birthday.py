@@ -208,6 +208,17 @@ class Birthday(commands.Cog):
                 if guild.get_member(int(user_id)) is not None:
                     await channel.send(f"🎉 오늘은 <@{user_id}>님의 생일이에요! 모두 축하해주세요 🎂")
 
+    @birthday_check.error
+    async def _birthday_check_error(self, error: BaseException):
+        """🚨 **`@tasks.loop`은 예외 하나에 영구 정지해요** — 로그 한 줄 말고는 티가
+        안 나고, 다음 날부터 생일 축하가 조용히 안 올라와요.
+
+        2026-11-01에 루프 11개 중 **3개에 이 핸들러가 없던 걸** 찾아 채웠어요
+        (같은 날 로그에서 정체불명 `aiohttp TimeoutError` 1건을 보고 전수 조사했어요).
+        디스코드 API 호출도 aiohttp라 여기서도 타임아웃이 날 수 있어요."""
+        log.error("🚨 생일 확인 루프가 멈췄어요 — 다시 켤게요: %r", error, exc_info=error)
+        self.birthday_check.restart()
+
     @birthday_check.before_loop
     async def before_birthday_check(self):
         await self.bot.wait_until_ready()

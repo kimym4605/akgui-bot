@@ -283,6 +283,17 @@ class TitleShop(commands.Cog):
             await title_store.delete(doc["_id"])
             log.info("🏷️ 칭호 만료: %s ('%s')", doc["_id"], doc.get("name"))
 
+    @expire_titles.error
+    async def _expire_titles_error(self, error: BaseException):
+        """🚨 **이게 멈추면 만료된 칭호 역할이 영구히 남아요.** 돈 받고 판 기간제
+        상품이라 조용히 안 지워지면 **공짜로 계속 쓰게** 돼요.
+
+        2026-11-01에 루프 11개 중 **3개에 이 핸들러가 없던 걸** 찾아 채웠어요.
+        여기선 역할 삭제(`_destroy_role`)가 디스코드 API를 타니 타임아웃·레이트리밋이
+        올라올 수 있어요."""
+        log.error("🚨 칭호 만료 루프가 멈췄어요 — 다시 켤게요: %r", error, exc_info=error)
+        self.expire_titles.restart()
+
     @expire_titles.before_loop
     async def _before_expire(self):
         await self.bot.wait_until_ready()

@@ -269,6 +269,18 @@ class Mission(commands.Cog):
                     await self._settle_voice(member, channel)
                     self._voice_since[member.id] = datetime.now(timezone.utc)
 
+    @flush_voice.error
+    async def _flush_voice_error(self, error: BaseException):
+        """🚨 **이게 멈추면 🎤 통화 미션(`voice_together`)이 조용히 죽어요.**
+        서버 미션 완료의 절반 이상이 그 미션인데(14일 63건 중 압도적 1위) 로그 한 줄
+        말고는 티가 안 나요.
+
+        2026-11-01에 루프 11개 중 **3개에 이 핸들러가 없던 걸** 찾아 채웠어요.
+        여기선 DB·디스코드 캐시만 만지지만, `_settle_voice`가 미션 적립·코인 지급을
+        타니 그쪽에서 예외가 올라올 수 있어요."""
+        log.error("🚨 통화 시간 정산 루프가 멈췄어요 — 다시 켤게요: %r", error, exc_info=error)
+        self.flush_voice.restart()
+
     @flush_voice.before_loop
     async def _before_flush(self):
         await self.bot.wait_until_ready()
