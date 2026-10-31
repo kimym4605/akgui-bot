@@ -321,6 +321,40 @@ for _p in _params:
     check(_p in _choice_kw, f"`{_p}` 가 선택지(choices)로 받는다",
           f"choices에 있는 것: {sorted(_choice_kw)}")
 
+print("\n[11] 🚨 `cog_load`의 등록이 **방 종류 전부**를 덮는다")
+# ## 왜 이걸 보나
+#
+# 영속 뷰 등록이 빠진 custom_id는 눌러도 **아무 반응이 없어요 — 에러도 안 나요.**
+# 2026-11-01에 🏆프리미어 버튼을 전용 채널에서 **랭크 채널 패널로 옮기면서**, 그게
+# 되는 근거가 "등록은 custom_id로 하니 어느 메시지든 된다"는 것이었어요. 그 근거를
+# 말로 두지 않고 **등록 표를 직접 열어** 확인해요.
+#
+# 🚨 discord.py 내부 구조(`_view_store._views`)를 들여다봐요. 모양이 바뀌면
+#    **조용히 "전부 통과"가 되지 않도록** 비어 있는 것도 실패로 잡아요
+#    (안내문 스캐너가 임포트 실패를 삼켜 전부 ✅였던 일이 있어요).
+from cogs.room import Room                      # noqa: E402
+
+async def _check_registration():
+    _bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+    await Room(_bot).cog_load()                 # 운영과 같은 등록 경로
+    # 영속 뷰는 message_id가 **None인 칸**에 들어가고, 키는 `(타입, custom_id)` 꼴이에요.
+    store = _bot._connection._view_store._views.get(None) or {}
+    ids = {k[1] if isinstance(k, tuple) else k for k in store}
+    check(bool(store), f"등록 표를 읽었다 ({len(store)}개)",
+          "비어 있으면 discord.py 내부 구조가 바뀐 거예요 — 이 검사가 무효예요")
+    check(any(str(i).startswith("akgui:room") for i in ids),
+          "akgui:room 항목이 보인다 (키 모양이 그대로다)", str(list(store)[:2]))
+    for kind in ROOM_KINDS:
+        check(f"akgui:room:new:{kind}" in ids,
+              f"{ROOM_KINDS[kind]['emoji']} {ROOM_KINDS[kind]['label']} 버튼이 등록된다",
+              "등록이 빠지면 눌러도 **아무 반응이 없어요**(에러도 안 나요)")
+    # 관리 버튼도 같은 등록 하나로 살아나야 해요
+    for cid in ("akgui:room:options", "akgui:room:invite", "akgui:room:request",
+                "akgui:room:transfer", "akgui:room:close"):
+        check(cid in ids, f"관리 버튼 {cid} 가 등록된다")
+
+asyncio.run(_check_registration())
+
 print("\n" + "=" * 50)
 print(f"통과 {len(passed)} · 실패 {len(failed)}")
 if failed:
