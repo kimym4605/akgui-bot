@@ -118,6 +118,10 @@ def do_backup() -> int:
         return 1
     print("✅ 다시 읽어 대조까지 통과")
     print(f"\n🚨 이 폴더는 **레포 밖**이고 유저 ID·생일이 들어 있어요. git에 넣지 마세요.")
+    # 🚨 정리를 **백업 성공 뒤에만** 한다. 앞에 두면 백업이 실패한 날 오래된 것까지
+    #    지워져서 "새 백업도 없고 옛 백업도 없는" 상태가 된다.
+    print()
+    do_prune()
     return 0
 
 
@@ -243,6 +247,41 @@ def do_restore(folder: str, target_db: str, wipe: bool) -> int:
     return 0
 
 
+KEEP_BACKUPS = 30          # 매일 돌리면 한 달. 하나가 ~730KB라 30개도 22MB뿐이에요.
+
+
+def do_prune(keep: int = KEEP_BACKUPS, dry: bool = False) -> int:
+    """오래된 DB 백업을 지워요. **이 스크립트가 뜬 것만** 건드려요.
+
+    🚨 `db_` 로 시작하고 `_meta.json`이 있는 폴더만 지워요. 손으로 만든
+       `pokemon_game_full_20260930`·`channel_snapshot_*` 같은 건 **절대 안 건드려요**
+       (그게 유일본일 수 있어요)."""
+    if not os.path.isdir(BACKUP_ROOT):
+        return 0
+    mine = []
+    for name in os.listdir(BACKUP_ROOT):
+        path = os.path.join(BACKUP_ROOT, name)
+        if not os.path.isdir(path) or not name.startswith("db_"):
+            continue
+        if not os.path.exists(os.path.join(path, "_meta.json")):
+            continue        # 우리가 뜬 게 아니면 건드리지 않아요
+        mine.append(name)
+    mine.sort()             # 이름에 stamp가 들어 있어 사전순 = 시간순
+    # 🚨 `mine[:-keep]`만 쓰면 keep=0에서 **아무것도 안 지운다** — 파이썬에서 `-0 == 0`
+    #    이라 `[:-0]`이 `[:0]`(빈 리스트)이 된다. 역방향 확인이 그래서 한 번 무효가 됐다.
+    old = mine[:len(mine) - keep] if len(mine) > keep else []
+    print(f"🧹 자동 백업 {len(mine)}개 · 유지 {keep}개 · 지울 것 {len(old)}개")
+    for name in old:
+        path = os.path.join(BACKUP_ROOT, name)
+        if dry:
+            print(f"  (지울 예정) {name}")
+            continue
+        import shutil
+        shutil.rmtree(path)
+        print(f"  🗑️ {name}")
+    return 0
+
+
 def do_drop(target_db: str) -> int:
     """연습용으로 만든 DB를 지워요. 🚨 운영 이름은 거부해요."""
     from utils.pokemon_store import _client, MONGODB_DB_NAME
@@ -262,7 +301,12 @@ if __name__ == "__main__":
     ap.add_argument("--to", metavar="DB이름", help="복원할 DB 이름 (운영 이름은 거부)")
     ap.add_argument("--wipe", action="store_true", help="--to 의 기존 컬렉션을 비우고 복원")
     ap.add_argument("--drop", metavar="DB이름", help="연습용 DB 삭제")
+    ap.add_argument("--prune", action="store_true",
+                    help=f"오래된 자동 백업 정리 (최근 {KEEP_BACKUPS}개만 남겨요)")
+    ap.add_argument("--dry", action="store_true", help="--prune 미리보기")
     args = ap.parse_args()
+    if args.prune:
+        sys.exit(do_prune(dry=args.dry))
     if args.list:
         sys.exit(do_list())
     if args.verify:
