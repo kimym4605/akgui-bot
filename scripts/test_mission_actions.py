@@ -507,6 +507,46 @@ check("낚시 미션이 배정 안 된 사람은 낚아도 코인이 없다",
 
 
 # ==================================================================
+# 🔊 "방 만들기" 미션이 **버튼 경로에서도** 올라가는지 (2026-10-31)
+#
+# 🚨🚨 전엔 `COMMAND_MISSIONS`(= `/방만들기` 명령어 완료)로 잡았는데, 같은 날 🔊 방
+#    패널 **버튼**을 만들면서 그 경로가 끊겼어요 — 버튼은 슬래시 명령어가 아니라서
+#    `on_app_command_completion`이 안 떠요. 오늘 8명 배정·**완료 0건**이 그 신호였어요.
+# → 이제 `dynamic_room.create_room`이 **실제로 만든 뒤** 직접 올려요.
+# ==================================================================
+import ast as _ast                                   # noqa: E402
+
+print("\n🔊 방 만들기 미션 배선")
+_dr_src = open(os.path.join(BOT_DIR, "utils", "dynamic_room.py"), encoding="utf-8").read()
+_dr = _ast.parse(_dr_src)
+_fn = next((n for n in _ast.walk(_dr)
+            if isinstance(n, _ast.AsyncFunctionDef) and n.name == "create_room"), None)
+check("dynamic_room.create_room이 있다", _fn is not None)
+_body = _ast.unparse(_fn) if _fn else ""
+# 🚨 `ast.unparse`는 문자열을 **단일 인용부호**로 내요(`'create_room'`). 이중으로
+#    찾으면 호출이 있는데도 FAIL이 나요(2026-10-31에 실제로 당했어요).
+#    그래서 인용부호를 벗긴 뒤 찾아요.
+_body_q = _body.replace('"', "'")
+check("🚨 create_room 미션을 **직접** 올린다 (버튼 경로도 커버)",
+      "'create_room'" in _body_q and "on_action" in _body_q,
+      "on_action(..., 'create_room', ...) 호출이 없어요")
+check("🚨 그 호출이 **딱 한 번**이다 (두 번이면 미션이 두 배로 올라가요)",
+      _body.count("on_action") == 1, f"{_body.count('on_action')}번")
+# 🚨 방을 **만든 뒤**여야 해요. 앞에 두면 실패했는데도 미션이 깨져요.
+_i_create = _body.find("create_voice_channel")
+_i_hook = _body.find("on_action")
+check("🚨 방을 실제로 만든 **뒤**에 올린다",
+      0 <= _i_create < _i_hook, f"create_voice_channel={_i_create} on_action={_i_hook}")
+# 🚨 COMMAND_MISSIONS에 다시 들어가면 명령어 경로에서 **두 번** 올라가요.
+check("🚨 COMMAND_MISSIONS에 '방만들기'가 없다 (중복 호출 방지)",
+      "방만들기" not in mission_store.COMMAND_MISSIONS,
+      f"{sorted(mission_store.COMMAND_MISSIONS)}")
+check("   └ 명령어로만 쓰는 것들은 그대로 남아 있다",
+      {"오상", "전적", "맵추천"} <= set(mission_store.COMMAND_MISSIONS),
+      f"{sorted(mission_store.COMMAND_MISSIONS)}")
+
+
+# ==================================================================
 # 🚨 요약은 **맨 마지막**이어야 해요. 뒤에 섹션을 붙이면 그 FAIL이 집계되지 않아
 #    종료코드가 0으로 나오고 배포 관문이 그냥 통과해요 (2026-10-19에 실제로 그랬어요).
 # ==================================================================

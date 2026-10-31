@@ -711,6 +711,26 @@ class DynamicRoomEngine:
             "(`/방초대`로 직접 초대한 사람은 바로 말할 수 있어요)\n"
             if 입장시뮤트 else ""
         )
+        # 🎯 "방 만들기" 미션은 **여기서** 올려요 (2026-10-31).
+        #
+        # 🚨🚨 전엔 `COMMAND_MISSIONS`(= `/방만들기` 명령어 완료)로 잡았는데, 같은 날
+        #    🔊 **방 패널 버튼**을 만들면서 그 경로가 끊겼어요 — 버튼은 슬래시 명령어가
+        #    아니라서 `on_app_command_completion`이 안 떠요. 그래서 패널로 방을 만든
+        #    사람은 미션을 못 깼어요(오늘 8명 배정 · 완료 0건이 그 신호였어요).
+        # ⭐ 덤으로 **옛 방식의 다른 버그도 같이 고쳐져요**: 명령어 완료 훅은 방을
+        #    실제로 못 만들어도(이미 열린 방이 있음 등) 정상 종료라서 발동했어요.
+        #    이제 **진짜 만들어진 다음**에만 올라가요. 🎣 낚시가 같은 이유로
+        #    `COMMAND_MISSIONS`를 안 쓰고 직접 부르는 것과 같은 선례예요.
+        # 🚨 `COMMAND_MISSIONS`에 "방만들기"를 **다시 넣지 마세요** — 그러면 명령어
+        #    경로에서 **두 번** 올라가요([[feedback_wire_the_hook_not_just_the_store]]에
+        #    적힌 중복 호출 사고와 같은 모양이에요).
+        # ⚠️ `on_action`이 예외를 스스로 삼켜서(그 docstring 참고) 미션 때문에 방
+        #    만들기가 깨지는 일은 없어요.
+        from cogs import mission as mission_cog
+        await mission_cog.on_action(
+            interaction.user.id, "create_room", interaction.channel, interaction.user
+        )
+
         await interaction.followup.send(
             f"{emoji} {room_label}을 만들었어요! {channel.mention}{capacity_text}\n"
             f"다른 사람들은 방을 볼 수는 있지만, `/방초대`로 직접 초대하거나 `/방신청`을 받아서 승인해야 들어올 수 있어요.\n"
