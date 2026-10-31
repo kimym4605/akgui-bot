@@ -238,6 +238,8 @@ def _build_embed(
     source_label: str,
     captains: tuple[int | None, int | None] = (None, None),
     map_name: str | None = None,
+    series_target: int = 1,
+    wins: list[int] | tuple[int, int] = (0, 0),
 ) -> discord.Embed:
     # mode는 이 편성을 어떻게 만들었는지예요(team_store의 MODE_* 값).
     # MANUAL은 '🔀 직접 조정'으로 손을 본 편성이에요. 이때도 점수와 실력 차이는 보여줘요 -
@@ -252,6 +254,12 @@ def _build_embed(
     if map_name:
         # 맵을 정해뒀으면 제목에 붙여요. 승리 보고 때 이 맵으로 기록돼요.
         title += f" · 🗺️ {map_name}"
+    # 🏁 다전제면 제목에 **점수와 몇 선승인지**를 붙여요. 한 판 끝낼 때마다
+    #    이 제목이 갱신돼서, 메시지만 봐도 지금 몇 대 몇인지 알 수 있어요.
+    series_target = int(series_target or 1)
+    if series_target > 1:
+        label = Session.SERIES_LABELS.get(series_target, f"{series_target}선승")
+        title += f" · 🏁 {label} ({wins[0]}:{wins[1]})"
     embed = discord.Embed(title=title, color=color)
     balanced = mode != team_store.MODE_RANDOM
     embed.add_field(
@@ -388,6 +396,15 @@ class Session:
         self.winner = record.get("winner")
         self.match_id = record.get("match_id")
         self.message_url = record.get("message_url")
+        # 🏁 다전제 (2026-11-01). 🚨 **기본값이 단판이어야 해요** — 옛 세션 기록엔
+        #    이 필드가 없어서, 기본값을 안 주면 그 메시지의 버튼이 죽어요.
+        self.series_target = int(record.get("series_target") or 1)
+        # 🚨 길이를 **항상 2로** 맞춰요. 저장 파일이 손으로 고쳐졌거나 중간에 깨졌을 때
+        #    `raw[1]`에서 IndexError가 나면 그 메시지 버튼이 통째로 죽어요.
+        raw_wins = list(record.get("wins") or [])
+        raw_wins = (raw_wins + [0, 0])[:2]
+        self.wins = [int(raw_wins[0] or 0), int(raw_wins[1] or 0)]
+        self.match_ids = list(record.get("match_ids") or [])
 
     @classmethod
     def load(cls, message_id: int) -> "Session | None":
@@ -411,13 +428,54 @@ class Session:
             winner=self.winner,
             reported=self.reported,
             match_id=self.match_id,
+            series_target=self.series_target,
+            wins=(self.wins[0], self.wins[1]),
+            match_ids=self.match_ids,
         )
+
+    # ------------------------------------------------------------------
+    # 🏁 다전제 (2026-11-01, 사용자 요청)
+    #
+    # 사용자 말: *"한판 끝날때마다 다시 만들고 해야하는 수고가 있더라고 보통 3판 2선승
+    # 5판 3선승처럼 이렇게 하는데"* — 전엔 승리 보고 한 번에 세션이 닫히고 버튼이
+    # 떼어졌어요(`_report`가 `reported=True`로 잠가요).
+    #
+    # 🚨 **`series_target == 1`이면 지금까지와 한 치도 다르지 않게** 동작해야 해요.
+    #    기존 사용자에게 보이는 변화가 없어야 하고, 옛 세션 기록도 그대로 돌아가야 해요.
+    # ------------------------------------------------------------------
+    SERIES_LABELS = {1: "단판", 2: "3판 2선승", 3: "5판 3선승"}
+
+    @property
+    def is_series(self) -> bool:
+        return self.series_target > 1
+
+    @property
+    def series_label(self) -> str:
+        return self.SERIES_LABELS.get(self.series_target, f"{self.series_target}선승")
+
+    @property
+    def total_games(self) -> int:
+        """최대 몇 판까지 가나 (2선승 → 3판)."""
+        return self.series_target * 2 - 1
+
+    @property
+    def series_winner(self) -> int | None:
+        """선승을 채운 팀(0=A, 1=B). 아직이면 None."""
+        for idx in (0, 1):
+            if self.wins[idx] >= self.series_target:
+                return idx
+        return None
+
+    @property
+    def score_text(self) -> str:
+        return f"🅰️ {self.wins[0]} : {self.wins[1]} 🅱️"
 
     def embed(self) -> discord.Embed:
         return _build_embed(
             self.team_a, self.team_b, self.diff,
             mode=self.mode, source_label=self.source_label,
             captains=self.captains, map_name=self.map_name,
+            series_target=self.series_target, wins=self.wins,
         )
 
     @property
@@ -1092,6 +1150,57 @@ class TeamSplitView(discord.ui.View):
             ephemeral=True,
         )
 
+    # ------------------------------------------------------------------
+    # 🏁 판수 고르기 (2026-11-01, 사용자 결정: "팀 화면의 버튼으로")
+    #
+    # 🚨 **첫 판을 보고한 뒤에는 못 바꿔요.** 1:0에서 "5판 3선승"으로 늘리면 이미 끝난
+    #    판을 뭐로 셀지가 애매해지고, 베팅 정산 시점도 뒤로 밀려요.
+    # 🚨 영속 버튼이라 custom_id가 고정이에요(`akgui:team:series:*`).
+    # ------------------------------------------------------------------
+    async def _set_series(self, interaction: discord.Interaction, target: int):
+        session = await self._session(interaction)
+        if session is None:
+            return
+        if sum(session.wins) > 0:
+            await interaction.response.send_message(
+                f"이미 **{sum(session.wins)}판**을 보고했어요 — 판수는 "
+                f"첫 판 전에만 바꿀 수 있어요. (지금 {session.score_text})",
+                ephemeral=True,
+            )
+            return
+        session.series_target = target
+        session.save()
+        label = Session.SERIES_LABELS.get(target, f"{target}선승")
+        await interaction.response.edit_message(embed=session.embed(), view=self)
+        await interaction.followup.send(
+            f"🏁 **{label}**로 정했어요."
+            + ("\n-# 한 판 끝날 때마다 승리 버튼만 누르면 점수가 쌓여요. "
+               "맵은 판마다 다시 고를 수 있어요."
+               if target > 1 else "\n-# 한 판으로 끝나요(원래 방식)."),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="단판", emoji="🏁", style=discord.ButtonStyle.secondary, row=2,
+        custom_id="akgui:team:series:1",
+    )
+    async def series_1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._set_series(interaction, 1)
+
+    @discord.ui.button(
+        label="3판 2선승", emoji="🏁", style=discord.ButtonStyle.secondary, row=2,
+        custom_id="akgui:team:series:2",
+    )
+    async def series_2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._set_series(interaction, 2)
+
+    @discord.ui.button(
+        label="5판 3선승", emoji="🏁", style=discord.ButtonStyle.secondary, row=2,
+        custom_id="akgui:team:series:3",
+    )
+    async def series_3(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._set_series(interaction, 3)
+
     @discord.ui.button(
         label="🅰️ A팀 승리", style=discord.ButtonStyle.success, row=1,
         custom_id="akgui:team:win:a",
@@ -1129,24 +1238,56 @@ class TeamSplitView(discord.ui.View):
             )
             return
 
-        # 결과가 나온 뒤에는 편성을 못 바꾸게 잠가요. 영속 버튼은 '꺼진 상태'로 남겨두면
-        # 눌러도 되는 것처럼 보여서, **아예 떼어내요.**
-        session.reported = True
+        # 🏁 다전제: 한 판 결과를 점수에 더해요. 판 기록(`record_match`)은 **판마다**
+        #    들어가니 전적·KDA·맵별 집계는 전처럼 쌓여요.
+        session.wins[winner_index] += 1
+        session.match_ids.append(match_id)
         session.winner = winner_index
         session.match_id = match_id
-        session.save()
-        if interaction.message is not None:
-            try:
-                await interaction.message.edit(embed=session.embed(), view=None)
-            except discord.HTTPException:
-                log.warning("보고 뒤 버튼을 못 떼어냈어요 (message=%s)",
-                            interaction.message.id, exc_info=True)
+
+        done = session.series_winner       # 선승을 채웠나 (단판이면 1승에 바로 참)
+        if done is None:
+            # 🚨 **아직 안 끝났어요 — 버튼을 떼지 않아요.** 이게 이번 기능의 핵심이에요.
+            #    맵은 판마다 다르니 **비워서** 다음 판에 다시 고를 수 있게 해요.
+            session.reported = False
+            session.map_name = None
+            session.save()
+            if interaction.message is not None:
+                try:
+                    await interaction.message.edit(embed=session.embed(), view=self)
+                except discord.HTTPException:
+                    log.warning("중간 점수 반영 실패 (message=%s)",
+                                interaction.message.id, exc_info=True)
+        else:
+            # 결과가 나온 뒤에는 편성을 못 바꾸게 잠가요. 영속 버튼은 '꺼진 상태'로 남겨두면
+            # 눌러도 되는 것처럼 보여서, **아예 떼어내요.**
+            session.reported = True
+            session.save()
+            if interaction.message is not None:
+                try:
+                    await interaction.message.edit(embed=session.embed(), view=None)
+                except discord.HTTPException:
+                    log.warning("보고 뒤 버튼을 못 떼어냈어요 (message=%s)",
+                                interaction.message.id, exc_info=True)
 
         won_name = "🅰️ A팀" if winner_index == 0 else "🅱️ B팀"
         map_text = f" · 🗺️ **{session.map_name}**" if session.map_name else ""
+        if session.is_series:
+            game_no = sum(session.wins)
+            if done is None:
+                head = (f"🏆 **{game_no}판째 — {won_name} 승리**{map_text}\n"
+                        f"🏁 **{session.score_text}** · {session.series_label} "
+                        f"(먼저 **{session.series_target}승**)\n"
+                        f"-# 다음 판을 하고 다시 승리 버튼을 눌러주세요. "
+                        f"맵은 비워뒀어요 — 🗺️ 버튼으로 다시 정할 수 있어요.")
+            else:
+                head = (f"🎉 **{won_name} 시리즈 승리!** "
+                        f"({session.series_label} · {session.score_text}){map_text}")
+        else:
+            head = (f"🏆 **{won_name} 승리**로 기록했어요!{map_text} "
+                    f"(기록: {interaction.user.display_name})")
         lines = [
-            f"🏆 **{won_name} 승리**로 기록했어요!{map_text} "
-            f"(기록: {interaction.user.display_name})",
+            head,
             "",
             f"**승리** {', '.join(p.label for p in teams[winner_index])}",
             f"**패배** {', '.join(p.label for p in teams[1 - winner_index])}",
@@ -1161,10 +1302,18 @@ class TeamSplitView(discord.ui.View):
         # 이 팀짜기에서 연 베팅이 있으면 같이 정산해요. 예전엔 `/베팅마감` + 양 팀장의
         # `/베팅결과`까지 받아야 해서 2번 쓰이고 멈췄어요. 승리를 보고하는 이 순간이
         # 곧 결과라서, 여기서 끝내요.
-        bet_lines = await self._settle_bet(interaction, winner_index)
-        if bet_lines:
+        #
+        # 🏁 **다전제에서는 시리즈가 끝날 때 한 번만** 정산해요(사용자 결정 2026-11-01).
+        #    베팅은 "누가 이기나"에 거는 거라, 1판 결과로 정산하면 3판 2선승에서 1:0일 때
+        #    이미 돈이 나가버려요. `done`이 None이면(= 아직 진행 중) 건드리지 않아요.
+        if done is not None:
+            bet_lines = await self._settle_bet(interaction, done)
+            if bet_lines:
+                lines.append("")
+                lines.extend(bet_lines)
+        elif await self._has_open_bet(interaction):
             lines.append("")
-            lines.extend(bet_lines)
+            lines.append("-# 🎲 걸린 베팅은 **시리즈가 끝나면** 한 번에 정산돼요.")
 
         lines.append("")
         lines.append("-# `/내전전적`으로 내 승패·연승·맵별 성적·KDA를 볼 수 있어요.")
@@ -1185,6 +1334,22 @@ class TeamSplitView(discord.ui.View):
 
         # 실제 경기 기록(KDA)을 찾아 붙여요. **여기서 실패해도 위 보고는 이미 끝났어요.**
         await self._attach_real_stats(interaction, match_id, winners + losers, winner_index)
+
+    async def _has_open_bet(self, interaction: discord.Interaction) -> bool:
+        """이 팀짜기에서 연 베팅이 **아직 열려 있나**. 다전제 중간 보고에서
+        "시리즈 끝에 정산된다"고 알려줄지 판단하는 데만 써요.
+
+        ⚠️ 여기서 실패해도 본 흐름은 멀쩡해야 해요 — 조용히 False를 돌려줘요."""
+        try:
+            doc = await bet_store.active(interaction.channel_id)
+            if doc is None:
+                return False
+            source = doc.get("sourceMessageId")
+            mine = str(interaction.message.id) if interaction.message else ""
+            return bool(source) and str(source) == mine
+        except Exception:                              # noqa: BLE001
+            log.warning("베팅 확인 실패 (중간 보고 안내만 빠져요)", exc_info=True)
+            return False
 
     async def _settle_bet(self, interaction: discord.Interaction, winner_index: int) -> list[str]:
         """이 팀짜기에서 연 베팅을 정산하고, 보고 메시지에 붙일 줄들을 돌려줘요.

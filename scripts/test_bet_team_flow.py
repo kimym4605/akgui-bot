@@ -118,9 +118,23 @@ for comp in view.to_components():
         rows.setdefault(comp.get("id", id(comp)), []).append(item)
 for key, items in rows.items():
     check(f"한 줄에 {len(items)}개 (<=5)", len(items) <= 5)
-# 윗줄 5개(섞기·무작위·조정·팀장·맵) + 아랫줄 3개(베팅·A승·B승) = 8개예요.
-check("버튼 총 8개", sum(len(v) for v in rows.values()) == 8,
-      str(sum(len(v) for v in rows.values())))
+# 1줄 5개(섞기·무작위·조정·팀장·맵) + 2줄 3개(베팅·A승·B승)
+# + 3줄 3개(🏁 단판·3판2선승·5판3선승, 2026-11-01 다전제) = 11개예요.
+#
+# 🚨 **버튼 수를 숫자로 박아두면 기능을 더할 때마다 거짓 실패가 나요.** 다전제를
+#    넣자 `8 != 11`로 깨졌어요(2026-11-01). 여기서 보려던 건 "한 줄 한도"와
+#    "꼭 있어야 할 버튼이 다 있나"지, 총 개수가 아니에요.
+#    → **있어야 할 custom_id가 전부 있는지**로 바꿨어요.
+must_have = {
+    "akgui:team:bet", "akgui:team:win:a", "akgui:team:win:b",
+    "akgui:team:series:1", "akgui:team:series:2", "akgui:team:series:3",
+}
+have = {str(getattr(c, "custom_id", "")) for c in view.children}
+missing = sorted(must_have - have)
+check("꼭 있어야 할 버튼이 전부 있다", not missing, f"빠짐 {missing}")
+check("custom_id가 전부 고유",
+      len({c for c in have if c}) == len([c for c in have if c]))
+print(f"   (버튼 {sum(len(v) for v in rows.values())}개 · {len(rows)}줄)")
 
 print()
 if failures:

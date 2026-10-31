@@ -1,0 +1,47 @@
+{
+  "match_id": "fb80cea9-c9bf-4f27-9531-46da4c41abc2",
+  "at": "2026-11-01 00:23",
+  "map": "헤이븐",
+  "plan": [
+    {
+      "uid": "1383366757934174258",
+      "amount": 20,
+      "label": "C774 B984#who",
+      "mvp": false,
+      "before": 13,
+      "kda": "15/5/10"
+    },
+    {
+      "uid": "736895972776476702",
+      "amount": 20,
+      "label": "(전적 미기록)",
+      "mvp": false,
+      "before": 23,
+      "kda": "-"
+    },
+    {
+      "uid": "1097882028218785833",
+      "amount": 20,
+      "label": "che0ngi1#0101",
+      "mvp": false,
+      "before": 70,
+      "kda": "15/11/5"
+    },
+    {
+      "uid": "1549647080656740546",
+      "amount": 20,
+      "label": "다람쥐물주먹#water",
+      "mvp": false,
+      "before": 23,
+      "kda": "14/6/3"
+    },
+    {
+      "uid": "904340176787087460",
+      "amount": 30,
+      "label": "(전적 미기록)",
+      "mvp": true,
+      "before": 105,
+      "kda": "-"
+    }
+  ]
+}

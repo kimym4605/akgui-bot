@@ -132,10 +132,23 @@ def save_session(
     winner: int | None = None,
     reported: bool = False,
     match_id: str | None = None,
+    series_target: int = 1,
+    wins: tuple[int, int] = (0, 0),
+    match_ids: list[str] | None = None,
 ) -> None:
     """그 메시지의 지금 상태를 저장해요(있으면 덮어써요).
 
-    `winner`/`match_id`는 승리 보고가 들어간 뒤에만 채워져요."""
+    `winner`/`match_id`는 승리 보고가 들어간 뒤에만 채워져요.
+
+    ## 🏁 다전제 (2026-11-01)
+
+    `series_target`은 **몇 승을 먼저 하면 끝나는지**예요: `1`=단판(옛 동작) ·
+    `2`=3판 2선승 · `3`=5판 3선승. `wins`는 `(A승, B승)`이고, `match_ids`는 판마다
+    쌓인 경기 기록 id예요.
+
+    🚨 **`series_target`이 1이면 지금까지와 완전히 같게 동작해야 해요** — 기존 세션
+    기록엔 이 필드가 없어서 `get_session`이 돌려준 dict에도 없어요. 읽는 쪽에서
+    기본값 1·(0,0)로 받아야 옛 메시지의 버튼이 안 죽어요."""
     data = _load_all()
     data[str(message_id)] = {
         "saved_at": datetime.now(KST).isoformat(timespec="seconds"),
@@ -154,6 +167,10 @@ def save_session(
         "winner": winner,
         "reported": bool(reported),
         "match_id": match_id,
+        # 🏁 다전제 — 1이면 단판(옛 동작과 같아요)
+        "series_target": int(series_target or 1),
+        "wins": [int(wins[0]), int(wins[1])],
+        "match_ids": list(match_ids or []),
         "players": [player_to_dict(p) for p in players],
         "teams": [
             [player_to_dict(p) for p in team_a],

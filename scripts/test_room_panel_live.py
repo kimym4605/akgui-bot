@@ -262,14 +262,26 @@ for cname, kind in PLAN:
     if ch is None:
         check(False, f"#{cname} 채널")
         continue
-    msgs = get(f"/channels/{ch['id']}/messages?limit=30")
+    # 🚨🚨 **최근 메시지로 찾으면 안 돼요.** `#📣내전모집`의 패널이 하루 만에
+    #    **47번째**로 밀려서 `limit=30`에 안 걸렸고, **거짓 실패**가 났어요
+    #    (2026-11-01). 활발한 채널에선 패널이 대화에 묻혀요.
+    #    → **핀 목록**에서 먼저 찾아요. 그게 패널이 있어야 할 자리이기도 해요
+    #      (그래서 패널은 전부 핀해뒀어요).
+    # 🚨 제목("만들기")이 아니라 **`akgui:room:` 버튼**으로 식별해요 —
+    #    제목으로 찾으면 `/팀짜기` 결과 메시지가 걸려요.
     ids = []
-    for m in msgs if isinstance(msgs, list) else []:
-        if not any("만들기" in (e.get("title") or "") for e in m.get("embeds") or []):
+    pool = (get(f"/channels/{ch['id']}/pins") or [])
+    if not isinstance(pool, list):
+        pool = []
+    pool = pool + (get(f"/channels/{ch['id']}/messages?limit=100") or [])
+    for m in pool:
+        if not isinstance(m, dict) or not m.get("author", {}).get("bot"):
             continue
-        ids = [b.get("custom_id") for row in m.get("components", [])
-               for b in row.get("components", [])]
-        break
+        cand = [b.get("custom_id") for row in m.get("components", [])
+                for b in row.get("components", [])]
+        if any(str(c).startswith("akgui:room:") for c in cand):
+            ids = cand
+            break
     unknown = [i for i in ids if i not in known]
     check(bool(ids) and not unknown,
           f"#{ch['name']}: 게시된 {len(ids)}개가 전부 봇이 아는 것",
