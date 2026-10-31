@@ -170,7 +170,81 @@ check(not modal_calls and not modal_classes,
       "send_modal 호출도 Modal 클래스도 없다 — 종류를 글자로 받으면 오타가 바로 실패가 된다",
       f"호출 {len(modal_calls)}개 · 클래스 {modal_classes}")
 
-print("\n[8] /방패널은 서버 소유자 전용")
+print("\n[8] ⭐ 채널별 패널 — 그 종류만 보여준다 (2026-10-31 사용자 결정)")
+for key, cfg in ROOM_KINDS.items():
+    one = room_panel.RoomPanelView(engine, ROOM_KINDS, [key])
+    news = [i for i in one.children
+            if str(getattr(i, "custom_id", "")).startswith("akgui:room:new:")]
+    check(len(news) == 1 and news[0].custom_id.endswith(f":{key}"),
+          f"{cfg['emoji']} {cfg['label']} 패널에 종류 버튼이 1개뿐",
+          str([n.custom_id for n in news]))
+    # 🚨 관리 버튼은 어느 패널에나 있어야 한다 — 자기 방 관리는 종류와 무관하다.
+    ids = {str(getattr(i, "custom_id", "")) for i in one.children}
+    for need in ("akgui:room:invite", "akgui:room:request",
+                 "akgui:room:transfer", "akgui:room:close", "akgui:room:options"):
+        check(need in ids, f"  └ {need}도 함께 있다")
+    # 종류가 하나면 ⚙️가 그 종류를 미리 물고 있어야 한다(단계가 하나 줄어든다)
+    check(one.preset == key, f"  └ ⚙️ preset이 {key}로 잡힌다", str(one.preset))
+    opts = room_panel._OptionsView(engine, ROOM_KINDS, preset_kind=key)
+    check(opts.kind == key, "  └ 그 옵션 뷰는 종류가 이미 정해져 있다", str(opts.kind))
+    check(not any(isinstance(i, discord.ui.Select) and "어떤 방" in (i.placeholder or "")
+                  for i in opts.children),
+          "  └ 종류 드롭다운을 안 띄운다")
+    emb = room_panel.panel_embed(ROOM_KINDS, [key]).title
+    check(cfg["label"] in emb, f"  └ 제목이 '{cfg['label']}'을 말한다", emb)
+
+print("\n[8-b] 🚨 전체 패널(kinds=None)은 그대로 전부 보여준다")
+allv = room_panel.RoomPanelView(engine, ROOM_KINDS, None)
+news = [i for i in allv.children
+        if str(getattr(i, "custom_id", "")).startswith("akgui:room:new:")]
+check(len(news) == len(ROOM_KINDS), f"종류 버튼 {len(ROOM_KINDS)}개", str(len(news)))
+check(allv.preset is None, "전체 패널은 preset이 없다 (⚙️에서 종류를 고른다)")
+check(room_panel._OptionsView(engine, ROOM_KINDS).kind is None,
+      "그 옵션 뷰는 종류가 비어 있다")
+
+print("\n[8-c] 🚨 없는 종류 키는 걸러낸다 (오타가 '버튼 없는 패널'로 배포되면 안 된다)")
+# 🚨 **예외도 FAIL로 받아야 한다.** 필터를 빼면 여기서 KeyError로 테스트가 통째로
+#    죽어서 뒤 검사가 하나도 안 돌았다(2026-10-31 역방향 확인에서 드러났다).
+#    종료코드는 1이지만 실패 목록이 비어 "무엇이 깨졌는지"를 알려주지 못한다.
+try:
+    bad = room_panel.RoomPanelView(engine, ROOM_KINDS, ["rank", "없는종류"])
+    news = [i for i in bad.children
+            if str(getattr(i, "custom_id", "")).startswith("akgui:room:new:")]
+    check(len(news) == 1, "모르는 키는 버리고 아는 것만 만든다",
+          str([n.custom_id for n in news]))
+except Exception as exc:                        # noqa: BLE001
+    check(False, "모르는 키는 버리고 아는 것만 만든다",
+          f"걸러내지 않아 {type(exc).__name__}로 터졌다: {exc}")
+try:
+    check(room_panel.panel_embed(ROOM_KINDS, ["rank", "없는종류"]).title.count("랭크방") == 1,
+          "설명도 아는 종류만 쓴다")
+except Exception as exc:                        # noqa: BLE001
+    check(False, "설명도 아는 종류만 쓴다", f"{type(exc).__name__}로 터졌다: {exc}")
+
+print("\n[8-d] /방패널의 `종류` 옵션이 실제로 패널에 전달된다")
+room_tree = ast.parse(room_src)
+panel_cmd_fn = next((n for n in ast.walk(room_tree)
+                     if isinstance(n, ast.AsyncFunctionDef) and n.name == "panel"), None)
+ptxt2 = ast.unparse(panel_cmd_fn) if panel_cmd_fn else ""
+check("종류" in ptxt2 and "kinds" in ptxt2,
+      "종류 파라미터를 받아 kinds로 넘긴다")
+# 🚨 `RoomPanelView(..., kinds)`만 보면 **`kinds = None`으로 바꿔치기한 걸 못 잡는다**
+#    (역방향 확인에서 드러났다). kinds가 **종류에서 나온다**는 것까지 봐야 한다.
+kinds_assign = [n for n in ast.walk(panel_cmd_fn or ast.Module(body=[], type_ignores=[]))
+                if isinstance(n, ast.Assign)
+                and any(getattr(t, "id", "") == "kinds" for t in n.targets)]
+check(bool(kinds_assign) and all("종류" in ast.unparse(n.value) for n in kinds_assign),
+      "🚨 kinds를 **`종류`에서 만든다** (상수로 박으면 옵션이 죽는다)",
+      str([ast.unparse(n.value) for n in kinds_assign]))
+check("RoomPanelView(self.engine, ROOM_KINDS, kinds)" in ptxt2,
+      "🚨 패널 생성에 kinds를 **넘긴다** (안 넘기면 늘 전체가 올라간다)", ptxt2[-200:])
+check("panel_embed(ROOM_KINDS, kinds)" in ptxt2,
+      "🚨 설명에도 kinds를 넘긴다 (버튼은 1개인데 설명만 4종이 되면 거짓이 된다)")
+check(any(isinstance(d, ast.Call) and "choices" in ast.unparse(d)
+          for d in (panel_cmd_fn.decorator_list if panel_cmd_fn else [])),
+      "종류는 **선택지(choices)**로 받는다 — 글자로 받으면 오타가 바로 실패가 된다")
+
+print("\n[9] /방패널은 서버 소유자 전용")
 panel_cmd = next((n for n in ast.walk(ast.parse(room_src))
                   if isinstance(n, ast.AsyncFunctionDef) and n.name == "panel"), None)
 check(panel_cmd is not None, "panel 명령어가 있다")

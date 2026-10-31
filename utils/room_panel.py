@@ -98,26 +98,32 @@ class _OptionsView(discord.ui.View):
     """⚙️ 종류·정원·뮤트를 고른 뒤 만드는 **일회용** ephemeral 뷰.
 
     ⚠️ 모달(`send_modal`)로는 못 해요 — 모달엔 **텍스트 입력만** 들어가서 종류를
-       글자로 받아야 하고, 그러면 오타가 바로 실패가 돼요. 드롭다운이 맞아요."""
+       글자로 받아야 하고, 그러면 오타가 바로 실패가 돼요. 드롭다운이 맞아요.
 
-    def __init__(self, engine, room_kinds: dict):
+    ⭐ `preset_kind`가 있으면 **종류 드롭다운을 아예 안 띄워요**(2026-10-31).
+       채널별 패널에서는 그 채널의 종류가 이미 정해져 있어서, 또 고르게 하면 단계만
+       늘어나요 — 정원·뮤트만 정하면 돼요."""
+
+    def __init__(self, engine, room_kinds: dict, preset_kind: str | None = None):
         super().__init__(timeout=180)
         self.engine = engine
-        self.kind: str | None = None
+        self.kind: str | None = preset_kind
         self.capacity: int | None = None
         self.mute = False
+        self._kind_select = None
 
-        self._kind_select = discord.ui.Select(
-            placeholder="① 어떤 방을 만들까요?",
-            options=[
-                discord.SelectOption(label=cfg["label"], value=key, emoji=cfg["emoji"],
-                                     description=cfg["choice_name"])
-                for key, cfg in room_kinds.items()
-            ],
-            row=0,
-        )
-        self._kind_select.callback = self._pick_kind
-        self.add_item(self._kind_select)
+        if preset_kind is None:
+            self._kind_select = discord.ui.Select(
+                placeholder="① 어떤 방을 만들까요?",
+                options=[
+                    discord.SelectOption(label=cfg["label"], value=key, emoji=cfg["emoji"],
+                                         description=_short_desc(cfg))
+                    for key, cfg in room_kinds.items()
+                ],
+                row=0,
+            )
+            self._kind_select.callback = self._pick_kind
+            self.add_item(self._kind_select)
 
         self._cap_select = discord.ui.Select(
             placeholder="② 최대 인원 (안 고르면 무제한)",
@@ -162,26 +168,59 @@ class _OptionsView(discord.ui.View):
 
 
 class RoomPanelView(discord.ui.View):
-    """🔊 통화방 패널. 위 모듈 docstring의 규칙을 반드시 지켜주세요."""
+    """🔊 통화방 패널. 위 모듈 docstring의 규칙을 반드시 지켜주세요.
 
-    def __init__(self, engine, room_kinds: dict):
+    ## ⭐ 채널별로 **그 방 종류만** 보여줘요 (2026-10-31, 사용자 결정)
+
+    사용자 지시예요: *"방만들기 기능은 각 방에 나누는게 좋을 것 같다."*
+    실제로 서버가 이미 그렇게 갈려 있어요 — `#🥋폐관수련-모집` 핀에
+    *"같이 랭크를 돌릴 사람을 찾는다면 🏆｜랭크-파티구인 쪽이 맞아요"*라고 적혀 있어요.
+
+    | 모집 채널 | 보여줄 종류 |
+    |---|---|
+    | `#🏆｜랭크-파티구인` | 🔒 랭크방 |
+    | `#🥋｜폐관수련-모집` | 🥋 폐관수련방 |
+    | `#📣｜내전모집` | ⚔️ 내전방 |
+    | `#🏆｜프리미어-모집` | 🏆 프리미어방 |
+
+    `kinds=None`이면 **전부** 보여줘요(한 곳에 다 모으고 싶을 때).
+
+    🚨 **관리 버튼(초대·신청·넘기기·닫기)은 어느 패널에나 들어가요.** 자기 방을
+       관리하는 일은 방 종류와 무관해서, 랭크방을 연 사람이 폐관수련 채널에서 눌러도
+       똑같이 동작해야 해요.
+
+    🚨 **영속 뷰는 전체 종류로 한 번만 등록해요**(`cog_load`). custom_id로 콜백을 찾으니,
+       버튼이 일부만 박힌 메시지도 그 등록 하나로 전부 되살아나요. 채널마다 따로
+       등록할 필요가 없어요."""
+
+    def __init__(self, engine, room_kinds: dict, kinds: list[str] | None = None):
         super().__init__(timeout=None)
         self.engine = engine
         self.room_kinds = room_kinds
+        # 🚨 `kinds`에 없는 키가 들어오면 조용히 버리지 말고 걸러요 — 오타가 그대로
+        #    "버튼이 없는 패널"로 배포되면 눈치채기 어려워요.
+        self.kinds = [k for k in (kinds or room_kinds) if k in room_kinds]
+        self.preset = self.kinds[0] if len(self.kinds) == 1 else None
 
-        # 종류 버튼은 **ROOM_KINDS에서 만들어요.** 손으로 4개를 늘어놓으면 종류를
+        # 종류 버튼은 **ROOM_KINDS에서 만들어요.** 손으로 늘어놓으면 종류를
         # 추가했을 때 패널만 옛날 것으로 남아요(cogs/room.py 맨 위 설명과 같은 약속).
-        for key, cfg in room_kinds.items():
-            self.add_item(_CreateButton(key, cfg))
+        for key in self.kinds:
+            self.add_item(_CreateButton(key, room_kinds[key]))
 
     @discord.ui.button(label="정원·뮤트 정해서 만들기", emoji="⚙️",
                        style=discord.ButtonStyle.secondary,
                        custom_id="akgui:room:options", row=1)
     async def options(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 종류가 하나뿐인 채널 패널이면 그 종류를 **미리 넣어줘요**(단계가 하나 줄어요).
+        # 🚨 단 영속 뷰는 재시작 뒤 `cog_load`가 만든 **전체 종류 인스턴스**로 되살아나서
+        #    `self.preset`이 None이 돼요. 그때는 종류 드롭다운이 떠요 — 동작은 멀쩡하고
+        #    단계만 하나 늘어요(틀린 방이 만들어지는 일은 없어요).
+        hint = ("-# 정원을 안 고르면 무제한이에요."
+                if self.preset else
+                "-# 정원을 안 고르면 무제한이에요. 그냥 바로 만들려면 위 방 버튼을 누르세요.")
         await interaction.response.send_message(
-            "⚙️ **정해서 만들기** — 종류를 고르고 ✅ 를 누르세요.\n"
-            "-# 정원을 안 고르면 무제한이에요. 그냥 바로 만들려면 위 패널의 방 버튼을 누르세요.",
-            view=_OptionsView(self.engine, self.room_kinds),
+            "⚙️ **정해서 만들기** — 정원·마이크를 정하고 ✅ 를 누르세요.\n" + hint,
+            view=_OptionsView(self.engine, self.room_kinds, preset_kind=self.preset),
             ephemeral=True,
         )
 
@@ -256,20 +295,28 @@ def _short_desc(cfg: dict) -> str:
     return name.replace(cfg["label"], "").strip() or name
 
 
-def panel_embed(room_kinds: dict) -> discord.Embed:
-    """패널 설명. 🚨 종류 목록을 **손으로 적지 않아요** — ROOM_KINDS에서 만들어요."""
-    lines = [f"{cfg['emoji']} **{cfg['label']}** — {_short_desc(cfg)}"
-             for cfg in room_kinds.values()]
-    embed = discord.Embed(
-        title="🔊 통화방 만들기",
-        description=(
-            "버튼을 누르면 **나만의 통화방**이 바로 열려요. 남이 들어오려면 "
-            "**초대**를 받거나 **입장 신청**을 해야 해요.\n\n"
-            + "\n".join(lines)
-            + "\n\n　└ 정원을 정하거나 **입장시 마이크 막기**를 쓰려면 ⚙️ 를 누르세요"
-            "\n　└ 방에 아무도 없으면 **자동으로 닫혀요**"
-        ),
-        color=0x5865F2,
-    )
+def panel_embed(room_kinds: dict, kinds: list[str] | None = None) -> discord.Embed:
+    """패널 설명. 🚨 종류 목록을 **손으로 적지 않아요** — ROOM_KINDS에서 만들어요.
+
+    `kinds`를 주면 그 종류만 설명해요(채널별 패널). 종류가 하나면 제목도 그 방 이름이
+    돼요 — `#🥋폐관수련-모집`에 "통화방 만들기"라고만 떠 있으면 무슨 방인지 모르니까요."""
+    keys = [k for k in (kinds or room_kinds) if k in room_kinds]
+    lines = [f"{room_kinds[k]['emoji']} **{room_kinds[k]['label']}** — "
+             f"{_short_desc(room_kinds[k])}" for k in keys]
+    single = room_kinds[keys[0]] if len(keys) == 1 else None
+
+    title = (f"{single['emoji']} {single['label']} 만들기" if single
+             else "🔊 통화방 만들기")
+    head = (f"버튼을 누르면 **나만의 {single['label']}**이 바로 열려요."
+            if single else "버튼을 누르면 **나만의 통화방**이 바로 열려요.")
+    body = head + " 남이 들어오려면 **초대**를 받거나 **입장 신청**을 해야 해요.\n\n"
+    # 종류가 하나면 줄줄이 늘어놓을 게 없어요(제목이 이미 말해줘요).
+    if not single:
+        body += "\n".join(lines) + "\n\n"
+    body += ("　└ 정원을 정하거나 **입장시 마이크 막기**를 쓰려면 ⚙️ 를 누르세요\n"
+             "　└ 방에 아무도 없으면 **자동으로 닫혀요**\n"
+             "　└ 👥 초대 · 🙋 신청 · 👑 방장 넘기기는 **사람 고르는 목록**이 떠요")
+
+    embed = discord.Embed(title=title, description=body, color=0x5865F2)
     embed.set_footer(text="누른 사람에게만 보이는 답이 떠요 · 명령어로도 돼요 (/방만들기)")
     return embed

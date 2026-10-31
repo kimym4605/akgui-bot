@@ -141,8 +141,20 @@ class Room(commands.Cog):
         name="방패널",
         description="[서버 소유자 전용] 이 채널에 통화방 패널을 박아둬요 (항상 떠 있어요).",
     )
-    async def panel(self, interaction: discord.Interaction):
+    @app_commands.describe(종류="이 채널에 보여줄 방 종류 (안 고르면 전부)")
+    @app_commands.choices(
+        종류=[app_commands.Choice(name=cfg["choice_name"], value=key)
+            for key, cfg in ROOM_KINDS.items()]
+    )
+    async def panel(
+        self, interaction: discord.Interaction,
+        종류: app_commands.Choice[str] | None = None,
+    ):
         """🔊 상설 패널을 **지금 이 채널에** 올려요. (🎣 `/낚시패널`·🎴 `/카드패널`과 같은 방식)
+
+        ⭐ `종류`를 고르면 **그 방 버튼만** 올라가요 — 모집 채널별로 나눠 박으려고
+           만든 옵션이에요(사용자 지시: "방만들기 기능은 각 방에 나누는게 좋을 것 같다").
+           관리 버튼(초대·신청·넘기기·닫기)은 **어느 패널에나** 들어가요.
 
         ⚠️ `/채널설정`을 쓰지 않아요 — 이건 "명령어를 어디서 쓸 수 있나"가 아니라
            **메시지를 한 번 박는** 일이에요. 옮기려면 옛 메시지를 지우고 다시 치면 돼요.
@@ -160,15 +172,18 @@ class Room(commands.Cog):
             )
             return
 
+        kinds = [종류.value] if 종류 else None
+        label = (f"{ROOM_KINDS[종류.value]['emoji']} {ROOM_KINDS[종류.value]['label']}"
+                 if 종류 else "🔊 통화방 전체")
         await interaction.response.send_message(
-            f"🔊 {channel.mention} 에 통화방 패널을 올렸어요.\n"
+            f"{channel.mention} 에 **{label}** 패널을 올렸어요.\n"
             "-# 메시지를 **고정(핀)** 해두면 새로 온 사람도 바로 찾아요. "
             "옮기려면 그 메시지를 지우고 다른 채널에서 다시 치면 돼요.",
             ephemeral=True,
         )
-        await channel.send(embed=panel_embed(ROOM_KINDS),
-                           view=RoomPanelView(self.engine, ROOM_KINDS))
-        log.info("🔊 통화방 패널 게시: 채널 %s", channel.id)
+        await channel.send(embed=panel_embed(ROOM_KINDS, kinds),
+                           view=RoomPanelView(self.engine, ROOM_KINDS, kinds))
+        log.info("🔊 통화방 패널 게시: 채널 %s · 종류 %s", channel.id, kinds or "전부")
 
     @commands.Cog.listener()
     async def on_voice_state_update(
