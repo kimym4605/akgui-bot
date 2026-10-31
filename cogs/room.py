@@ -141,14 +141,18 @@ class Room(commands.Cog):
         name="방패널",
         description="[서버 소유자 전용] 이 채널에 통화방 패널을 박아둬요 (항상 떠 있어요).",
     )
-    @app_commands.describe(종류="이 채널에 보여줄 방 종류 (안 고르면 전부)")
+    @app_commands.describe(종류="이 채널에 보여줄 방 종류 (안 고르면 전부)",
+                           종류2="한 채널에 두 종류를 같이 올릴 때")
     @app_commands.choices(
         종류=[app_commands.Choice(name=cfg["choice_name"], value=key)
-            for key, cfg in ROOM_KINDS.items()]
+            for key, cfg in ROOM_KINDS.items()],
+        종류2=[app_commands.Choice(name=cfg["choice_name"], value=key)
+             for key, cfg in ROOM_KINDS.items()],
     )
     async def panel(
         self, interaction: discord.Interaction,
         종류: app_commands.Choice[str] | None = None,
+        종류2: app_commands.Choice[str] | None = None,
     ):
         """🔊 상설 패널을 **지금 이 채널에** 올려요. (🎣 `/낚시패널`·🎴 `/카드패널`과 같은 방식)
 
@@ -172,9 +176,21 @@ class Room(commands.Cog):
             )
             return
 
-        kinds = [종류.value] if 종류 else None
-        label = (f"{ROOM_KINDS[종류.value]['emoji']} {ROOM_KINDS[종류.value]['label']}"
-                 if 종류 else "🔊 통화방 전체")
+        # ⭐ 2026-11-01: `종류2`를 더했어요. 🏆프리미어방이 45일간 **방 생성 122건 중
+        #    0건**이고 37개 채널을 훑어도 사람이 "프리미어"를 쓴 글이 0건이라, 전용
+        #    채널을 지우고 **사람이 몰리는 랭크 채널 패널에 버튼만 얹기로** 했어요
+        #    (사용자 결정). 기능은 남으니 프리미어 시즌이 오면 바로 쓸 수 있어요.
+        #
+        # 🚨 패널을 손으로 짜서 REST로 박지 않아요. `panel_embed`가 `ROOM_KINDS`에서
+        #    글을 만드니 코드를 고치면 패널도 따라오지만, 손으로 박으면 그 자리에서
+        #    **안내문이 갈려요**([[feedback_sync_discord_guides_after_deploy]]).
+        # 같은 걸 두 번 고르면 버튼이 두 개 생겨요 — 순서는 지키면서 중복만 빼요.
+        # 🚨 한 줄로 둬요. `picked`를 거쳐가면 `kinds =` 한 줄에 `종류`가 안 보여서
+        #    "kinds를 종류에서 만든다"를 지키는 검사가 깨져요(test_room_panel [8]).
+        kinds = list(dict.fromkeys(c.value for c in (종류, 종류2) if c)) or None
+        label = (" + ".join(f"{ROOM_KINDS[k]['emoji']} {ROOM_KINDS[k]['label']}"
+                            for k in kinds)
+                 if kinds else "🔊 통화방 전체")
         await interaction.response.send_message(
             f"{channel.mention} 에 **{label}** 패널을 올렸어요.\n"
             "-# 메시지를 **고정(핀)** 해두면 새로 온 사람도 바로 찾아요. "

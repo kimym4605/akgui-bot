@@ -178,12 +178,27 @@ class RoomPanelView(discord.ui.View):
 
     | 모집 채널 | 보여줄 종류 |
     |---|---|
-    | `#🏆｜랭크-파티구인` | 🔒 랭크방 |
+    | `#🏆｜랭크-파티구인` | 🔒 랭크방 + 🏆 프리미어방 |
     | `#🥋｜폐관수련-모집` | 🥋 폐관수련방 |
     | `#📣｜내전모집` | ⚔️ 내전방 |
-    | `#🏆｜프리미어-모집` | 🏆 프리미어방 |
 
     `kinds=None`이면 **전부** 보여줘요(한 곳에 다 모으고 싶을 때).
+
+    ## 🏆 프리미어방은 왜 전용 채널이 없나 (2026-11-01)
+
+    10-31에 `#🏆｜프리미어-모집`을 만들었다가 **하루 만에 지웠어요.** 실측이:
+
+    - 45일간 방 생성 **122건 중 프리미어 0건**
+    - 텍스트 채널 **37개 전수 조사에서 사람이 "프리미어"를 쓴 글 0건**
+      (유일한 1건은 서버 주인이 올린 봇 패치노트였어요)
+    - 전용 채널·고정 패널을 깐 뒤 14시간도 사람 글 0건
+
+    🚨 이건 🎣낚시·🪙상점의 "0건 = 명령어가 문턱"과 **다른 경우**예요. 거기는
+       수요 증거가 있었어요(구매력 21명, 채널 로그에 적힌 요청글). 여기는 **수요
+       신호 자체가 0**이에요 — 문턱을 더 낮춰도 나올 게 없어요.
+
+    그래서 **기능은 남기고 자리만 옮겼어요**(사용자 결정). 사람이 몰리는 랭크 채널
+    패널에 버튼으로 얹어서, 프리미어 시즌이 오면 바로 쓸 수 있게 해뒀어요.
 
     🚨 **관리 버튼(초대·신청·넘기기·닫기)은 어느 패널에나 들어가요.** 자기 방을
        관리하는 일은 방 종류와 무관해서, 랭크방을 연 사람이 폐관수련 채널에서 눌러도
@@ -199,7 +214,11 @@ class RoomPanelView(discord.ui.View):
         self.room_kinds = room_kinds
         # 🚨 `kinds`에 없는 키가 들어오면 조용히 버리지 말고 걸러요 — 오타가 그대로
         #    "버튼이 없는 패널"로 배포되면 눈치채기 어려워요.
-        self.kinds = [k for k in (kinds or room_kinds) if k in room_kinds]
+        # 🚨 중복도 **여기서** 걷어요. 그리는 쪽이 여기라서, 부르는 쪽만 막으면
+        #    다른 호출자가 같은 종류를 두 번 넘길 때 **똑같은 버튼이 두 개** 생겨요
+        #    (custom_id가 겹쳐서 영속 뷰 등록까지 꼬여요).
+        self.kinds = list(dict.fromkeys(
+            k for k in (kinds or room_kinds) if k in room_kinds))
         self.preset = self.kinds[0] if len(self.kinds) == 1 else None
 
         # 종류 버튼은 **ROOM_KINDS에서 만들어요.** 손으로 늘어놓으면 종류를
@@ -300,7 +319,7 @@ def panel_embed(room_kinds: dict, kinds: list[str] | None = None) -> discord.Emb
 
     `kinds`를 주면 그 종류만 설명해요(채널별 패널). 종류가 하나면 제목도 그 방 이름이
     돼요 — `#🥋폐관수련-모집`에 "통화방 만들기"라고만 떠 있으면 무슨 방인지 모르니까요."""
-    keys = [k for k in (kinds or room_kinds) if k in room_kinds]
+    keys = list(dict.fromkeys(k for k in (kinds or room_kinds) if k in room_kinds))
     lines = [f"{room_kinds[k]['emoji']} **{room_kinds[k]['label']}** — "
              f"{_short_desc(room_kinds[k])}" for k in keys]
     single = room_kinds[keys[0]] if len(keys) == 1 else None

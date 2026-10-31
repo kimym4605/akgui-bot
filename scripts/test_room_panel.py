@@ -256,6 +256,71 @@ if panel_cmd:
     check(0 <= i_guard < i_send, "소유자 검사가 게시보다 **앞에** 있다",
           f"guard={i_guard} send={i_send}")
 
+# 🚨 새 섹션은 **반드시 이 요약 블록보다 위에.** 아래에 붙이면 FAIL이 찍혀도
+#    sys.exit(1)을 이미 지나쳐서 **종료코드가 0**이 돼요(10-31에 당했어요).
+print("\n[10] 🚨 한 채널에 **두 종류**를 같이 올릴 수 있다 (🏆프리미어 합치기)")
+# 🏆프리미어방은 45일간 방 생성 122건 중 0건이고 사람이 "프리미어"를 쓴 글도 0건이라
+# 전용 채널을 지우고 **랭크 채널 패널에 버튼만 얹었어요**(2026-11-01 사용자 결정).
+two = room_panel.RoomPanelView(engine, ROOM_KINDS, ["rank", "premier"])
+creates = [it for it in two.children
+           if getattr(it, "custom_id", "").startswith("akgui:room:new:")]
+check(len(creates) == 2, f"만들기 버튼이 2개 ({len(creates)}개)")
+check({it.custom_id for it in creates} ==
+      {"akgui:room:new:rank", "akgui:room:new:premier"},
+      "랭크·프리미어 버튼이 맞게 들어갔다",
+      str(sorted(it.custom_id for it in creates)))
+# 🚨 `row`는 안 박으면 None이에요 — 실제 배치는 직렬화할 때 계산돼요.
+comp = two.to_components()
+check(all(len(r.get("components", [])) <= 5 for r in comp),
+      f"줄마다 5개 한도 안 ({[len(r.get('components', [])) for r in comp]})")
+check(len(comp) <= 5, f"5줄 한도 안 ({len(comp)}줄)")
+# 관리 버튼(초대·신청·넘기기·닫기)은 그대로 있어야 해요
+for cid in ("akgui:room:options", "akgui:room:invite", "akgui:room:request",
+            "akgui:room:transfer", "akgui:room:close"):
+    check(any(getattr(it, "custom_id", "") == cid for it in two.children),
+          f"관리 버튼 {cid} 가 남아있다")
+# 종류가 둘이면 ⚙️가 종류를 **물어봐야** 해요(하나일 때만 미리 넣어줘요)
+check(two.preset is None, "두 종류면 preset이 없다 (⚙️가 종류를 물어본다)")
+check(room_panel.RoomPanelView(engine, ROOM_KINDS, ["rank"]).preset == "rank",
+      "한 종류면 preset이 그 종류다")
+# 임베드도 두 종류를 **둘 다** 설명해야 해요
+emb = room_panel.panel_embed(ROOM_KINDS, ["rank", "premier"])
+body = emb.description or ""
+for k in ("rank", "premier"):
+    check(ROOM_KINDS[k]["label"] in body,
+          f"임베드가 {ROOM_KINDS[k]['label']}을 설명한다")
+check(ROOM_KINDS["scrim"]["label"] not in body,
+      "안 고른 ⚔️내전방은 설명에 없다 (사용자가 따로 두라고 했어요)")
+# 🚨 같은 걸 두 번 고르면 버튼이 두 개 생기면 안 돼요
+dup = room_panel.RoomPanelView(engine, ROOM_KINDS, ["rank", "rank"])
+check(len([it for it in dup.children
+           if getattr(it, "custom_id", "").startswith("akgui:room:new:")]) == 1,
+      "같은 종류를 두 번 줘도 버튼은 1개")
+# 명령어 쪽도 중복을 거르는지 (dict.fromkeys)
+room_src_2 = open(os.path.join(BOT_DIR, "cogs", "room.py"), encoding="utf-8").read()
+panel_txt = ast.unparse(next(n for n in ast.walk(ast.parse(room_src_2))
+                             if isinstance(n, ast.AsyncFunctionDef)
+                             and n.name == "panel"))
+check("종류2" in panel_txt, "/방패널이 `종류2`를 받는다")
+check("fromkeys" in panel_txt, "중복을 거른다 (dict.fromkeys)")
+
+# 🚨 **파라미터마다** choices가 붙어야 해요. "choices 데코레이터가 있나"만 보면
+#    `종류2`에서 빼먹은 걸 못 잡아요(역방향 확인 D에서 드러났어요). 선택지가 없으면
+#    디스코드가 **자유 입력**으로 받아서, 오타가 조용히 "버튼 없는 패널"이 돼요.
+#    숫자나 이름을 박지 않으니 `종류3`을 더해도 자동으로 검사 대상이 돼요.
+_panel_fn = next(n for n in ast.walk(ast.parse(room_src_2))
+                 if isinstance(n, ast.AsyncFunctionDef) and n.name == "panel")
+_params = [a.arg for a in _panel_fn.args.args
+           if a.arg not in ("self", "interaction")]
+_choice_kw = set()
+for _d in _panel_fn.decorator_list:
+    if isinstance(_d, ast.Call) and ast.unparse(_d.func).endswith("choices"):
+        _choice_kw |= {k.arg for k in _d.keywords if k.arg}
+check(bool(_params), f"방패널 파라미터를 찾았다: {_params}")
+for _p in _params:
+    check(_p in _choice_kw, f"`{_p}` 가 선택지(choices)로 받는다",
+          f"choices에 있는 것: {sorted(_choice_kw)}")
+
 print("\n" + "=" * 50)
 print(f"통과 {len(passed)} · 실패 {len(failed)}")
 if failed:
