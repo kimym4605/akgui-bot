@@ -20,11 +20,15 @@ TARGET_COGS = ["attendance", "achievement", "team", "rank", "betting", "mission"
                "card_gacha", "card_market", "fishing", "assistant", "ops_report", "weekly_mvp", "suggestion", "voice_rank", "events", "attend_remind", "fishing_contest",
                # 🚨 2026-10-27까지 **여기 빠져 있었어요.** `bot.py`에는 올라가 있는데
                #    이 관문만 안 보고 있었어요(🪙 상설 패널을 붙이다 드러났어요).
-               "akgui_shop"]
+               "akgui_shop",
+               # 🚨 `room`도 2026-10-31까지 **같은 이유로 빠져 있었어요**(🔊 방 패널을
+               #    붙이다 또 드러났어요). 패널을 달 때마다 이 구멍이 드러나는 중이에요 —
+               #    **새 cog를 만들면 `bot.py`와 여기 둘 다** 넣어주세요.
+               "room"]
 NEW_COMMANDS = {"프로필", "업적", "내전전적", "주간랭킹", "내전시즌", "팀짜기", "팀보기",
                 "카드뽑기", "도감", "카드확률", "카드거래", "거래함", "낚시", "어항", "물고기판매", "낚시왕",
                 "낚시확률", "도움", "서버리포트", "주간mvp", "건의", "건의처리", "건의목록", "음성레벨", "음성랭킹", "일정", "일정목록", "낚시대회",
-                "상점패널", "낚시패널", "카드패널", "카드합성",
+                "상점패널", "낚시패널", "카드패널", "카드합성", "방패널",
                 # 🚨 슬래시가 아니라 **메시지 우클릭 메뉴**예요(`app_commands.ContextMenu`).
                 #    `cog_load`에서 `bot.tree.add_command`를 빼먹으면 조용히 사라져요.
                 "건의로 등록"}

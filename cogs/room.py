@@ -18,6 +18,7 @@ from discord.ext import commands
 from utils import room_store
 from utils.channel_check import restrict_to_channel
 from utils.dynamic_room import DynamicRoomEngine, SpeakGrantButton
+from utils.room_panel import RoomPanelView, panel_embed
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +85,11 @@ class Room(commands.Cog):
         self.bot = bot
         self.engine = DynamicRoomEngine(bot, ROOM_KINDS)
 
+    async def cog_load(self):
+        # 🚨 이게 없으면 재시작 뒤 패널 버튼을 눌러도 봇이 custom_id를 알아보지
+        #    못해서 **아무 반응이 없어요**(에러도 안 나요).
+        self.bot.add_view(RoomPanelView(self.engine, ROOM_KINDS))
+
     @commands.Cog.listener()
     async def on_ready(self):
         _migrate_legacy_stores()
@@ -130,6 +136,39 @@ class Room(commands.Cog):
     @restrict_to_channel("room")
     async def close_room(self, interaction: discord.Interaction):
         await self.engine.close_room(interaction)
+
+    @app_commands.command(
+        name="방패널",
+        description="[서버 소유자 전용] 이 채널에 통화방 패널을 박아둬요 (항상 떠 있어요).",
+    )
+    async def panel(self, interaction: discord.Interaction):
+        """🔊 상설 패널을 **지금 이 채널에** 올려요. (🎣 `/낚시패널`·🎴 `/카드패널`과 같은 방식)
+
+        ⚠️ `/채널설정`을 쓰지 않아요 — 이건 "명령어를 어디서 쓸 수 있나"가 아니라
+           **메시지를 한 번 박는** 일이에요. 옮기려면 옛 메시지를 지우고 다시 치면 돼요.
+        📌 올린 뒤 **고정(핀)** 해두면 새로 온 사람도 바로 찾아요."""
+        if interaction.guild is None or interaction.user.id != interaction.guild.owner_id:
+            await interaction.response.send_message(
+                "이 명령어는 서버 소유자만 쓸 수 있어요.", ephemeral=True
+            )
+            return
+
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "텍스트 채널에서 써주세요.", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            f"🔊 {channel.mention} 에 통화방 패널을 올렸어요.\n"
+            "-# 메시지를 **고정(핀)** 해두면 새로 온 사람도 바로 찾아요. "
+            "옮기려면 그 메시지를 지우고 다른 채널에서 다시 치면 돼요.",
+            ephemeral=True,
+        )
+        await channel.send(embed=panel_embed(ROOM_KINDS),
+                           view=RoomPanelView(self.engine, ROOM_KINDS))
+        log.info("🔊 통화방 패널 게시: 채널 %s", channel.id)
 
     @commands.Cog.listener()
     async def on_voice_state_update(
