@@ -25,11 +25,14 @@
 
 `/팀보기`는 그 서버의 **가장 최근 세션**을 보여줘요(`latest_for_guild`).
 """
+import logging
 import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from utils import atomic_json, team_balance
+
+log = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 FILE_PATH = DATA_DIR / "team_sessions.json"
@@ -135,6 +138,7 @@ def save_session(
     series_target: int = 1,
     wins: tuple[int, int] = (0, 0),
     match_ids: list[str] | None = None,
+    rotated: bool = False,
 ) -> None:
     """그 메시지의 지금 상태를 저장해요(있으면 덮어써요).
 
@@ -148,7 +152,17 @@ def save_session(
 
     🚨 **`series_target`이 1이면 지금까지와 완전히 같게 동작해야 해요** — 기존 세션
     기록엔 이 필드가 없어서 `get_session`이 돌려준 dict에도 없어요. 읽는 쪽에서
-    기본값 1·(0,0)로 받아야 옛 메시지의 버튼이 안 죽어요."""
+    기본값 1·(0,0)로 받아야 옛 메시지의 버튼이 안 죽어요.
+
+    ## 🔁 같은 팀 반복 피하기 (2026-11-01)
+
+    `rotated`는 **최근에 같은 팀이던 조합을 피하려고 최적 편성을 양보했는지**예요.
+    화면이 "이 인원에선 이게 가장 균형 잡힌 편성이에요"라고 거짓말하지 않으려고
+    같이 저장해요(버튼을 눌러 다시 그릴 때도 같은 문구가 나와야 해요).
+
+    ⚠️ 쌍 이력(`team_history`)은 **여기서** 남겨요 — 호출부마다 붙이면 언젠가 한 곳을
+    빼먹어요. 이력 저장이 깨져도 세션 저장은 계속돼야 하니 예외를 삼켜요
+    (이력이 없으면 회전만 안 되고, 세션이 안 저장되면 **버튼이 죽어요**)."""
     data = _load_all()
     data[str(message_id)] = {
         "saved_at": datetime.now(KST).isoformat(timespec="seconds"),
@@ -171,6 +185,8 @@ def save_session(
         "series_target": int(series_target or 1),
         "wins": [int(wins[0]), int(wins[1])],
         "match_ids": list(match_ids or []),
+        # 🔁 최근에 같은 팀이던 조합을 피해 최적 편성을 양보했는지
+        "rotated": bool(rotated),
         "players": [player_to_dict(p) for p in players],
         "teams": [
             [player_to_dict(p) for p in team_a],
@@ -178,6 +194,13 @@ def save_session(
         ],
     }
     _save_all(_pruned(data))
+
+    # 🔁 쌍 이력은 세션을 저장한 **뒤에** 남겨요. 이력 쪽이 터져도 버튼은 살아 있어야 해요.
+    try:
+        from utils import team_history   # 순환 임포트를 피하려고 여기서 들여와요
+        team_history.remember(message_id, guild_id, team_a, team_b)
+    except Exception:
+        log.warning("팀 쌍 이력 저장 실패 (message=%s)", message_id, exc_info=True)
 
 
 def get_session(message_id: int) -> dict | None:

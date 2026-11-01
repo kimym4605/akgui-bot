@@ -33,6 +33,24 @@ FALLBACK_TIER_INDEX = 9
 # 이 인원까지는 모든 조합을 다 따져서 최적해를 보장해요. C(14,7)=3432개라 순식간이에요.
 EXHAUSTIVE_LIMIT = 14
 
+# 이 차이 미만이면 "균형이 잘 맞는다"고 봐요(티어 단계 기준). `cogs/team.py`의 화면 표시와
+# 아래 회전 허용 범위가 **같은 기준**을 써야 해서 여기 한 곳에 뒀어요.
+GOOD_BALANCE = 0.5
+
+# ------------------------------------------------------------------ 🔁 같은 팀 반복 피하기
+# 2026-10-31에 `#📣｜내전모집`에서 나온 불만이 출발점이에요:
+#   *"너무 밸런스만 보고 팀을 구성하니까 맨날 똑같은 팀이야"*
+#   *"나 지금 내전 하면서 재호랑 한번도 같은팀 된적이 없어"*
+# 원인은 아래 `balanced_splits`가 **동률만** 섞었던 거예요. 점수가 실수라 동률이 거의
+# 안 나와서 같은 명단이면 결과가 매번 똑같이 재현됐어요.
+#
+# 그래서 "차이가 이만큼까지는 같은 급으로 본다"는 폭을 두고, 그 안에서 **최근에 같은
+# 팀이었던 조합을 피하는** 편성을 고르게 했어요.
+PAIR_TOLERANCE = 0.35
+# 🚨 **허용 폭은 "균형이 잘 맞아요" 범위를 넘지 않아요** (`rotation_cutoff`). 안 막으면
+#    이미 기울어진 명단(가장 좋은 편성도 0.6단계)에서 0.95단계까지 벌어져요 — 섞으려다
+#    내전을 망쳐요. 그 경우엔 회전을 **아예 끄고**(= 동률만 섞던 옛 동작) 균형을 지켜요.
+
 
 @dataclass
 class Rated:
@@ -114,6 +132,39 @@ def imbalance(team_a: list[Rated], team_b: list[Rated]) -> float:
     return _imbalance(team_a, team_b)
 
 
+def rotation_cutoff(best_diff: float) -> float:
+    """회전(같은 팀 반복 피하기)에 쓸 수 있는 편성의 실력 차이 상한.
+
+    - 가장 좋은 편성이 0.05단계면 → 0.40단계까지 같은 급으로 봐요(섞을 여지가 넉넉해요).
+    - 0.30단계면 → 0.50단계까지만(= `GOOD_BALANCE`에서 멈춰요).
+    - 0.60단계면 → 0.60단계. 더 못 늘려서 **회전이 꺼져요**(옛 동작과 같아요).
+    """
+    return min(best_diff + PAIR_TOLERANCE, max(GOOD_BALANCE, best_diff))
+
+
+def repeat_cost(
+    team_a: list[Rated], team_b: list[Rated], pair_weights: dict[str, float] | None
+) -> float:
+    """이 편성이 "최근에 같은 팀이던 조합"을 얼마나 되풀이하는지. 작을수록 새로워요.
+
+    같은 팀 안의 **모든 두 사람 쌍**의 무게를 더해요. 무게는
+    `team_history.pair_weights()`가 만들고, 최근 편성일수록 큰 값이에요.
+    이력이 없으면(= 무게가 비면) 전부 0이라 **옛 동작과 완전히 같아져요.**
+
+    🚨 쌍 키는 `team_history.pair_key()`와 **같은 규칙**이어야 해요. 여기선 디스코드에
+    의존하지 않으려고 그 함수를 부르지 않고 같은 식(정렬한 문자열 id를 `|`로 이음)을
+    직접 써요 — 한쪽을 바꾸면 **조용히 비용이 전부 0이 돼요**(테스트가 이 둘을 맞춰봐요).
+    """
+    if not pair_weights:
+        return 0.0
+    total = 0.0
+    for team in (team_a, team_b):
+        ids = sorted(str(p.key) for p in team)
+        for left, right in combinations(ids, 2):
+            total += pair_weights.get(f"{left}|{right}", 0.0)
+    return total
+
+
 def _exhaustive_candidates(players: list[Rated]) -> list[tuple[float, list[int], list[int]]]:
     """모든 편성을 다 따져서 (차이, A인덱스, B인덱스) 목록을 만들어요.
 
@@ -192,37 +243,80 @@ def _greedy_candidates(
     return unique
 
 
-def balanced_splits(
-    players: list[Rated], limit: int = 10
-) -> list[tuple[list[Rated], list[Rated], float]]:
-    """실력 차이가 작은 편성을 좋은 순서대로 최대 `limit`개 돌려줘요.
+def rotated_splits(
+    players: list[Rated],
+    limit: int = 10,
+    *,
+    pair_weights: dict[str, float] | None = None,
+) -> tuple[list[tuple[list[Rated], list[Rated], float]], float | None]:
+    """`(편성 목록, 가장 균형 잡힌 편성의 차이)`를 돌려줘요.
 
-    맨 앞이 가장 균형 잡힌 편성이고, 뒤쪽은 '다시 섞기'에 쓸 차선책이에요.
-    차이가 완전히 같은 편성들은 매번 다른 게 먼저 나오도록 섞어줘요."""
+    편성 목록의 맨 앞이 **고른 편성**이고, 뒤쪽은 🔄 다시 섞기에 쓸 차선책이에요.
+    두 번째 값(`best_diff`)이 있으면 "고른 편성이 최적보다 얼마나 양보했는지"를
+    부르는 쪽에서 알 수 있어요 — 화면에 **"가장 균형 잡힌 편성"이라고 거짓말하지
+    않으려고** 필요해요.
+
+    ## 고르는 순서
+
+    1. 모든 편성의 실력 차이를 구해요(인원이 많으면 근사).
+    2. `rotation_cutoff(best)` 안에 드는 편성들을 **같은 급**으로 봐요.
+    3. 그 안에서 `repeat_cost`(최근에 같은 팀이던 조합의 무게)가 **작은** 쪽을 먼저 둬요.
+       비용까지 같으면 섞어서 매번 다른 게 먼저 나오게 해요.
+    4. 같은 급을 벗어난 편성은 옛날처럼 차이 오름차순으로 뒤에 붙여요(차선책용).
+
+    🚨 `pair_weights`가 비면 2~3단계가 전부 0이라 **옛 동작과 완전히 같아요.**
+       이력이 없는 서버·첫 사용에서 동작이 바뀌면 안 돼요."""
     if len(players) < 2:
-        return []
+        return [], None
     candidates = (
         _exhaustive_candidates(players)
         if len(players) <= EXHAUSTIVE_LIMIT
         else _greedy_candidates(players)
     )
-    # 차이가 동률인 묶음 안에서만 순서를 섞어요(더 균형 잡힌 편성이 뒤로 밀리지 않게).
+    if not candidates:
+        return [], None
+    best_diff = min(diff for diff, _a, _b in candidates)
+    cutoff = rotation_cutoff(best_diff) + 1e-9
+
+    def _rows(subset):
+        return [
+            ([players[i] for i in a_index], [players[i] for i in b_index], diff)
+            for diff, a_index, b_index in subset
+        ]
+
+    eligible = [row for row in candidates if row[0] <= cutoff]
+    rest = [row for row in candidates if row[0] > cutoff]
+
+    # 같은 급 안에서는 (반복 비용 → 실력 차이) 순서로 고르고, 둘 다 같으면 무작위예요.
+    # 🚨 비용을 먼저 봐야 회전이 일어나요. 차이를 먼저 보면 옛 동작으로 되돌아가요.
+    scored = []
+    for diff, a_index, b_index in eligible:
+        team_a = [players[i] for i in a_index]
+        team_b = [players[i] for i in b_index]
+        cost = repeat_cost(team_a, team_b, pair_weights)
+        scored.append((round(cost, 6), round(diff, 6), random.random(), team_a, team_b, diff))
+    scored.sort(key=lambda row: (row[0], row[1], row[2]))
+    output = [(team_a, team_b, diff) for _c, _d, _r, team_a, team_b, diff in scored]
+
+    # 같은 급을 벗어난 차선책은 예전 규칙 그대로(차이 오름차순 · 동률끼리 섞기).
     grouped: dict[float, list[tuple[list[int], list[int]]]] = {}
-    for diff, a_index, b_index in candidates:
+    for diff, a_index, b_index in rest:
         grouped.setdefault(round(diff, 6), []).append((a_index, b_index))
-    output = []
     for diff in sorted(grouped):
         bucket = grouped[diff]
         random.shuffle(bucket)
-        for a_index, b_index in bucket:
-            output.append((
-                [players[i] for i in a_index],
-                [players[i] for i in b_index],
-                diff,
-            ))
-            if len(output) >= limit:
-                return output
-    return output
+        output.extend(_rows([(diff, a_index, b_index) for a_index, b_index in bucket]))
+
+    return output[:limit], best_diff
+
+
+def balanced_splits(
+    players: list[Rated], limit: int = 10, *, pair_weights: dict[str, float] | None = None
+) -> list[tuple[list[Rated], list[Rated], float]]:
+    """실력 차이가 작은 편성을 좋은 순서대로 최대 `limit`개 돌려줘요.
+
+    `rotated_splits`의 편성 목록만 떼어낸 거예요(최적 차이가 필요 없는 호출부용)."""
+    return rotated_splits(players, limit, pair_weights=pair_weights)[0]
 
 
 def random_split(players: list[Rated]) -> tuple[list[Rated], list[Rated], float]:

@@ -58,6 +58,7 @@ from utils import (
     scrim_record_store,
     scrim_stats_fetch,
     team_balance,
+    team_history,
     team_store,
     tier_roles,
     valorant_maps,
@@ -77,7 +78,9 @@ MANUAL_TIMEOUT = 180
 # 드롭다운 하나에 담을 수 있는 최대 항목 수(디스코드 제한).
 SELECT_LIMIT = 25
 # 이 차이 미만이면 "균형이 잘 맞는다"고 표시해요. (티어 단계 기준)
-GOOD_BALANCE = 0.5
+# ⚠️ 정의는 `team_balance`에 있어요 — 거기서 **같은 팀 반복 피하기의 허용 폭**을 재는 데
+#    쓰이거든요. 두 곳에 숫자를 따로 두면 한쪽만 바꿔서 조용히 어긋나요.
+GOOD_BALANCE = team_balance.GOOD_BALANCE
 # 경기 기록(KDA)을 못 찾았을 때 다시 시도하기까지 기다리는 시간이에요.
 # 경기가 라이엇 전적에 올라오는 데 시간이 걸려요. 상호작용 토큰이 15분이라 그보다 짧게 둬요.
 STATS_RETRY_SECONDS = 150
@@ -152,6 +155,30 @@ def _find_by_name(guild: discord.Guild, name: str) -> discord.Member | None:
         if member.display_name.lower() == lowered or member.name.lower() == lowered:
             return member
     return None
+
+
+def _pair_weights(guild_id, *, exclude_message_id=None) -> dict[str, float]:
+    """🔁 최근에 같은 팀이던 쌍의 무게. 이력을 못 읽으면 **빈 dict**를 돌려줘요.
+
+    ⚠️ 빈 dict면 `rotated_splits`가 옛 동작(최적 편성 1등)으로 돌아가요 — 이력이 깨졌을 때
+    `/팀짜기`가 아예 안 되는 것보다 훨씬 낫습니다."""
+    if guild_id is None:
+        return {}
+    try:
+        return team_history.pair_weights(guild_id, exclude_message_id=exclude_message_id)
+    except Exception:
+        log.warning("팀 쌍 이력을 읽지 못했어요 (guild=%s)", guild_id, exc_info=True)
+        return {}
+
+
+def _is_rotated(diff: float | None, best_diff: float | None) -> bool:
+    """고른 편성이 **최적 편성을 양보한 것**인지. 화면 문구가 이 값으로 갈려요.
+
+    🚨 `>=`가 아니라 `>`에 오차를 둬요. 부동소수 비교라 같은 값인데도 True가 되면
+    이력이 없는 서버에서도 "반복을 피해 섞었어요"가 떠요(= 거짓말)."""
+    if diff is None or best_diff is None:
+        return False
+    return diff > best_diff + 1e-9
 
 
 def _collect_players(members: list[discord.Member]) -> list[team_balance.Rated]:
@@ -240,6 +267,7 @@ def _build_embed(
     map_name: str | None = None,
     series_target: int = 1,
     wins: list[int] | tuple[int, int] = (0, 0),
+    rotated: bool = False,
 ) -> discord.Embed:
     # mode는 이 편성을 어떻게 만들었는지예요(team_store의 MODE_* 값).
     # MANUAL은 '🔀 직접 조정'으로 손을 본 편성이에요. 이때도 점수와 실력 차이는 보여줘요 -
@@ -274,13 +302,22 @@ def _build_embed(
     )
 
     if balanced and diff is not None:
-        if diff < GOOD_BALANCE:
+        # 🚨 `rotated`를 **맨 먼저** 봐요. 같은 팀 반복을 피하려고 최적 편성을 양보한
+        #    경우엔 "가장 균형 잡힌 편성"이라고 쓰면 거짓말이 돼요(2026-11-01).
+        if rotated and not manual:
+            verdict = "최근에 같은 팀이던 조합을 피해 섞었어요"
+        elif diff < GOOD_BALANCE:
             verdict = "균형이 잘 맞아요"
         elif manual:
             verdict = "직접 맞춘 편성이에요"
         else:
             verdict = "이 인원에선 이게 가장 균형 잡힌 편성이에요"
         value = f"약 **{diff:.2f}단계** — {verdict}"
+        if rotated and not manual:
+            value += (
+                f"\n-# 균형은 가장 좋은 편성보다 최대 "
+                f"{team_balance.PAIR_TOLERANCE:.2f}단계까지만 양보해요."
+            )
         if manual:
             # 손으로 바꿔놓고 다시 섞기를 누르면 날아가서, 미리 알려줘요.
             value += "\n-# 🔄 다시 섞기를 누르면 직접 조정한 편성은 사라져요."
@@ -405,6 +442,9 @@ class Session:
         raw_wins = (raw_wins + [0, 0])[:2]
         self.wins = [int(raw_wins[0] or 0), int(raw_wins[1] or 0)]
         self.match_ids = list(record.get("match_ids") or [])
+        # 🔁 같은 팀 반복을 피해 최적 편성을 양보했는지 (2026-11-01).
+        #    옛 기록엔 없는 필드라 **기본값 False**여야 해요.
+        self.rotated = bool(record.get("rotated"))
 
     @classmethod
     def load(cls, message_id: int) -> "Session | None":
@@ -431,6 +471,7 @@ class Session:
             series_target=self.series_target,
             wins=(self.wins[0], self.wins[1]),
             match_ids=self.match_ids,
+            rotated=self.rotated,
         )
 
     # ------------------------------------------------------------------
@@ -476,6 +517,7 @@ class Session:
             mode=self.mode, source_label=self.source_label,
             captains=self.captains, map_name=self.map_name,
             series_target=self.series_target, wins=self.wins,
+            rotated=self.rotated,
         )
 
     @property
@@ -574,6 +616,8 @@ class ManualAdjustView(discord.ui.View):
         session.team_a, session.team_b = new_a, new_b
         session.mode = team_store.MODE_MANUAL
         session.diff = diff
+        # 손으로 바꾼 편성은 "반복을 피해 섞은 것"이 아니에요 — 기록도 지워요.
+        session.rotated = False
         # 팀장이 반대편으로 넘어갔으면 그 자리는 비워요.
         session.captains = keep_valid_captains(new_a, new_b, session.captains)
         session.save()
@@ -984,14 +1028,20 @@ class TeamSplitView(discord.ui.View):
         session = await self._session(interaction)
         if session is None:
             return
-        # 후보 편성은 저장하지 않고 그때그때 다시 구해요(명단이 같으면 같은 후보가 나와요).
+        # 후보 편성은 저장하지 않고 그때그때 다시 구해요.
         # 지금 편성과 다른 걸 보여주려고, 첫 후보가 지금과 같으면 다음 걸 집어요.
-        candidates = team_balance.balanced_splits(session.players, limit=CANDIDATE_COUNT)
+        # 🚨 **지금 세션은 쌍 이력에서 빼요.** 안 빼면 방금 자기가 만든 편성을 피하려고
+        #    매번 멀쩡한 편성을 버려요(이력은 `save_session` 안에서 이미 남았어요).
+        weights = _pair_weights(session.guild_id, exclude_message_id=session.message_id)
+        candidates, best = team_balance.rotated_splits(
+            session.players, limit=CANDIDATE_COUNT, pair_weights=weights
+        )
         current_keys = {p.key for p in session.team_a}
         picked = next(
             (c for c in candidates if {p.key for p in c[0]} != current_keys), candidates[0]
         )
         session.team_a, session.team_b, session.diff = picked
+        session.rotated = _is_rotated(session.diff, best)
         session.mode = team_store.MODE_BALANCED
         # 편성이 통째로 바뀌니 팀장은 지워요(엉뚱한 팀의 팀장으로 남으면 안 돼요).
         session.captains = (None, None)
@@ -1008,6 +1058,8 @@ class TeamSplitView(discord.ui.View):
             return
         session.team_a, session.team_b, session.diff = team_balance.random_split(session.players)
         session.mode = team_store.MODE_RANDOM
+        # 완전 랜덤은 실력도 쌍 이력도 안 봐요 — "반복을 피했다"고 쓰면 안 돼요.
+        session.rotated = False
         session.captains = (None, None)
         session.save()
         await interaction.response.edit_message(embed=session.embed())
@@ -1520,6 +1572,14 @@ class Team(commands.Cog):
         removed = await asyncio.to_thread(team_store.prune)
         if removed:
             log.info("🧹 오래된 팀짜기 세션 %d개를 정리했어요.", removed)
+        # 🔁 쌍 이력도 같이 정리해요(세션보다 오래 남겨서 따로 재야 해요).
+        try:
+            dropped = await asyncio.to_thread(team_history.prune)
+            if dropped:
+                log.info("🧹 오래된 팀 쌍 이력 %d개를 정리했어요.", dropped)
+        except Exception:
+            # 정리가 실패해도 봇은 떠야 해요(이력은 없어도 /팀짜기가 돌아가요).
+            log.warning("팀 쌍 이력 정리 실패", exc_info=True)
 
     async def cog_unload(self):
         if self.view is not None:
@@ -1594,14 +1654,24 @@ class Team(commands.Cog):
 
         players = _collect_players(members)
 
+        rotated = False
         if 방식 == "random":
             team_a, team_b, diff = team_balance.random_split(players)
             mode = team_store.MODE_RANDOM
         else:
-            team_a, team_b, diff = team_balance.balanced_splits(players, limit=1)[0]
+            # 🔁 최근에 같은 팀이던 조합을 피해요(2026-10-31 서아의 불만).
+            #    이력이 없으면 무게가 비어서 **옛 동작과 똑같이** 최적 편성이 나와요.
+            weights = _pair_weights(interaction.guild_id)
+            splits, best = team_balance.rotated_splits(
+                players, limit=1, pair_weights=weights
+            )
+            team_a, team_b, diff = splits[0]
+            rotated = _is_rotated(diff, best)
             mode = team_store.MODE_BALANCED
 
-        embed = _build_embed(team_a, team_b, diff, mode=mode, source_label=source_label)
+        embed = _build_embed(
+            team_a, team_b, diff, mode=mode, source_label=source_label, rotated=rotated
+        )
         message = await interaction.followup.send(
             embed=embed, view=TeamSplitView(self.bot), wait=True
         )
@@ -1617,6 +1687,7 @@ class Team(commands.Cog):
                 mode=mode, diff=diff,
                 source_label=source_label,
                 message_url=message.jump_url,
+                rotated=rotated,
             )
 
         try:
@@ -1661,6 +1732,8 @@ class Team(commands.Cog):
             source_label=record.get("source_label") or "",
             captains=team_store.load_captains(record),
             map_name=record.get("map"),
+            # 본 메시지와 **같은 문구**가 나와야 해요(옛 기록엔 없는 필드라 기본 False).
+            rotated=bool(record.get("rotated")),
         )
 
         # 언제 짠 편성인지가 제일 중요해요 - 어제 것을 오늘 것으로 착각하면 안 되니까요.
