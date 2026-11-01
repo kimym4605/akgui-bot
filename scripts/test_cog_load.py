@@ -237,6 +237,33 @@ async def main():
     # ── 🚨 3초 토큰 전수 검사 ────────────────────────────────────────
     # 상호작용 핸들러에서 **첫 응답보다 앞에 왕복(DB·네트워크)이 있으면** 토큰이 죽어서
     # "일은 벌어졌는데 화면만 안 뜨는" 사고가 나요. 이름 목록으로는 또 빠뜨리니까
+    # ------------------------------------------------------------------
+    # 🚨 **`COG_GROUPS`에 안 적힌 cog는 조용히 로드되지 않아요.** 2026-11-01에
+    #    `cogs/meetup.py`를 만들고 등록을 빼먹어서, 테스트는 전부 통과했는데
+    #    **배포 뒤 봇 로그에만** `COG_GROUPS에 없는 파일들이 cogs 폴더에 있어요
+    #    (로드 안 됨): ['meetup']`이 떴어요. 기능이 통째로 없는 거예요.
+    #    (bot.py가 경고는 하지만, 배포하고 로그를 봐야 알게 되니 여기서 막아요)
+    print("\nCOG_GROUPS 등록 누락:")
+    import bot as _bot_module
+    _listed = {name for names in _bot_module.COG_GROUPS.values() for name in names}
+    _cogs_dir = os.path.join(BOT_DIR, "cogs")
+    _on_disk = {
+        fname[:-3] for fname in os.listdir(_cogs_dir)
+        if fname.endswith(".py") and not fname.startswith("_")
+    }
+    _unlisted = sorted(_on_disk - _listed)
+    _ghost = sorted(_listed - _on_disk)
+    if _unlisted:
+        for name in _unlisted:
+            print(f"  🚨 cogs/{name}.py 가 COG_GROUPS에 없어요 → **로드되지 않아요**")
+        failed.append(f"COG_GROUPS 누락 {len(_unlisted)}개: {', '.join(_unlisted)}")
+    if _ghost:
+        for name in _ghost:
+            print(f"  🚨 COG_GROUPS의 '{name}'에 해당하는 파일이 없어요")
+        failed.append(f"COG_GROUPS 유령 {len(_ghost)}개: {', '.join(_ghost)}")
+    if not _unlisted and not _ghost:
+        print(f"  ✅ 디스크의 cog {len(_on_disk)}개가 전부 등록돼 있어요")
+
     # 배포 전 관문인 이 테스트에 전수 스캔을 묶어둬요(판정 규칙은 그 스크립트 머리말에).
     print("\n3초 토큰 (첫 응답보다 앞에 왕복이 있는 핸들러):")
     import importlib.util
