@@ -211,11 +211,23 @@ check("1024" in rtxt, "임베드 칸 1024자 한도를 지킨다")
 status = next(n for n in ast.walk(tree)
               if isinstance(n, ast.AsyncFunctionDef) and n.name == "status")
 stxt = ast.unparse(status)
-check("_is_staff" in stxt, "명단은 운영진만 본다")
-i_staff = stxt.find("_is_staff")
+# 🚨 2026-11-01 사용자 지시: `/정모현황`은 **방장만**. 역할 이름이 아니라 `guild.owner_id`로
+#    본다 — `staff_check.is_staff`를 쓰면 부방장·서버담당·문의담당·신고담당·이벤트담당까지
+#    통과해서 "방장만"이 아니게 된다(`/서버리포트`와 같은 방식).
+check("interaction.guild.owner_id" in stxt,
+      "🚨 방장(서버 소유자) 판정을 owner_id로 한다")
+check("staff_check" not in stxt and "_is_staff" not in stxt,
+      "🚨 운영진 판정(staff_check)을 쓰지 않는다 — 그러면 부방장까지 보게 된다")
+i_gate = stxt.find("owner_id")
 i_members = stxt.find("meetup_store.members")
-check(0 <= i_staff < i_members,
-      "🚨 운영진 확인이 명단 조회보다 **앞**이다", f"{i_staff} vs {i_members}")
+check(0 <= i_gate < i_members,
+      "🚨 방장 확인이 명단 조회보다 **앞**이다", f"{i_gate} vs {i_members}")
+check("return" in stxt[i_gate:i_gate + 260],
+      "방장이 아니면 명단을 꺼내기 전에 빠져나온다")
+# 거절 안내에 참가 경로를 적어줘야 해요 — 일반 멤버가 치면 "못 쓴다"만 보고 끝나요.
+check("버튼" in stxt, "거절 안내가 참가 방법(버튼)을 알려준다")
+check('"no"' not in stxt and "'no'" not in stxt,
+      "❌ 못 가요 명단은 보여주지 않는다")
 
 print("\n" + "=" * 52)
 print(f"통과 {len(passed)} · 실패 {len(failed)}")

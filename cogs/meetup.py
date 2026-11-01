@@ -136,10 +136,24 @@ class MeetupCog(commands.Cog):
 
     @app_commands.command(
         name="정모현황",
-        description="겨울 정모 참가 신청 현황을 봐요. (운영진은 명단까지)",
+        description="[방장 전용] 겨울 정모 참가 신청 현황과 명단을 봐요.",
     )
     async def status(self, interaction: discord.Interaction):
         if not await ack(interaction, ephemeral=True):
+            return
+        # 🚨 **방장(서버 소유자)만** 볼 수 있어요 (2026-11-01 사용자 지시).
+        #    `cogs/ops_report.py`의 `/서버리포트`와 같은 방식이에요 — 역할 이름이 아니라
+        #    `guild.owner_id`로 봐요. 역할을 지웠다 다시 만들어도 안 깨지고, 역할 이름을
+        #    흉내 낸 역할로도 통과할 수 없어요.
+        #    ⚠️ `staff_check.is_staff`를 쓰면 **부방장·서버담당·문의담당·신고담당·
+        #       이벤트담당까지** 통과해요. "방장만"이 아니게 돼요.
+        if interaction.guild is None or interaction.user.id != interaction.guild.owner_id:
+            await interaction.followup.send(
+                "이 명령어는 **방장만** 쓸 수 있어요.\n"
+                "-# 정모에 참가 신청은 <#1493406455309668462>의 정모 공지에 붙은 "
+                "버튼으로 해주세요. 누르면 지금까지의 인원이 같이 떠요.",
+                ephemeral=True,
+            )
             return
         meetup = meetup_store.DEFAULT_MEETUP
         counts = await meetup_store.counts(meetup)
@@ -165,34 +179,34 @@ class MeetupCog(commands.Cog):
         if warn:
             embed.add_field(name="⚠️ 확인할 것", value=warn, inline=False)
 
-        # 운영진에게만 명단을 보여줘요 — 방 배정·카풀·보호자 동의를 챙겨야 해요.
-        if interaction.guild is not None and _is_staff(interaction.user):
-            roster = await meetup_store.members(meetup)
-            for key in ("going", "resort", "maybe", "other_date"):
-                ids = roster.get(key) or []
-                if not ids:
-                    continue
-                meta = meetup_store.CHOICES[key]
-                embed.add_field(
-                    name=f"📋 {meta['emoji']} {meta['label']} 명단 ({len(ids)}명)",
-                    value=_roster_text(interaction.guild, ids),
-                    inline=False,
-                )
-            adults, minors, unknown = _age_split(interaction.guild,
-                                                 (roster.get("going") or [])
-                                                 + (roster.get("resort") or []))
+        # 여기까지 온 건 방장뿐이라 명단을 바로 보여줘요(위에서 이미 걸렀어요).
+        # 방 배정·카풀·보호자 동의를 챙겨야 하니 이름과 성인 여부가 같이 나와요.
+        roster = await meetup_store.members(meetup)
+        # ❌ 못 가요는 명단을 안 보여줘요 — 쓸 데가 없고, 굳이 이름이 떠 있을 이유도 없어요.
+        for key in ("going", "resort", "maybe", "other_date"):
+            ids = roster.get(key) or []
+            if not ids:
+                continue
+            meta = meetup_store.CHOICES[key]
             embed.add_field(
-                name="🔞 확실히 온다 중 성인 여부",
-                value=(
-                    f"성인 **{adults}명** · 성인 역할 없음 **{minors}명**"
-                    + (f" · 서버에 없는 사람 {unknown}명" if unknown else "")
-                    + "\n-# 숙박이라 방 배정·보호자 동의가 걸려요. "
-                    "메모리상 **11월 말까지** 미성년 참가 자격을 정해 2차 공지에 실어야 해요."
-                ),
+                name=f"📋 {meta['emoji']} {meta['label']} 명단 ({len(ids)}명)",
+                value=_roster_text(interaction.guild, ids),
                 inline=False,
             )
-        else:
-            embed.set_footer(text="명단은 운영진만 볼 수 있어요.")
+        adults, minors, unknown = _age_split(interaction.guild,
+                                             (roster.get("going") or [])
+                                             + (roster.get("resort") or []))
+        embed.add_field(
+            name="🔞 확실히 온다 중 성인 여부",
+            value=(
+                f"성인 **{adults}명** · 성인 역할 없음 **{minors}명**"
+                + (f" · 서버에 없는 사람 {unknown}명" if unknown else "")
+                + "\n-# 숙박이라 방 배정·보호자 동의가 걸려요. 미성년 참가 자격은 "
+                "**11월 말**(장소 확정과 같은 시점)까지 정해서 2차 공지에 같이 실어야 해요."
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="방장만 볼 수 있는 화면이에요. (나에게만 보여요)")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -218,11 +232,6 @@ class MeetupCog(commands.Cog):
         await interaction.followup.send(
             f"✅ 패널을 올렸어요 — {message.jump_url}", ephemeral=True
         )
-
-
-def _is_staff(user) -> bool:
-    from utils import staff_check
-    return staff_check.is_staff(user)
 
 
 def _roster_text(guild: discord.Guild, ids: list[str]) -> str:
