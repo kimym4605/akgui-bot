@@ -94,9 +94,13 @@ async def complete(user_id: int, key: str, channel: discord.abc.Messageable | No
     if not await mission_store.progress(user_id, key):
         return
 
-    balance = await coin_wallet.add(user_id, mission_store.REWARD_PER_MISSION, reason=f"미션:{key}")
+    # 🚨 지급액은 **희귀도마다 달라요**(🟢1 · 🔵3 · 🟣5). 상수를 쓰지 말고 반드시
+    #    `reward_of`로 꺼내요 - 안 그러면 알림 문구와 실제 지급액이 어긋나요.
+    reward = mission_store.reward_of(key)
+    balance = await coin_wallet.add(user_id, reward, reason=f"미션:{key}")
     info = MISSIONS[key]
-    log.info("🎯 미션 완료: %s / %s (+%d코인)", user_id, key, mission_store.REWARD_PER_MISSION)
+    rarity = mission_store.rarity_of(key)
+    log.info("🎯 미션 완료: %s / %s (%s +%d코인)", user_id, key, rarity["label"], reward)
 
     if channel is None:
         return
@@ -105,8 +109,8 @@ async def complete(user_id: int, key: str, channel: discord.abc.Messageable | No
         return
     try:
         await channel.send(
-            f"🎯 <@{user_id}> **{info['title']}** 미션 완료! "
-            f"악귀코인 **+{mission_store.REWARD_PER_MISSION}개** (보유 {balance}개)",
+            f"🎯 <@{user_id}> {rarity['emoji']} **{info['title']}** 미션 완료! "
+            f"악귀코인 **+{reward}개** (보유 {balance}개)",
             # 멘션 글씨는 남기고 핑만 안 쏴요. 미션은 하루 3개라 핑까지 가면 꽤 거슬려요.
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -228,15 +232,20 @@ class Mission(commands.Cog):
             log.warning("🎙️ 음성 레벨 적립 중 오류 (user=%s)", member.id, exc_info=True)
 
         if await mission_store.progress(member.id, "voice_together", minutes):
+            # ⚠️ 여기도 `reward_of`를 써요. `complete()`를 못 쓰는 이유는 진행도를
+            #    분 단위로 올려야 해서 `progress`를 직접 부르기 때문이에요.
+            reward = mission_store.reward_of("voice_together")
+            rarity = mission_store.rarity_of("voice_together")
             balance = await coin_wallet.add(
-                member.id, mission_store.REWARD_PER_MISSION, reason="미션:voice_together"
+                member.id, reward, reason="미션:voice_together"
             )
             if not await notify_prefs.is_enabled(member.id, "mission_channel"):
                 return
             try:
                 await channel.send(
-                    f"🎯 {member.mention} **{MISSIONS['voice_together']['title']}** 미션 완료! "
-                    f"악귀코인 **+{mission_store.REWARD_PER_MISSION}개** (보유 {balance}개)",
+                    f"🎯 {member.mention} {rarity['emoji']} "
+                    f"**{MISSIONS['voice_together']['title']}** 미션 완료! "
+                    f"악귀코인 **+{reward}개** (보유 {balance}개)",
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             except (discord.HTTPException, AttributeError):
@@ -542,8 +551,11 @@ class Mission(commands.Cog):
             except discord.HTTPException:
                 return
 
-        titles = " · ".join(MISSIONS[key]["title"] for key in keys)
-        reward = len(keys) * mission_store.REWARD_PER_MISSION
+        # 🚨 `len(keys) * 고정보상`으로 세면 안 돼요 — 희귀도마다 다르니 키별로 더해요.
+        titles = " · ".join(
+            f"{mission_store.rarity_of(key)['emoji']} {MISSIONS[key]['title']}" for key in keys
+        )
+        reward = mission_store.total_reward(keys)
         try:
             balance = await coin_wallet.get_balance(user_id)
             await user.send(
@@ -604,18 +616,28 @@ class Mission(commands.Cog):
             done = key in doc.get("done", [])
             current = doc.get("progress", {}).get(key, 0)
             target = info["target"]
+            # 🏅 희귀도와 보상을 **줄마다** 보여줘요. 이게 없으면 "왜 어떤 건 5코인이고
+            #    어떤 건 1코인인지"를 설명할 자리가 없어서 차등이 버그처럼 보여요.
+            rarity = mission_store.rarity_of(key)
+            tag = f"{rarity['emoji']} `{rarity['label']} {rarity['reward']}코인`"
 
             if done:
-                lines.append(f"✅ ~~**{info['title']}** — {info['desc']}~~")
+                lines.append(f"✅ {tag} ~~**{info['title']}** — {info['desc']}~~")
             elif target > 1:
                 lines.append(
-                    f"⬜ **{info['title']}** — {info['desc']}\n"
+                    f"⬜ {tag} **{info['title']}** — {info['desc']}\n"
                     f"　　진행 {min(current, target)}/{target}{info['unit']}"
                 )
             else:
-                lines.append(f"⬜ **{info['title']}** — {info['desc']}")
+                lines.append(f"⬜ {tag} **{info['title']}** — {info['desc']}")
 
-        done_count = len(doc.get("done", []))
+        # 🚨 `done`에는 오늘 깬 키만 들어 있어요(날짜가 바뀌면 비워져요). 그래도
+        #    혹시 모르는 옛 키가 섞여 있으면 `reward_of`가 KeyError를 내니 걸러요.
+        done_keys = [k for k in doc.get("done", []) if k in MISSIONS]
+        done_count = len(done_keys)
+        earned = mission_store.total_reward(done_keys)
+        # 오늘 배정된 걸 전부 깼을 때 받을 수 있는 총액. 사람마다 달라요.
+        possible = mission_store.total_reward(doc["picks"])
         embed = discord.Embed(
             title="🎯 오늘의 미션",
             description="\n".join(lines),
@@ -623,7 +645,7 @@ class Mission(commands.Cog):
         )
         embed.add_field(
             name="오늘 획득",
-            value=f"악귀코인 **{done_count * mission_store.REWARD_PER_MISSION}개** "
+            value=f"악귀코인 **{earned}개** / 전부 깨면 **{possible}개** "
                   f"({done_count}/{len(doc['picks'])} 완료)",
             inline=False,
         )

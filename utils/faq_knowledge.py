@@ -72,9 +72,10 @@ from utils.attend_remind import MIN_STREAK as ATTEND_REMIND_STREAK
 from utils.inventory_store import PROTECT_MAX, PROTECT_PRICE
 from utils.mission_store import (
     DAILY_MISSION_COUNT,
+    MAX_DAILY_REWARD,
+    RARITY,
     REROLL_LIMIT_PER_DAY,
     REROLL_PRICE,
-    REWARD_PER_MISSION,
 )
 from utils.event_store import REMIND_BEFORE_MINUTES as EVENT_REMIND_MINUTES
 from utils.notify_prefs import NOTIFY_KINDS
@@ -175,8 +176,8 @@ def _coin_earn() -> str:
 
 · 📅 `/출석` — 하루 1번 {COIN_PER_ATTENDANCE}코인. 연속으로 오면 더 줘요({_streak_bonus_line()}),
   연속 {WEEKLY_BONUS_EVERY}일마다 보너스 {WEEKLY_BONUS_COIN}코인이 또 붙어요.
-· 🎯 `/미션` — 하루 {DAILY_MISSION_COUNT}개 배정, 깰 때마다 {REWARD_PER_MISSION}코인
-  (하루 최대 {DAILY_MISSION_COUNT * REWARD_PER_MISSION}코인). 발로란트 미션은 봇이 전적을 보고 **자동으로** 체크해요.
+· 🎯 `/미션` — 하루 {DAILY_MISSION_COUNT}개 배정, 깰 때마다 **희귀도만큼** 코인이 들어와요
+  ({_rarity_line()} · 하루 최대 {MAX_DAILY_REWARD}코인). 발로란트 미션은 봇이 전적을 보고 **자동으로** 체크해요.
 · 🎣 `/낚시` — 지금 **가장 많이 벌리는 쪽**이에요. 낚시대({ROD_PRICE}코인)를 사서 {ROD_DURABILITY}번 던지고,
   잡은 걸 `/물고기판매`로 팔아요. 하루 **{DAILY_CAST_CAP}번**까지 던질 수 있고,
   다 쓰면 낚시대값을 빼고도 **{fish_data.max_daily_net_issue():+.0f}코인**쯤 남아요.
@@ -211,8 +212,18 @@ def _attendance() -> str:
 · 누가 제일 오래 왔는지는 `/출석순위`로 봐요."""
 
 
+def _rarity_line() -> str:
+    """🏅 희귀도별 보상을 한 줄로. 🚨 숫자를 손으로 적지 말고 `RARITY`에서 만들어요 —
+    티어 값을 바꿨는데 안내문만 옛 숫자로 남는 사고가 반복됐어요."""
+    return " · ".join(f"{r['emoji']}{r['label']} {r['reward']}코인" for r in RARITY.values())
+
+
 def _mission() -> str:
-    return f"""🎯 `/미션`은 하루 {DAILY_MISSION_COUNT}개가 배정되고, 하나 깰 때마다 {REWARD_PER_MISSION}코인이에요.
+    return f"""🎯 `/미션`은 하루 {DAILY_MISSION_COUNT}개가 배정되고, 깬 미션의 **희귀도만큼** 코인이 들어와요.
+
+· **희귀도별 보상** — {_rarity_line()}. 하루 최대 {MAX_DAILY_REWARD}코인이에요.
+  일부러 하러 가야 하는 미션(🟣 맵 추천·방 만들기·세 마리 낚기)이 제일 많이 줘요.
+  그냥 있어도 깨지는 미션(🟢 같이 통화하기·발로란트 미션)은 1코인이에요.
 
 · **발로란트 미션은 자동 판정이에요.** 봇이 30분마다 전적을 확인해요
   (그래서 깬 직후 바로는 안 뜰 수 있어요. 조금 기다려 주세요).

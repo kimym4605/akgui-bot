@@ -160,10 +160,34 @@ install(None)
 check("오늘 문서가 없으면 아직 안 쓴 것",
       asyncio.run(mission_store.rerolls_left(1)) == mission_store.REROLL_LIMIT_PER_DAY)
 
-print("6) 가격이 보상보다 비싸다 (코인 벌이용 리롤 차단)")
-check("리롤 가격 > 미션 보상",
-      mission_store.REROLL_PRICE > mission_store.REWARD_PER_MISSION,
-      f"{mission_store.REROLL_PRICE} vs {mission_store.REWARD_PER_MISSION}")
+print("6) 리롤로는 코인을 벌 수 없다 (발행원이 되면 안 돼요)")
+# 🚨🚨 **전엔 `REROLL_PRICE > REWARD_PER_MISSION`만 봤어요.** 보상이 전부 1코인일 때는
+#    그걸로 증명이 됐지만, 2026-11-02에 희귀도 차등(🟢1·🔵3·🟣5)이 들어오면서
+#    **그 검사가 무의미해졌어요** — 1코인 미션을 2코인에 리롤하면 평균 3.5코인짜리로
+#    바뀌니 기대 이득이 +1.5인 발행원이 돼요.
+# → 이제 **모든 배정 조합을 실제로 돌려** 최악의 기대 이득을 찾아서 가격과 비교해요.
+#    상수끼리 비교하면 티어 값을 바꿀 때마다 또 어긋나요.
+import itertools as _it  # noqa: E402
+
+_worst_gain, _worst_case = 0.0, None
+for _picks in _it.combinations(mission_store.SERVER_KEYS, mission_store.DAILY_MISSION_COUNT):
+    for _target in _picks:
+        # `_reroll_sync`와 같은 후보 규칙: 서버 미션 중 **이미 뽑힌 것을 뺀** 전부.
+        _cands = [k for k in mission_store.SERVER_KEYS if k not in _picks]
+        if not _cands:
+            continue
+        _avg = sum(mission_store.reward_of(k) for k in _cands) / len(_cands)
+        _gain = _avg - mission_store.reward_of(_target)
+        if _gain > _worst_gain:
+            _worst_gain, _worst_case = _gain, (_picks, _target, round(_avg, 2))
+check(f"리롤 가격({mission_store.REROLL_PRICE}) ≥ 최악의 기대 이득({_worst_gain:.2f})",
+      mission_store.REROLL_PRICE >= _worst_gain,
+      f"최악 배정 {_worst_case}")
+# 🚨 운 좋은 한 방으로도 못 벌어야 해요(기대값만 보면 '가끔 이득'이 남아요).
+_max_gain = (max(mission_store.reward_of(k) for k in mission_store.SERVER_KEYS)
+             - min(mission_store.reward_of(k) for k in mission_store.MISSIONS))
+check(f"리롤 가격({mission_store.REROLL_PRICE}) ≥ 최대 이득({_max_gain})",
+      mission_store.REROLL_PRICE >= _max_gain, f"최대 이득 {_max_gain}")
 
 # ------------------------------------------------------------------
 # 테마

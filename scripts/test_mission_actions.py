@@ -599,6 +599,92 @@ for _key in mission_store.SERVER_KEYS:
 
 
 # ==================================================================
+# 🏅 희귀도별 보상 (2026-11-02)
+# ==================================================================
+print("\n🏅 희귀도별 보상")
+
+check("미션 13종 전부에 유효한 희귀도가 있다",
+      all(MISSIONS[k].get("rarity") in mission_store.RARITY for k in MISSIONS),
+      str({k: MISSIONS[k].get("rarity") for k in MISSIONS
+           if MISSIONS[k].get("rarity") not in mission_store.RARITY}))
+
+# 🚨 **아무도 전보다 적게 받으면 안 돼요.** 차등을 넣은 건 올려주려던 것이지
+#    누군가를 깎으려던 게 아니에요. 옛 고정 보상은 1코인이었어요.
+_min_reward = min(mission_store.reward_of(k) for k in MISSIONS)
+check(f"최저 보상이 옛 고정값(1코인) 이상 — {_min_reward}코인", _min_reward >= 1,
+      f"{ {k: mission_store.reward_of(k) for k in MISSIONS if mission_store.reward_of(k) < 1} }")
+
+# ⭐⭐ **희귀도가 실측과 어긋나지 않는지 본다.** 아래는 2026-11-02에 `coin_log`로 잰
+#    14일 완료율이에요. 풀 안에서는 배정 확률이 균등해서 그대로 비교할 수 있어요.
+# 🚨 티어를 바꾸고 싶으면 **먼저 다시 재세요.** 느낌으로 바꾸면 여기서 FAIL이 나요 —
+#    실제로 "학살자 15킬은 어려우니 비싸게"가 숫자와 **반대**였어요(68%로 쉬운 쪽).
+# 🚨 풀을 섞어서 비교하면 안 돼요(발로 5종 vs 서버 8종은 분모가 달라요).
+RATE_2026_11_02 = {
+    "voice_together": 83, "use_myshop": 42, "attend_check": 42, "use_rank": 34,
+    "play_gamble": 34,  # 🔞라 배정 분모를 절반으로 보정한 값
+    "catch_fish": 28, "use_map": 28, "create_room": 25,
+    "val_kd1": 87, "val_win": 79, "val_play": 71, "val_kills15": 68, "val_comp": 65,
+}
+check("실측 표가 미션 13종을 전부 덮는다",
+      set(RATE_2026_11_02) == set(MISSIONS),
+      f"빠짐 {sorted(set(MISSIONS) - set(RATE_2026_11_02))} / "
+      f"잉여 {sorted(set(RATE_2026_11_02) - set(MISSIONS))}")
+
+for _pool, _pname in ((SERVER_KEYS, "서버"), (VALORANT_KEYS, "발로")):
+    _bad = []
+    for _a in _pool:
+        for _b in _pool:
+            # 완료율이 더 높은(= 더 쉬운) 미션이 **더 많이 주면** 모순이에요.
+            if RATE_2026_11_02[_a] > RATE_2026_11_02[_b] and \
+                    mission_store.reward_of(_a) > mission_store.reward_of(_b):
+                _bad.append(f"{_a}({RATE_2026_11_02[_a]}%,{mission_store.reward_of(_a)}코인)"
+                            f">{_b}({RATE_2026_11_02[_b]}%,{mission_store.reward_of(_b)}코인)")
+    check(f"{_pname} 풀: 쉬운 미션이 더 많이 주는 역전이 없다", not _bad, "; ".join(_bad))
+
+# ⭐ **실행 검증.** 문자열 검사로는 "지급액이 고정값으로 박혀 있다"를 못 잡아요.
+#    실제로 `complete()`를 불러서 **가짜 지갑에 들어온 금액**이 희귀도와 같은지 봐요.
+#    (2026-10-31에 '소스에 호출이 있다'까지만 보고 끊긴 훅을 놓친 전례가 있어요.)
+_by_rarity = {}
+for _k in SERVER_KEYS:
+    _by_rarity.setdefault(MISSIONS[_k]["rarity"], _k)
+check("서버 미션에 희귀도 3종이 다 있다 (실행 검증 표본)",
+      set(_by_rarity) == set(mission_store.RARITY), str(_by_rarity))
+
+for _rar, _key in sorted(_by_rarity.items(), key=lambda kv: mission_store.RARITY[kv[0]]["reward"]):
+    _uid = 9700 + mission_store.RARITY[_rar]["reward"]
+    _want = mission_store.RARITY[_rar]["reward"]
+    install_doc(_uid, [_key, "voice_together", "use_rank"][:3])
+    # target이 3인 미션(세 마리 낚기)은 한 번에 안 깨지니 진행도를 미리 채워둬요.
+    _need = MISSIONS[_key]["target"]
+    if _need > 1:
+        install_doc(_uid, [_key, "voice_together", "use_rank"],
+                    progress={_key: _need - 1})
+    granted.clear(); sent.clear()
+    asyncio.run(mission_cog.complete(_uid, _key, FakeChannel()))
+    _amounts = [g[1] for g in granted if g[0] == str(_uid)]
+    check(f"   {_rar}({_want}코인) {_key} → 지갑에 {_amounts}",
+          _amounts == [_want], f"기대 [{_want}] · 지급 {_amounts}")
+    check(f"   {_rar} 알림 문구에 +{_want}개가 적힌다",
+          any(f"+{_want}개" in (s or "") for s in sent), str(sent))
+
+# 🚨 **합계는 `len(keys) * 고정값`이 아니라 키별 합이어야 해요.** 발로 자동판정 DM과
+#    `/미션` 요약이 그 방식으로 세고 있었어요(전엔 보상이 같아서 우연히 맞았어요).
+_mix = [_by_rarity["common"], _by_rarity["rare"]]
+check("total_reward가 희귀도별로 더한다",
+      mission_store.total_reward(_mix)
+      == mission_store.reward_of(_mix[0]) + mission_store.reward_of(_mix[1]),
+      f"{_mix} → {mission_store.total_reward(_mix)}")
+check("🚨 total_reward가 '개수 × 최저보상'과 다르다 (고정 지급 회귀 탐지)",
+      mission_store.total_reward(_mix) != len(_mix) * _min_reward,
+      f"{mission_store.total_reward(_mix)} vs {len(_mix) * _min_reward}")
+
+# 🚨 옛 상수가 되살아나면 "전부 1코인"으로 조용히 돌아가요.
+check("🚨 REWARD_PER_MISSION 상수가 되살아나지 않았다",
+      not hasattr(mission_store, "REWARD_PER_MISSION"),
+      "희귀도별 reward_of()로 대체됐어요 — 고정 상수를 다시 만들지 마세요")
+
+
+# ==================================================================
 # 🚨 요약은 **맨 마지막**이어야 해요. 뒤에 섹션을 붙이면 그 FAIL이 집계되지 않아
 #    종료코드가 0으로 나오고 배포 관문이 그냥 통과해요 (2026-10-19에 실제로 그랬어요).
 # ==================================================================

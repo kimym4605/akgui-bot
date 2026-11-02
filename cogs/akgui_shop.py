@@ -15,6 +15,13 @@
 리롤권은 **싱크로는 약해요**(2코인 내고 1코인짜리 미션을 깨니 순 소모 1코인). 그쪽 역할은
 미션 완료율이고, 코인을 실제로 태우는 건 칭호·테마예요.
 
+🚨 **위 표의 리롤권 2코인은 2026-11-02에 `REROLL_PRICE = 4`로 올랐어요.** 미션 보상이
+   희귀도별(🟢1·🔵3·🟣5)로 갈리면서 "2코인 내고 평균 3.5코인짜리를 받는" 발행원이
+   됐거든요. 그래서 이제 **순 소모가 아니라 최소 0**이에요 — 자세한 계산은
+   `utils/mission_store.REROLL_PRICE` 주석에 있어요.
+   ⚠️ 2026-10-05 당시 지갑 중앙값이 3코인이었으니 4코인은 그때 기준으로 비싼 편이에요.
+      리롤권은 출시 후 **사용 0건**이라 올려도 잃을 실사용이 없다고 보고 올렸어요.
+
 ⚠️ 칭호는 이름·색을 받아야 해서 모달이 필요해요. 그건 `/칭호구매`가 이미 하고 있으니
 여기서는 **그 명령어로 안내만** 해요(같은 모달을 두 벌 들고 있으면 한쪽만 고치는 사고가 나요).
 
@@ -195,9 +202,11 @@ class RerollSelect(discord.ui.Select):
     """오늘 못 깬 미션만 골라서 보여줘요."""
 
     def __init__(self, pending: list[str]):
+        # 🏅 **보상을 라벨에 적어요.** 미션마다 보상이 달라진 뒤로(2026-11-02), 뭘
+        #    버리는지 모르면 고를 수가 없어요. 🚨 숫자는 `reward_of`에서 꺼내요.
         options = [
             discord.SelectOption(
-                label=MISSIONS[key]["title"],
+                label=f"{MISSIONS[key]['title']} ({mission_store.reward_of(key)}코인)",
                 value=key,
                 description=MISSIONS[key]["desc"][:100],
                 emoji="🔫" if MISSIONS[key]["kind"] == "valorant" else "💬",
@@ -238,7 +247,7 @@ class RerollView(discord.ui.View):
             return
 
         # ⚠️ `adult`를 넘겨야 해요. 안 넘기면 성인 인증자도 🔞 미션으로는 안 바뀌고,
-        #    거꾸로 True로 고정하면 인증 없는 사람이 **못 깨는 미션**을 2코인에 사게 돼요.
+        #    거꾸로 True로 고정하면 인증 없는 사람이 **못 깨는 미션**을 REROLL_PRICE만큼 내고 사게 돼요.
         new_key, reason = await mission_store.reroll(
             interaction.user.id, key, adult_check.is_adult(interaction.user)
         )
@@ -255,7 +264,10 @@ class RerollView(discord.ui.View):
         left = await mission_store.rerolls_left(interaction.user.id)
         await interaction.edit_original_response(
             content=(
-                f"🎲 **{MISSIONS[key]['title']}** → **{MISSIONS[new_key]['title']}** 으로 바꿨어요!\n"
+                f"🎲 **{MISSIONS[key]['title']}**({mission_store.reward_of(key)}코인) → "
+                f"**{MISSIONS[new_key]['title']}**"
+                f"({mission_store.rarity_of(new_key)['emoji']} "
+                f"{mission_store.reward_of(new_key)}코인) 으로 바꿨어요!\n"
                 f"　└ {MISSIONS[new_key]['desc']}\n"
                 f"사용한 코인 **{REROLL_PRICE}개** (남은 코인 {balance}개) · 오늘 남은 리롤 {left}회"
             ),

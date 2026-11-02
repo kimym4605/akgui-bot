@@ -244,7 +244,8 @@ class Attendance(commands.Cog):
         #
         # 🚨 `COMMAND_MISSIONS`(명령어 완료 감지)에 "출석"을 넣으면 안 돼요. 출석은 하루
         #    1회라 **이미 출석한 사람이 다시 쳐도** 명령어는 정상 종료되고, 그러면 위의
-        #    `if not success: return`에 걸린 사람까지 미션이 깨져요(= 공짜 1코인).
+        #    `if not success: return`에 걸린 사람까지 미션이 깨져요(= 공짜 3코인 — 📅 출석
+        #    미션은 🔵보통이에요).
         # ⚠️ 예외는 `on_action`이 안에서 삼켜요. 미션 때문에 출석이 깨지면 안 되니까요.
         await mission.on_action(
             interaction.user.id, "attend_check", interaction.channel, interaction.user
