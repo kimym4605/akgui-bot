@@ -283,6 +283,18 @@ def _asserts() -> list:
     except Exception:                                  # noqa: BLE001
         pass
     try:
+        # 🎨 카드 테마 — 2026-11-03부터 **값이 두 가지**예요(색 15 · 캐릭터 25).
+        # 🚨 이 도구는 **임베드를 안 읽어요.** 🪙 상설 패널의 가격표는 임베드라
+        #    여기서 ✅가 떠도 거짓일 수 있어요 → `scripts/repost_shop_panel.py`를 같이 돌릴 것.
+        from utils import profile_card as pc
+        add("악귀상점", "색 테마 값", r"색 테마\*{0,2}[^\n]{0,12}?(\d+)코인",
+            lambda: (pc.COLOR_THEME_PRICE,))
+        if pc.CHARACTER_THEMES:
+            add("악귀상점", "캐릭터 테마 값", r"캐릭터 테마\*{0,2}[^\n]{0,20}?(\d+)코인",
+                lambda: (pc.CHARACTER_THEME_PRICE,))
+    except Exception:                                  # noqa: BLE001
+        pass
+    try:
         from utils import title_store as ts
         add("악귀상점", "칭호 가격", r"칭호 — (\d+)코인\(10일\) / (\d+)코인\(30일\)",
             lambda: (ts.TITLE_PLANS[10], ts.TITLE_PRICE))
@@ -317,7 +329,9 @@ SCOPES = {
     "미션-내용": ["mission_store"],
     "출석체크": ["attend_service", "coin_ledger", "mission_store"],
     "악귀상점": ["title_store", "fish_data", "mission_store", "cosmetic_store",
-               "casino_store", "inventory_store"],
+               "casino_store", "inventory_store",
+               # 🎨 테마 값(15·25)이 여기 있어요. 빼두면 멀쩡한 안내문을 의심으로 올려요.
+               "profile_card"],
     "프로필": ["achievement_data", "agwi_weekly_store"],
     # 아래는 여러 기능을 한 글에 담아서 전역으로 본다(그만큼 탐지력이 낮다)
     "봇-사용법": None,

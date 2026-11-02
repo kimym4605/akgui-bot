@@ -41,6 +41,7 @@
    그때는 진열이 아니라 품목 자체를 손봐야 해요.
 """
 import logging
+import os
 
 import discord
 from discord import app_commands
@@ -48,7 +49,7 @@ from discord.ext import commands
 
 from utils import (
     adult_check, attend_service, coin_wallet, cosmetic_store, inventory_store,
-    mission_store, riot_account_store,
+    mission_store, riot_account_store, theme_request_store,
 )
 from utils.interaction_ack import ack
 from utils.inventory_store import PROTECT_MAX, PROTECT_PRICE
@@ -57,7 +58,10 @@ from utils.fish_data import (
     DAILY_CAST_CAP, ROD_DURABILITY, ROD_PRICE, SMALL_ROD_DURABILITY,
     SMALL_ROD_PRICE, STREAK_CAST_BONUS, STREAK_CAST_EVERY, STREAK_CAST_MAX,
 )
-from utils.profile_card import THEME_PRICE, THEMES
+from utils.profile_card import (
+    ALL_THEMES, CHARACTER_THEME_PRICE, CHARACTER_THEMES, COLOR_THEME_PRICE,
+    THEMES, is_character, price_of,
+)
 from utils.title_store import TITLE_DAYS, TITLE_PLANS
 
 log = logging.getLogger(__name__)
@@ -132,19 +136,29 @@ def _item_fields(state: dict | None = None) -> list[tuple[str, str]]:
         protect += f"\n　└ 지금 가진 보호권: **{state['protects']}/{PROTECT_MAX}장**"
     fields.append((f"🧊 출석 보호권 — {PROTECT_PRICE}코인", protect))
 
-    theme = f"`/프로필` 카드 배경을 바꿔요. 전체 {len(THEMES)}종.\n"
+    # 🎴 2026-11-03부터 **색 테마와 캐릭터 테마의 값이 달라요.** 한 가격만 적으면
+    #    거짓이 돼요 — 고른 쪽에 따라 다른 금액이 빠지니까요.
+    theme = (f"`/프로필` 카드 배경을 바꿔요.\n"
+             f"　└ 🎨 **색 테마** {len(THEMES)}종 — {COLOR_THEME_PRICE}코인\n")
+    if CHARACTER_THEMES:
+        theme += (f"　└ 🎴 **캐릭터 테마** {len(CHARACTER_THEMES)}종 — "
+                  f"{CHARACTER_THEME_PRICE}코인 (그림이 배경으로 깔려요)\n")
+    theme += "　└ 📮 원하는 캐릭터가 없으면 테마 화면에서 **요청**할 수 있어요\n"
     if state:
         owned_extra = [t for t in state["themes"] if t != cosmetic_store.DEFAULT_THEME]
         selected = state["theme"]
         theme += (
             f"　└ 지금 쓰는 테마: "
-            f"**{THEMES.get(selected, THEMES['기본'])['emoji']} {selected}**\n"
+            f"**{ALL_THEMES.get(selected, THEMES['기본'])['emoji']} {selected}**\n"
             f"　└ 가진 테마: "
             f"{('**' + '** · **'.join(owned_extra) + '**') if owned_extra else '기본만'}"
         )
     else:
         theme += "　└ 한 번 사면 **영구히** 남아서 언제든 다시 골라 쓸 수 있어요"
-    fields.append((f"🎨 프로필 카드 테마 — {THEME_PRICE}코인 (영구)", theme))
+    # 🚨 가격을 손으로 적지 않아요 — 캐릭터 테마가 없으면 범위 표기가 거짓이 돼요.
+    _price_label = (f"{COLOR_THEME_PRICE}~{CHARACTER_THEME_PRICE}코인"
+                    if CHARACTER_THEMES else f"{COLOR_THEME_PRICE}코인")
+    fields.append((f"🎨 프로필 카드 테마 — {_price_label} (영구)", theme))
 
     return fields
 
@@ -276,10 +290,24 @@ class RerollView(discord.ui.View):
         log.info("🎲 미션 리롤: %s / %s → %s", interaction.user.id, key, new_key)
 
 
+# 드롭다운 하나에 들어가는 선택지 한도(디스코드 제약). 🚨 넘기면 **뷰 생성이 터져요** —
+# 캐릭터 테마는 방장이 계속 추가하니 언젠가 반드시 닿아요.
+SELECT_LIMIT = 25
+
+
 class ThemeSelect(discord.ui.Select):
-    def __init__(self, owned: list[str], selected: str):
+    """테마 한 묶음을 고르는 드롭다운.
+
+    🚨 **색 테마와 캐릭터 테마를 한 드롭다운에 섞지 않아요.**
+    ⒜ 값이 달라서(15 vs 25코인) 한 줄 설명으로는 헷갈려요.
+    ⒝ 캐릭터는 계속 늘어나는데 드롭다운은 **25개가 한도**라, 섞어두면 색 테마가
+       밀려나서 사라져요. 묶음을 나누면 각각 25개까지 쓸 수 있어요.
+    """
+
+    def __init__(self, catalog: dict[str, dict], owned: list[str], selected: str,
+                 *, placeholder: str, price: int):
         options = []
-        for key, info in THEMES.items():
+        for key, info in list(catalog.items())[:SELECT_LIMIT]:
             has = key in owned
             options.append(discord.SelectOption(
                 label=key,
@@ -287,20 +315,75 @@ class ThemeSelect(discord.ui.Select):
                 emoji=info["emoji"],
                 default=(key == selected),
                 description=(
-                    f"{info['desc']} · " + ("보유 중" if has else f"{THEME_PRICE}코인")
+                    f"{info['desc']} · " + ("보유 중" if has else f"{price}코인")
                 )[:100],
             ))
-        super().__init__(placeholder="테마를 골라주세요", options=options, min_values=1, max_values=1)
+        super().__init__(placeholder=placeholder, options=options,
+                         min_values=1, max_values=1)
 
     async def callback(self, interaction: discord.Interaction):
         await self.view.pick_theme(interaction, self.values[0])  # type: ignore[attr-defined]
+
+
+class ThemeRequestModal(discord.ui.Modal, title="🎴 캐릭터 테마 요청"):
+    """📮 원하는 캐릭터를 적어 보내요. 방장이 그림을 넣으면 상점에 떠요.
+
+    ⭐ **왜 창구를 만들었나**: 카탈로그를 방장이 손으로 채우는 구조라, 뭘 원하는지
+       모르면 채울 수가 없어요. 💡건의로도 받을 수 있지만 사용자가 전용 버튼을
+       택했어요(2026-11-03). 🚨 실사용 0건이면 건의로 합칠 것.
+    """
+
+    character = discord.ui.TextInput(
+        label="캐릭터 이름",
+        placeholder="예) 우사기",
+        max_length=60,
+    )
+    source = discord.ui.TextInput(
+        label="어디 나오는 캐릭터인가요? (작품 이름 등)",
+        placeholder="예) 치이카와 / 잘 모르면 비워두셔도 돼요",
+        required=False,
+        max_length=100,
+    )
+    note = discord.ui.TextInput(
+        label="참고할 그림이나 분위기 (선택)",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=300,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await submit_theme_request(
+            interaction,
+            str(self.character), str(self.source), str(self.note),
+        )
+
+
+class ThemeRequestButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="원하는 캐릭터 요청하기", emoji="📮",
+                         style=discord.ButtonStyle.secondary, row=2)
+
+    async def callback(self, interaction: discord.Interaction):
+        # 🚨 모달은 **defer하면 안 돼요.** `send_modal`이 첫 응답이어야 해요
+        #    (즉석 통화방에서 engine이 스스로 defer해서 패널이 defer하면 안 되던 것과
+        #     같은 부류의 함정이에요).
+        await interaction.response.send_modal(ThemeRequestModal())
 
 
 class ThemeView(discord.ui.View):
     def __init__(self, user_id: int, owned: list[str], selected: str):
         super().__init__(timeout=180)
         self.user_id = user_id
-        self.add_item(ThemeSelect(owned, selected))
+        self.add_item(ThemeSelect(THEMES, owned, selected,
+                                  placeholder="🎨 색 테마를 골라주세요",
+                                  price=COLOR_THEME_PRICE))
+        # 🚨 캐릭터 테마가 **하나도 없으면 드롭다운을 아예 안 붙여요.** 선택지가 0개인
+        #    Select는 디스코드가 거부해요(뷰 전체가 안 떠요).
+        if CHARACTER_THEMES:
+            self.add_item(ThemeSelect(CHARACTER_THEMES, owned, selected,
+                                      placeholder="🎴 캐릭터 테마를 골라주세요",
+                                      price=CHARACTER_THEME_PRICE))
+        self.add_item(ThemeRequestButton())
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
@@ -312,33 +395,121 @@ class ThemeView(discord.ui.View):
         if not await ack(interaction):
             return
 
+        # 🚨 **모르는 테마는 여기서 막아요.** 방장이 `themes.json`에서 캐릭터를 뺐는데
+        #    누군가의 드롭다운(최대 3분 유효)에 남아 있을 수 있어요. 그대로 두면
+        #    없는 테마를 사고 카드는 기본으로 그려져요.
+        if key not in ALL_THEMES:
+            await interaction.edit_original_response(
+                content=f"⚠️ **{key}** 테마는 지금 없어요. 테마 화면을 다시 열어주세요.",
+                embed=None, view=None,
+            )
+            return
+
         owned = await cosmetic_store.owned_themes(interaction.user.id)
+        # 🚨🚨 **가격은 테마마다 달라요**(색 15 · 캐릭터 25). 상수를 쓰면 적힌 값과
+        #    빠지는 값이 어긋나요 — 2026-11-02 미션 보상에서 똑같은 모양의 버그를
+        #    네 군데서 걷어냈어요. 차감·안내·환불이 **같은 변수**를 써야 해요.
+        price = price_of(key)
 
         if key not in owned:
-            if not await coin_wallet.spend(interaction.user.id, THEME_PRICE, reason=f"카드테마:{key}"):
+            if not await coin_wallet.spend(interaction.user.id, price, reason=f"카드테마:{key}"):
                 balance = await coin_wallet.get_balance(interaction.user.id)
                 await interaction.edit_original_response(
-                    content=f"악귀코인이 부족해요. 테마는 **{THEME_PRICE}개**가 필요한데 "
+                    content=f"악귀코인이 부족해요. **{key}** 테마는 **{price}개**가 필요한데 "
                             f"지금 **{balance}개** 갖고 있어요.",
                     embed=None, view=None,
                 )
                 return
             # ⚠️ `grant_theme`이 False면 그 찰나에 이미 받은 거예요(중복 결제) → 돌려줘요.
             if not await cosmetic_store.grant_theme(interaction.user.id, key):
-                await coin_wallet.add(interaction.user.id, THEME_PRICE, reason="카드테마 중복 환불")
+                await coin_wallet.add(interaction.user.id, price, reason="카드테마 중복 환불")
             else:
-                log.info("🎨 카드 테마 구매: %s → %s", interaction.user.id, key)
+                log.info("🎨 카드 테마 구매: %s → %s (%d코인)", interaction.user.id, key, price)
 
         await cosmetic_store.select_theme(interaction.user.id, key)
-        info = THEMES[key]
+        info = ALL_THEMES[key]
+        kind = "🎴 캐릭터" if is_character(key) else "🎨 색"
         balance = await coin_wallet.get_balance(interaction.user.id)
         await interaction.edit_original_response(
             content=(
-                f"{info['emoji']} 카드 테마를 **{key}**(으)로 바꿨어요. ({info['desc']})\n"
+                f"{info['emoji']} {kind} 테마를 **{key}**(으)로 바꿨어요. ({info['desc']})\n"
                 f"`/프로필` 을 다시 쳐보면 적용돼 있어요 · 남은 코인 {balance}개"
             ),
             embed=None, view=None,
         )
+
+
+# 📮 캐릭터 테마 요청이 올라갈 곳. 🚨 없으면 **저장만 하고 알림은 건너뛰어요** —
+#    설정이 빠졌다고 요청 자체가 실패하면 유저는 영문을 모르고 다시 눌러요.
+MANAGER_CHANNEL_ID = int(os.getenv("MANAGER_CHANNEL_ID") or 0) or None
+
+
+async def submit_theme_request(interaction: discord.Interaction,
+                               character: str, source: str, note: str) -> None:
+    """📮 캐릭터 테마 요청을 받아요. 저장 → 운영진 채널 알림 → 본인에게 응답.
+
+    🚨 **저장이 먼저예요.** 알림(디스코드 API)이 실패해도 요청은 남아야 해요
+    (`/테마요청목록`으로 볼 수 있어요). 반대로 두면 알림 한 번 실패에 요청이 증발해요.
+    """
+    # 🚨 모달 제출도 3초 토큰이에요. **무엇보다 먼저** 받아둬요.
+    #    ⚠️ 빈 이름 검사를 여기보다 앞에 두고 `response.send_message`로 답했더니
+    #       `test_akgui_shop.py`가 잡았어요 — 한 함수에서 `ack`와 `response.*`를
+    #       섞으면 "이미 응답함" 오류가 나기 쉬워요. 받아낸 뒤에 검사해요.
+    if not await ack(interaction):
+        return
+
+    character = (character or "").strip()
+    if not character:
+        await interaction.edit_original_response(
+            content="캐릭터 이름을 적어주세요.", embed=None, view=None)
+        return
+
+    try:
+        result, votes = await theme_request_store.add(
+            interaction.user.id, character, source.strip(), note.strip())
+    except Exception:                                    # noqa: BLE001
+        log.warning("📮 테마 요청 저장 실패 (user=%s)", interaction.user.id, exc_info=True)
+        await interaction.edit_original_response(
+            content="⚠️ 요청을 저장하지 못했어요. 잠시 뒤 다시 눌러주세요.",
+            embed=None, view=None)
+        return
+
+    if result == "limit":
+        await interaction.edit_original_response(
+            content=f"오늘은 요청을 **{theme_request_store.DAILY_LIMIT}개**까지 보낼 수 있어요. "
+                    "내일 다시 와주세요.",
+            embed=None, view=None)
+        return
+    if result == "dup_self":
+        await interaction.edit_original_response(
+            content=f"**{character}** 는 이미 요청하셨어요 (지금 **{votes}명**이 원해요).",
+            embed=None, view=None)
+        return
+
+    # ── 운영진 채널에 알려요 (실패해도 요청은 이미 저장됐어요) ──────────
+    if MANAGER_CHANNEL_ID and interaction.guild:
+        channel = interaction.guild.get_channel(MANAGER_CHANNEL_ID)
+        if channel is not None:
+            lines = [f"📮 **캐릭터 테마 요청** — {interaction.user.mention}",
+                     f"　└ 캐릭터: **{character}** (누적 **{votes}명**)"]
+            if source:
+                lines.append(f"　└ 출처: {source}")
+            if note:
+                lines.append(f"　└ 메모: {note[:200]}")
+            lines.append(f"　└ 넣는 법: `assets/card_themes/`에 그림 + `themes.json` 한 줄 "
+                         "→ `python scripts/check_card_themes.py`")
+            try:
+                await channel.send("\n".join(lines),
+                                   allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException:
+                log.warning("📮 테마 요청 알림 전송 실패 (user=%s)",
+                            interaction.user.id, exc_info=True)
+
+    await interaction.edit_original_response(
+        content=(f"📮 **{character}** 테마를 요청했어요! (지금 **{votes}명**이 원해요)\n"
+                 "-# 방장이 그림을 넣으면 `/악귀상점` 테마에 떠요. 바로는 안 생겨요."),
+        embed=None, view=None)
+    log.info("📮 캐릭터 테마 요청: %s → %s (%d표)", interaction.user.id, character, votes)
 
 
 # ─── 품목별 동작 ─────────────────────────────────────────────────────────
@@ -457,7 +628,10 @@ async def act_theme(interaction: discord.Interaction) -> None:
 
     state = await cosmetic_store.get(interaction.user.id)
     await interaction.followup.send(
-        f"테마를 고르면 바로 적용돼요. 안 가진 테마는 고르는 순간 **{THEME_PRICE}코인**이 빠져요.\n"
+        # 🚨 값이 두 가지라 **둘 다 적어야** 해요. 한쪽만 적으면 다른 쪽을 고른
+        #    사람에게 거짓말이 돼요.
+        f"테마를 고르면 바로 적용돼요. 안 가진 테마는 고르는 순간 코인이 빠져요 — "
+        f"🎨 색 **{COLOR_THEME_PRICE}코인** · 🎴 캐릭터 **{CHARACTER_THEME_PRICE}코인**\n"
         "-# 한 번 산 테마는 영구히 남아서 언제든 다시 고를 수 있어요.",
         view=ThemeView(interaction.user.id, state["themes"], state["theme"]),
         ephemeral=True,
@@ -581,7 +755,8 @@ class ShopPanelView(discord.ui.View):
         self.small_rod.label = f"소형 낚시대 {SMALL_ROD_PRICE}코인"
         self.reroll.label = f"미션 리롤 {REROLL_PRICE}코인"
         self.protect.label = f"출석 보호권 {PROTECT_PRICE}코인"
-        self.theme.label = f"카드 테마 {THEME_PRICE}코인"
+        self.theme.label = (f"카드 테마 {COLOR_THEME_PRICE}코인부터"
+                            if CHARACTER_THEMES else f"카드 테마 {COLOR_THEME_PRICE}코인")
         self.title.label = f"칭호 {TITLE_PLANS[10]}코인부터"
 
     @discord.ui.button(label="낚시대", emoji="🎣", style=discord.ButtonStyle.success,
@@ -667,6 +842,53 @@ class AkguiShop(commands.Cog):
         )
         await channel.send(embed=_panel_embed(), view=ShopPanelView())
         log.info("🪙 악귀상점 패널 게시: 채널 %s", channel.id)
+
+    @app_commands.command(
+        name="테마요청목록",
+        description="[서버 소유자 전용] 📮 요청된 캐릭터 테마를 표 많은 순으로 봐요.",
+    )
+    async def theme_requests(self, interaction: discord.Interaction):
+        """📮 뭘 먼저 그릴지 정하는 자리예요.
+
+        ⭐ **표를 세는 게 핵심**이에요. 요청이 들어올 때마다 운영진 채널에 한 줄씩
+           올라가지만, 그걸로는 "열 명이 같은 캐릭터를 원한다"가 안 보여요.
+           여기서는 같은 캐릭터가 한 줄로 모여요.
+        """
+        # ⚠️ **`ack`가 먼저예요.** 한 함수에서 `response.send_message`와 `ack`를 섞으면
+        #    "이미 응답함" 오류가 나기 쉬워서 `test_akgui_shop.py`가 막아요(여기서 걸렸어요).
+        #    소유자가 아니어도 일단 받아두고 안내만 바꿔요.
+        if not await ack(interaction, ephemeral=True, thinking=True):
+            return
+        if interaction.guild is None or interaction.user.id != interaction.guild.owner_id:
+            await interaction.followup.send(
+                "이 명령어는 서버 소유자만 쓸 수 있어요.", ephemeral=True)
+            return
+
+        rows = await theme_request_store.top(20)
+        if not rows:
+            await interaction.followup.send(
+                "📮 아직 요청이 없어요.\n"
+                "-# `/악귀상점` → 🎨 카드 테마 → 📮 버튼으로 받아요.",
+                ephemeral=True)
+            return
+
+        have = set(CHARACTER_THEMES)
+        lines = []
+        for row in rows:
+            done = "✅" if row["name"] in have else "⬜"
+            line = f"{done} **{row['name']}** — {row['votes']}표"
+            src = next((s for s in row["sources"] if s), "")
+            if src:
+                line += f" · {src}"
+            lines.append(line)
+        embed = discord.Embed(
+            title="📮 캐릭터 테마 요청",
+            description="\n".join(lines)[:4000],
+            color=0xFFC850,
+        )
+        embed.set_footer(text="✅는 이미 넣은 캐릭터예요 · 넣는 법은 "
+                              "assets/card_themes/ 에 그림 + themes.json 한 줄")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

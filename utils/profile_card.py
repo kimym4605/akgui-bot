@@ -32,6 +32,8 @@ import logging
 import os
 from pathlib import Path
 
+from utils import card_theme_assets
+
 log = logging.getLogger(__name__)
 
 # Pillow가 없어도 봇 전체가 죽으면 안 돼요. 카드만 조용히 포기하고 임베드로 물러나요.
@@ -72,8 +74,42 @@ THEMES: dict[str, dict] = {
     "숲":     {"emoji": "🌲", "top": (12, 26, 20),    "bottom": (20, 46, 34),   "desc": "깊은 초록"},
     "황혼":   {"emoji": "🌆", "top": (34, 18, 26),    "bottom": (62, 34, 30),   "desc": "노을빛 자주"},
 }
+for _t in THEMES.values():
+    _t.setdefault("kind", "color")
+del _t
+
+# ── 🎴 캐릭터 테마 (그림 배경) ────────────────────────────────────────────
+# ⭐ 카탈로그를 **코드에 박지 않아요.** `assets/card_themes/`에 그림을 넣고
+#    `themes.json`에 한 줄 적으면 상점에 떠요 → `utils/card_theme_assets.py`
+# 🚨 그림이 없는 항목은 거기서 **이미 걸러져요**(돈만 받고 안 바뀌는 상품 방지).
+CHARACTER_THEMES: dict[str, dict] = dict(card_theme_assets.CHARACTER_THEMES)
+
+# 사는 쪽이 보는 전체 목록. 🚨 **이름이 겹치면 색 테마가 이깁니다**(기존 구매자 보호).
+ALL_THEMES: dict[str, dict] = {**CHARACTER_THEMES, **THEMES}
+
 # 기본은 공짜예요. 나머지만 코인을 받아요.
-THEME_PRICE = 15
+#
+# 🚨🚨 **가격을 상수 하나로 들고 있지 마세요.** 캐릭터 테마가 더 비싸서(2026-11-03)
+#    `price_of(key)`를 안 쓰면 "15코인이라 적고 25코인을 빼는" 사고가 나요.
+#    2026-11-02에 미션 보상에서 똑같은 구조의 버그를 네 군데서 걷어냈어요.
+COLOR_THEME_PRICE = 15
+# 🎴 캐릭터는 25코인. 지갑 중앙값이 15.5(활동자 37)이라 색 테마보다 분명히 비싸지만,
+#    "좋아하는 캐릭터"는 색 배경과 달리 **욕심이 나는** 품목이라 이 값으로 뒀어요
+#    (사용자 결정, 2026-11-03). 📌 팔리는지 `coin_log`의 `카드테마:*`로 재볼 것.
+CHARACTER_THEME_PRICE = 25
+
+
+def price_of(key: str) -> int:
+    """그 테마를 사는 값. 🚨 **차감·안내 모두 이 함수를 쓰세요.**"""
+    info = ALL_THEMES.get(key)
+    if info is None:
+        # 모르는 이름이면 비싼 쪽으로 틀려요(공짜로 새는 것보다 낫습니다).
+        return CHARACTER_THEME_PRICE
+    return CHARACTER_THEME_PRICE if info.get("kind") == "character" else COLOR_THEME_PRICE
+
+
+def is_character(key: str) -> bool:
+    return (ALL_THEMES.get(key) or {}).get("kind") == "character"
 
 FONT_DIRS = [
     # 배포 환경 (Dockerfile에서 fonts-nanum 설치)
@@ -152,6 +188,76 @@ def _gradient_background(top=BG_TOP, bottom=BG_BOTTOM) -> "Image.Image":
     return image
 
 
+# 🎴 캐릭터 테마 스크림(어둡게 덮는 정도). 왼쪽은 글씨가 올라가니 많이, 오른쪽은
+# 그림이 보여야 하니 적게 덮어요.
+#
+# ⭐⭐ **이 가로 그라데이션이 이 기능의 핵심 설계예요.** 카드에서 글씨는 거의 전부
+#    **왼쪽**에 있어요(닉네임·칭호·티어는 x 210~830, 통계 칸은 패널이 불투명해서 가려요).
+#    오른쪽 위는 워터마크뿐이에요. 그래서 "왼쪽은 어둡게 · 오른쪽은 밝게" 덮으면
+#    **글씨 가독성을 하나도 안 잃고** 그림이 보여요.
+# 🚨 그 덕분에 패널·글씨 그리는 코드를 **한 줄도 안 고쳤어요.** 반투명 패널로 가려면
+#    "패널 전부 → 합성 → 글씨" 순서로 `_render`를 쪼개야 하는데, 지금은 패널과 글씨가
+#    `_stat_box` 안에서 번갈아 그려지니 통째로 뒤집어야 했어요. 그 위험을 피했어요.
+# 🚨 겜악귀들의천국 메인 메뉴에서 배운 것과 같아요 — **배경은 연하게.**
+#
+# 🚨 **한 번에 쭉 옅어지게 했다가 고쳤어요.** 흰 배경 그림으로 뽑아보니 글씨가 있는
+#    가운데(x 400~700)까지 밝아져서 "VALORANT"·하단 출석 줄이 묻혔어요. 그래서
+#    **x가 SCRIM_HOLD까지는 진하게 유지**하다가 거기서부터 옅어지게 2단으로 바꿨어요.
+#    글씨는 전부 왼쪽 62% 안에 있고, 오른쪽 38%가 그림 자리예요.
+SCRIM_LEFT = 0.90
+SCRIM_RIGHT = 0.30
+SCRIM_HOLD = 0.62
+
+
+def _cover_resize(art: "Image.Image") -> "Image.Image":
+    """카드 비율에 맞춰 **꽉 채우고 넘치는 쪽을 잘라요**(CSS의 object-fit: cover).
+
+    ⚠️ 그냥 resize하면 비율이 깨져서 캐릭터가 홀쭉해져요. 맞춰 넣으면(contain) 여백이
+    생기고, 그 여백이 그라데이션도 아니라 더 지저분해요."""
+    target_w, target_h = CARD_WIDTH, CARD_HEIGHT
+    src_w, src_h = art.size
+    scale = max(target_w / src_w, target_h / src_h)
+    new = (max(1, round(src_w * scale)), max(1, round(src_h * scale)))
+    art = art.resize(new, Image.LANCZOS)
+    # 가로는 가운데, 세로는 **위쪽**을 남겨요 — 인물 그림은 얼굴이 위에 있어요.
+    off_x = (new[0] - target_w) // 2
+    off_y = min((new[1] - target_h) // 2, max(0, (new[1] - target_h) // 4))
+    return art.crop((off_x, off_y, off_x + target_w, off_y + target_h))
+
+
+def _art_background(image_path: str, top=BG_TOP, bottom=BG_BOTTOM) -> "Image.Image":
+    """🎴 캐릭터 그림을 배경으로 깔아요. 실패하면 **그라데이션으로 물러나요.**
+
+    🚨 그림이 깨져 있어도 카드는 나와야 해요. 2026-10에 유니티에서 *"파괴된 스프라이트도
+    '그림 없음'이 된다"*로 한 번 당했어요 - 여기선 예외를 잡아 기본 배경으로 떨어뜨려요.
+    ⚠️ **캐시하지 않아요.** 1000x560 배경 하나가 ~1.7MB인데 운영 머신의 여유 RAM이
+       55MB대예요. `_RENDER_LOCK`(동시 2장) 안에서 그때그때 디코딩하는 게 안전해요.
+    """
+    try:
+        with Image.open(image_path) as source:
+            art = _cover_resize(source.convert("RGB"))
+    except Exception:                        # noqa: BLE001
+        log.warning("🎴 카드 테마 그림을 못 읽었어요(%s) - 그라데이션으로 그려요",
+                    image_path, exc_info=True)
+        return _gradient_background(top, bottom)
+
+    # 가로 스크림: 왼쪽 SCRIM_LEFT → 오른쪽 SCRIM_RIGHT 만큼 검정을 덮어요.
+    mask = Image.new("L", (CARD_WIDTH, 1))
+    mdraw = ImageDraw.Draw(mask)
+    hold_px = CARD_WIDTH * SCRIM_HOLD
+    for x in range(CARD_WIDTH):
+        if x <= hold_px:
+            alpha = SCRIM_LEFT                       # 글씨 영역 — 진하게 유지
+        else:
+            ratio = (x - hold_px) / max(1.0, CARD_WIDTH - 1 - hold_px)
+            alpha = SCRIM_LEFT + (SCRIM_RIGHT - SCRIM_LEFT) * ratio
+        mdraw.point((x, 0), fill=int(alpha * 255))
+    mask = mask.resize((CARD_WIDTH, CARD_HEIGHT))
+    # 덮는 색은 테마에서 뽑은 어두운 색이에요(순검정보다 그림과 어울려요).
+    veil = _gradient_background(top, bottom)
+    return Image.composite(veil, art, mask)
+
+
 def _circle_avatar(avatar_bytes: bytes | None, size: int) -> "Image.Image | None":
     """아바타를 정사각형으로 맞춘 뒤 원형으로 잘라요."""
     if not avatar_bytes:
@@ -208,8 +314,21 @@ def _progress_bar(draw, x, y, width, height, ratio: float, color=GOLD, track=(38
 def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
     """실제 그리기. **동기 함수**라 반드시 to_thread로 불러야 해요."""
     # 모르는 테마 이름이 들어와도(테마를 지웠거나 데이터가 낡았거나) 기본으로 그려요.
-    theme = THEMES.get(data.get("theme") or "", THEMES["기본"])
-    image = _gradient_background(theme["top"], theme["bottom"])
+    # 🚨 **`ALL_THEMES`를 봐야 해요** — `THEMES`만 보면 캐릭터 테마를 산 사람이
+    #    조용히 기본 배경을 받아요(돈만 내고 안 바뀌는, 제일 나쁜 결과).
+    theme = ALL_THEMES.get(data.get("theme") or "", THEMES["기본"])
+    if theme.get("image"):
+        image = _art_background(theme["image"], theme["top"], theme["bottom"])
+    else:
+        image = _gradient_background(theme["top"], theme["bottom"])
+
+    # 🚨🚨 **패널 밖에 있는 흐린 글씨**는 그림 테마에서 묻힐 수 있어요. 패널 위 글씨는
+    #    패널이 불투명해서 안전한데, 배경에 바로 얹는 글씨(VALORANT 라벨 · 전적 꼬리말 ·
+    #    하단 출석 줄 · 워터마크)는 그림이 밝으면 그대로 사라져요. 실제로 흰 배경
+    #    그림으로 뽑아보고 찾았어요. → 그림 테마일 때만 **검은 테두리**를 둘러요.
+    #    ⚠️ 색 테마는 배경이 늘 어두우니 손대지 않아요(괜히 바꾸면 촌스러워져요).
+    on_art = bool(theme.get("image"))
+    art_stroke = {"stroke_width": 2, "stroke_fill": (0, 0, 0)} if on_art else {}
     panel, panel_edge = _panel_colors(theme)
     draw = ImageDraw.Draw(image)
 
@@ -259,7 +378,8 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
 
     tier_text = data.get("tier") or "티어 미확인"
     tier_y = avatar_y + (96 if title else 64)
-    draw.text((text_x, tier_y), "VALORANT", font=_font("regular", 18), fill=TEXT_DIM)
+    draw.text((text_x, tier_y), "VALORANT", font=_font("regular", 18), fill=TEXT_DIM,
+              **art_stroke)
     draw.text(
         (text_x + 96, tier_y - 4), tier_text, font=_font("bold", 26),
         fill=accent if data.get("tier") else TEXT_DIM,
@@ -302,7 +422,7 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
             draw.text(
                 (x + 4, stat_y + 4),
                 _fit_text(draw, tail, tail_font, max(CARD_WIDTH - 44 - x - 4, 0)),
-                font=tail_font, fill=TEXT_DIM,
+                font=tail_font, fill=TEXT_DIM, **art_stroke,
             )
 
     # ── 통계 4칸 ─────────────────────────────────────────────
@@ -366,22 +486,31 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
     if footer_parts:
         draw.text(
             (left, footer_y), "  ·  ".join(footer_parts),
-            font=_font("regular", 20), fill=TEXT_SUB,
+            font=_font("regular", 20), fill=TEXT_SUB, **art_stroke,
         )
 
     # ── 워터마크 ─────────────────────────────────────────────
+    #
+    # 🚨🚨 **여기만 오른쪽에 있는 글씨예요.** 캐릭터 테마는 오른쪽 스크림이 옅어서
+    #    (그림을 보여주려고) 밝은 그림을 깔면 회색 워터마크가 **그대로 묻혀요.**
+    #    실제로 샘플 테마의 달과 겹쳐 안 보였어요. 그래서 그림 테마일 때만
+    #    ⒜ 글씨를 밝게 ⒝ 검은 테두리(stroke)를 둘러요 — **어떤 그림 위에서도** 읽혀요.
+    #    ⚠️ 색 테마는 배경이 늘 어두우니 원래 모양 그대로 둬요(괜히 바꾸면 촌스러워져요).
+    mark_fill = TEXT_SUB if on_art else TEXT_DIM
+    mark_stroke = art_stroke
+
     mark_font = _font("bold", 18)
     mark = "악귀 프로필"
     draw.text(
         (CARD_WIDTH - 44 - draw.textlength(mark, font=mark_font), 30),
-        mark, font=mark_font, fill=TEXT_DIM,
+        mark, font=mark_font, fill=mark_fill, **mark_stroke,
     )
     if data.get("season"):
         season_font = _font("regular", 16)
         season_text = f"시즌 {data['season']}"
         draw.text(
             (CARD_WIDTH - 44 - draw.textlength(season_text, font=season_font), 54),
-            season_text, font=season_font, fill=TEXT_DIM,
+            season_text, font=season_font, fill=mark_fill, **mark_stroke,
         )
 
     buffer = io.BytesIO()

@@ -334,13 +334,42 @@ layout_ok(RerollView(1, LINKED_PICKS), "리롤")
 layout_ok(ThemeView(1, [cosmetic_store.DEFAULT_THEME], cosmetic_store.DEFAULT_THEME), "테마")
 
 theme_payload = ThemeView(1, ["심해"], "심해").to_components()
-opts = theme_payload[0]["components"][0]["options"]
-check("테마 드롭다운 선택지가 25개 이하", len(opts) <= 25, str(len(opts)))
-check("테마 드롭다운에 전체 테마가 나온다", len(opts) == len(profile_card.THEMES), str(len(opts)))
+# 🎴 2026-11-03부터 드롭다운이 **두 개**예요(🎨 색 / 🎴 캐릭터). 값이 달라서 섞으면
+#    헷갈리고, 캐릭터는 계속 늘어나는데 드롭다운 한도가 25개라 색 테마가 밀려나요.
+_selects = [c for row in theme_payload for c in row["components"]
+            if c.get("type") == 3]            # 3 = StringSelect
+check("테마 드롭다운이 색/캐릭터로 나뉘어 있다",
+      len(_selects) == (2 if profile_card.CHARACTER_THEMES else 1),
+      f"{len(_selects)}개 · 캐릭터 {len(profile_card.CHARACTER_THEMES)}종")
+for _sel in _selects:
+    check(f"드롭다운 선택지가 25개 이하 ({_sel['placeholder']})",
+          len(_sel["options"]) <= 25, str(len(_sel["options"])))
+
+opts = _selects[0]["options"]
+check("색 드롭다운에 색 테마가 전부 나온다",
+      len(opts) == len(profile_card.THEMES), str(len(opts)))
 check("보유 테마는 '보유 중'으로 표시",
       any("보유 중" in (o.get("description") or "") for o in opts), str(opts[:2]))
-check("미보유 테마는 가격 표시",
-      any(f"{profile_card.THEME_PRICE}코인" in (o.get("description") or "") for o in opts))
+check("미보유 색 테마는 색 가격 표시",
+      any(f"{profile_card.COLOR_THEME_PRICE}코인" in (o.get("description") or "") for o in opts))
+if profile_card.CHARACTER_THEMES:
+    copts = _selects[1]["options"]
+    check("캐릭터 드롭다운에 캐릭터 테마가 전부 나온다",
+          len(copts) == min(len(profile_card.CHARACTER_THEMES), 25), str(len(copts)))
+    # 🚨 **값이 섞이면 안 돼요** - 캐릭터 칸에 15코인이 적히면 25코인이 빠지는데
+    #    15코인이라 적힌 거라 그대로 민원이에요.
+    check("캐릭터 칸에는 캐릭터 가격이 적힌다",
+          all(f"{profile_card.CHARACTER_THEME_PRICE}코인" in (o.get("description") or "")
+              or "보유 중" in (o.get("description") or "") for o in copts),
+          str(copts[:2]))
+    check("캐릭터 칸에 색 가격이 섞여 있지 않다",
+          not any(f"{profile_card.COLOR_THEME_PRICE}코인" in (o.get("description") or "")
+                  for o in copts), str(copts[:2]))
+# 📮 요청 버튼
+check("📮 캐릭터 요청 버튼이 있다",
+      any(c.get("type") == 2 and "요청" in (c.get("label") or "")
+          for row in theme_payload for c in row["components"]),
+      str(theme_payload))
 
 
 async def load_cog():
@@ -625,7 +654,7 @@ from utils.mission_store import REROLL_PRICE as _RP  # noqa: E402
 _labels = " | ".join(i.label or "" for i in _panel.children)
 for _tag, _val in (("낚시대", _fish.ROD_PRICE), ("소형", _fish.SMALL_ROD_PRICE),
                    ("리롤", _RP), ("보호권", _PP),
-                   ("테마", profile_card.THEME_PRICE),
+                   ("테마", profile_card.COLOR_THEME_PRICE),
                    ("칭호", title_store.TITLE_PLANS[10])):
     check(f"버튼 라벨에 {_tag} 가격({_val})이 상수에서 들어왔다",
           f"{_val}코인" in _labels, _labels)
@@ -685,6 +714,111 @@ _registers = _cog_load is not None and any(
     and any(getattr(getattr(a, "func", None), "id", "") == "ShopPanelView" for a in n.args)
     for n in _ast.walk(_cog_load) if isinstance(n, _ast.Call))
 check("🚨 cog_load에서 add_view(ShopPanelView())를 실제로 호출한다", _registers)
+
+
+# ==================================================================
+# 🎴 캐릭터 카드 테마 (2026-11-03)
+# ==================================================================
+print("\n🎴 캐릭터 카드 테마")
+
+from utils import card_theme_assets as _cta  # noqa: E402
+
+# 🚨🚨 **제일 중요한 검사**: 목록에 있는데 그림이 없으면 25코인을 받고 카드는
+#    기본 배경으로 그려져요. 로더가 그런 항목을 빼야 해요.
+_missing = [k for k, v in profile_card.CHARACTER_THEMES.items()
+            if not os.path.exists(v.get("image") or "")]
+check("🚨 팔리는 캐릭터 테마는 그림 파일이 전부 있다", not _missing, str(_missing))
+
+check("캐릭터 테마는 kind=character",
+      all(v.get("kind") == "character" for v in profile_card.CHARACTER_THEMES.values()))
+check("색 테마는 kind=color",
+      all(v.get("kind") == "color" for v in profile_card.THEMES.values()))
+
+# 🚨 이름이 겹치면 `ALL_THEMES`에서 색 테마가 이겨서 **그림이 영영 안 나와요.**
+_clash = sorted(set(profile_card.CHARACTER_THEMES) & set(profile_card.THEMES))
+check("🚨 색 테마와 이름이 겹치지 않는다", not _clash, str(_clash))
+check("ALL_THEMES가 둘을 다 담는다",
+      set(profile_card.ALL_THEMES) == set(profile_card.THEMES) | set(profile_card.CHARACTER_THEMES))
+
+# 🚨 **가격이 종류를 따라가야 해요.** 상수를 쓰면 적힌 값과 빠지는 값이 어긋나요.
+for _k in profile_card.THEMES:
+    check(f"   {_k} → 색 가격", profile_card.price_of(_k) == profile_card.COLOR_THEME_PRICE)
+for _k in profile_card.CHARACTER_THEMES:
+    check(f"   {_k} → 캐릭터 가격",
+          profile_card.price_of(_k) == profile_card.CHARACTER_THEME_PRICE)
+check("모르는 테마는 비싼 쪽으로 틀린다(공짜 누수 방지)",
+      profile_card.price_of("있을리없는테마") == profile_card.CHARACTER_THEME_PRICE)
+
+# 🚨 구매 경로가 **상수가 아니라 price_of**를 쓰는지. 상수를 쓰면 15코인이라 적고
+#    25코인을 빼는(또는 그 반대) 사고가 나요 — 2026-11-02 미션 보상과 같은 모양.
+_pick_src = _shop_src[_shop_src.index("async def pick_theme"):]
+_pick_src = _pick_src[:_pick_src.index("# ─── 품목별 동작")]
+check("🚨 구매가 price_of(key)로 값을 정한다", "price_of(key)" in _pick_src)
+check("🚨 구매 경로에 가격 상수가 직접 안 쓰인다",
+      "COLOR_THEME_PRICE" not in _pick_src and "CHARACTER_THEME_PRICE" not in _pick_src,
+      _pick_src[:200])
+# 🚨 차감·환불·안내가 **같은 변수**를 써야 해요(한쪽만 고치면 돈이 새요).
+check("🚨 환불도 같은 price를 쓴다", 'coin_wallet.add(interaction.user.id, price' in _pick_src)
+check("🚨 모르는 테마는 사기 전에 막는다", "if key not in ALL_THEMES" in _pick_src)
+
+# 🖼️ 그림 테마가 실제로 **다른 배경**을 그리는지 (렌더까지 돌려요)
+if profile_card.PILLOW_AVAILABLE and profile_card.CHARACTER_THEMES:
+    _ck = next(iter(profile_card.CHARACTER_THEMES))
+    _sample = {"name": "테스트", "tier": None, "coin": 1,
+               "record": {"wins": 0, "losses": 0, "win_rate": 0, "best_streak": 0},
+               "achievements": 1, "achievements_total": 50}
+    _basic = profile_card._render({**_sample, "theme": "기본"}, None)
+    _char = profile_card._render({**_sample, "theme": _ck}, None)
+    check(f"🖼️ '{_ck}' 카드가 기본 카드와 다르다 (그림이 실제로 깔린다)",
+          _basic != _char, f"기본 {len(_basic)}B · {_ck} {len(_char)}B")
+
+    # 🚨 그림 파일이 **깨져 있어도** 카드는 나와야 해요(기본 배경으로 물러남).
+    _broken = os.path.join(_cta.THEME_DIR, "_깨진그림_테스트.png")
+    with open(_broken, "wb") as _f:
+        _f.write(b"not a png at all")
+    try:
+        _out = profile_card._art_background(_broken)
+        check("🚨 깨진 그림이어도 배경을 돌려준다(카드가 안 죽는다)",
+              _out.size == (profile_card.CARD_WIDTH, profile_card.CARD_HEIGHT))
+    finally:
+        os.remove(_broken)
+
+# 🚨 파생 패널 색이 **반드시 어두워야** 해요. 밝으면 그 위의 흐린 글씨가 안 읽혀요
+#    (흰 배경 그림으로 실제 카드를 뽑아보고 찾은 결함이에요).
+for _k, _v in profile_card.CHARACTER_THEMES.items():
+    _panel, _edge = profile_card._panel_colors(_v)
+    check(f"   {_k} 패널색이 어둡다 {_panel}", max(_panel) <= 60, str(_panel))
+check("_cap이 밝은 색을 눌러준다",
+      max(_cta._cap((250, 248, 246), 30)) <= 30, str(_cta._cap((250, 248, 246), 30)))
+check("_cap이 색조를 유지한다 (붉은 그림이 회색이 되지 않는다)",
+      _cta._cap((250, 100, 100), 30)[0] > _cta._cap((250, 100, 100), 30)[1],
+      str(_cta._cap((250, 100, 100), 30)))
+
+# 🚨🚨 **위 두 줄만으로는 느슨해요.** `_cap`을 직접 부르니 `_dominant`가 그걸
+#    **안 쓰게 바뀌어도 통과**해요. 실제로 역검증에서 `_dominant`의 상한을 떼봤는데
+#    등록된 테마(오로라)가 원래 어두워서 아무 검사도 안 걸렸어요.
+#    → **진짜 밝은 그림 파일**을 만들어서 `_dominant`가 어두운 색을 내는지 봐요.
+if profile_card.PILLOW_AVAILABLE:
+    from PIL import Image as _PILImage
+    _bright = os.path.join(_cta.THEME_DIR, "_밝은그림_테스트.png")
+    _PILImage.new("RGB", (1000, 560), (252, 250, 246)).save(_bright)
+    try:
+        _dom = _cta._dominant(__import__("pathlib").Path(_bright))
+        check("🚨 흰 그림에서도 파생 색이 어둡다 (_dominant가 상한을 건다)",
+              _dom is not None and max(_dom[0]) <= 32 and max(_dom[1]) <= 56, str(_dom))
+        # 그 색으로 실제 패널을 뽑아봐요 — 흐린 글씨가 읽히려면 패널이 어두워야 해요.
+        _p, _e = profile_card._panel_colors({"top": _dom[0], "bottom": _dom[1]})
+        check("🚨 흰 그림의 패널색이 보조 글씨(TEXT_DIM)보다 어둡다",
+              max(_p) < min(profile_card.TEXT_DIM), f"패널 {_p} vs 글씨 {profile_card.TEXT_DIM}")
+    finally:
+        os.remove(_bright)
+
+# 📮 요청 저장소: 같은 캐릭터는 한 줄로 모이고, 하루 한도가 있어야 해요.
+from utils import theme_request_store  # noqa: E402
+
+check("요청 정규화가 공백·대소문자를 무시한다",
+      theme_request_store.normalize(" Usagi ") == theme_request_store.normalize("usagi"))
+check("하루 한도가 잡혀 있다", theme_request_store.DAILY_LIMIT >= 1)
 
 print()
 if failures:

@@ -80,7 +80,9 @@ from utils.mission_store import (
 from utils.event_store import REMIND_BEFORE_MINUTES as EVENT_REMIND_MINUTES
 from utils.notify_prefs import NOTIFY_KINDS
 from utils.pokemon_store import COIN_PER_ATTENDANCE
-from utils.profile_card import THEME_PRICE
+from utils.profile_card import (
+    CHARACTER_THEME_PRICE, CHARACTER_THEMES, COLOR_THEME_PRICE,
+)
 from utils.title_store import TITLE_DAYS, TITLE_PLANS
 from utils.voice_level import (
     ROLE_TIERS as VOICE_ROLE_TIERS,
@@ -192,7 +194,7 @@ def _coin_spend() -> str:
 · 🪙 **#🪙｜악귀상점** 방에 가격표가 늘 떠 있어요 — **버튼을 누르면 그 자리에서 바로** 사져요
   (2026-10-27부터. 명령어를 몰라도 돼요. 누른 결과는 **나한테만** 보여요)
 · 🛒 `/악귀상점` — 🎣 낚시대 {ROD_PRICE}코인(🪝 소형 {SMALL_ROD_PRICE}코인) · 🎲 미션 리롤권 {REROLL_PRICE}코인 ·
-  🧊 출석 보호권 {PROTECT_PRICE}코인 · 🎨 프로필 카드 테마 {THEME_PRICE}코인
+  🧊 출석 보호권 {PROTECT_PRICE}코인 · 🎨 프로필 카드 테마 {_theme_price_text()}
 · 🎴 `/카드뽑기` — {PULL_PRICE}코인에 {CARDS_PER_PULL}장
 · 🎰 `/도박` — 슬롯 · 하이로우 · 블랙잭
 · 🏷️ `/칭호구매` — {_title_plan_line()}
@@ -210,6 +212,14 @@ def _attendance() -> str:
   `/출석`을 안 하셨으면 밤에 DM이 한 번 가요(🧊 보호권이 있으면 그것도 같이 알려드려요).
   번거로우면 `/알림설정`에서 꺼요.
 · 누가 제일 오래 왔는지는 `/출석순위`로 봐요."""
+
+
+def _theme_price_text() -> str:
+    """🎨 테마 값. 🚨 **색과 캐릭터의 값이 달라요**(2026-11-03) — 하나만 적으면 거짓이에요.
+    캐릭터 테마가 아직 없으면 범위로 적는 것도 거짓이라 그때는 한 값만 적어요."""
+    if not CHARACTER_THEMES:
+        return f"{COLOR_THEME_PRICE}코인"
+    return f"색 {COLOR_THEME_PRICE}코인 · 🎴 캐릭터 {CHARACTER_THEME_PRICE}코인"
 
 
 def _rarity_line() -> str:
