@@ -228,11 +228,14 @@ def _when_text(saved_at: str | None) -> str:
 
 
 def _player_line(player: team_balance.Rated, *, captain: bool = False) -> str:
-    """'🥇 골드 3 · 악귀 (1120점)' 같은 한 줄이에요. 팀장이면 앞에 👑을 붙여요."""
+    """'🥇 골드 3 · 악귀 (1120점)' 같은 한 줄이에요. 팀장이면 앞에 👑을 붙여요.
+
+    ⚠️ `display_name_for`(역할 이름)가 아니라 `text_label_for`를 써요 — 역할 아이콘은
+    글자 출력에 안 따라오니, 여기선 이모지가 유일한 티어 색 단서예요."""
     if player.tier_index is None:
         tier_text = "❔ 티어 미확인"
     else:
-        tier_text = tier_roles.display_name_for(
+        tier_text = tier_roles.text_label_for(
             tier_roles.tier_name_from_index(player.tier_index)
         )
     score_text = f" ({player.agwi_score:.0f}점)" if player.agwi_score is not None else ""
@@ -252,7 +255,7 @@ def _team_field_name(title: str, team: list[team_balance.Rated], balanced: bool)
     if not balanced or not team:
         return f"{title} ({len(team)}명)"
     average = sum(p.rating for p in team) / len(team)
-    average_tier = tier_roles.display_name_for(tier_roles.tier_name_from_index(average))
+    average_tier = tier_roles.text_label_for(tier_roles.tier_name_from_index(average))
     return f"{title} ({len(team)}명) · 평균 {average_tier}"
 
 

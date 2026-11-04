@@ -1,10 +1,42 @@
+import logging
+import os
 from typing import Optional
 
+import aiohttp
 import discord
 from discord import app_commands
 
+from utils import henrik_api
 from utils.riot_account_store import delete_account, get_account, set_account
 from utils.tier_roles import get_member_current_tier_roles
+
+log = logging.getLogger(__name__)
+
+# 지역 코드를 사람 말로. 등록 결과에 보여줘서 **엉뚱한 지역으로 잡혔을 때 바로 눈에 띄게** 해요.
+REGION_LABELS = {
+    "kr": "한국", "ap": "아시아", "na": "북미", "eu": "유럽",
+    "latam": "중남미", "br": "브라질",
+}
+
+
+async def _detect_region(name: str, tag: str) -> tuple[Optional[str], int]:
+    """계정 지역을 알아내요. `(region, status)` — 못 알아내면 region이 None.
+
+    ⚠️ 여기서만 세션을 그때그때 만들어 써요. `/티어 계정등록`은 어쩌다 한 번 쓰는 명령이라
+    상시 세션을 들고 있을 이유가 없어요(`cogs/rank.py`는 자주 쓰여서 세션을 유지해요).
+    🚨 호출은 반드시 `henrik_api` 경유 — 직접 부르면 분당 30회 한도 계산이 어긋나요."""
+    api_key = os.getenv("HENRIKDEV_API_KEY")
+    if not api_key:
+        return None, 0
+    try:
+        async with aiohttp.ClientSession() as session:
+            return await henrik_api.detect_region(
+                session, {"Authorization": api_key}, name, tag
+            )
+    except Exception as error:  # noqa: BLE001
+        # 지역을 못 알아낸다고 등록 자체를 막지는 않아요(나중에 자동으로 고쳐져요).
+        log.warning("계정 지역 확인 실패 (%s#%s): %s", name, tag, error)
+        return None, 0
 
 
 class TierGroup(app_commands.Group):
@@ -20,9 +52,36 @@ class TierGroup(app_commands.Group):
         태그="태그 (# 뒷부분, 예: VALO)",
     )
     async def register_account(self, interaction: discord.Interaction, 닉네임: str, 태그: str):
-        set_account(interaction.user.id, 닉네임, 태그)
-        await interaction.response.send_message(
-            f"✅ 라이엇 계정을 **{닉네임}#{태그}**(으)로 등록했어요.\n"
+        # 🌏 여기서 **지역을 한 번 알아내 저장**해요. 그래야 `/전적`·발로 미션 자동판정·
+        #    내전 KDA가 아시아(ap) 계정에서도 돌아가요. 이 한 번의 조회가 **계정이 진짜
+        #    있는지 검증**까지 겸해요 — 전엔 오타를 쳐도 그대로 저장돼서, 나중에 전적이
+        #    안 나올 때까지 아무도 몰랐어요.
+        # 🚨 3초 안에 응답해야 해서 먼저 defer해요(HenrikDev 왕복이 넘길 수 있어요).
+        await interaction.response.defer(ephemeral=True)
+        region, status = await _detect_region(닉네임, 태그)
+
+        if status == 404:
+            # 404는 다시 불러도 똑같아요(그런 라이엇 아이디가 없음). 저장하지 않아요.
+            await interaction.followup.send(
+                f"❌ **{닉네임}#{태그}** 라는 라이엇 계정을 찾을 수 없어요.\n"
+                f"닉네임과 태그를 다시 확인해주세요. (태그는 `#` **뒷부분만** 적어요)",
+                ephemeral=True,
+            )
+            return
+
+        set_account(interaction.user.id, 닉네임, 태그, region=region)
+
+        if region:
+            where = REGION_LABELS.get(region, region)
+            extra = f"\n🌏 계정 지역은 **{where}**(`{region}`)로 확인했어요."
+        else:
+            # 429·5xx 같은 일시적 실패예요. 저장은 해두고, 나중에 404를 맞는 순간
+            # 자동으로 지역을 찾아 고쳐요(그때 한 번만 조회가 더 나가요).
+            extra = ("\n⚠️ 지금은 계정 지역을 확인하지 못했어요(전적 API가 잠시 바빠요). "
+                     "조회할 때 자동으로 찾아서 맞춰둘게요.")
+
+        await interaction.followup.send(
+            f"✅ 라이엇 계정을 **{닉네임}#{태그}**(으)로 등록했어요.{extra}\n"
             f"이제 닉네임/태그 없이 `/전적`만 입력해도 본인 전적이 바로 조회되고, "
             f"이 계정을 조회할 때만 티어 역할이 자동으로 갱신돼요.",
             ephemeral=True,

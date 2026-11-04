@@ -25,8 +25,12 @@ TIER_COLOR_MAP = {
     "레디언트": discord.Color.from_rgb(255, 255, 153),
 }
 
-# 서버 부스트 레벨 2 미만이면 역할에 커스텀 이미지 아이콘을 못 붙여서(디스코드 자체 제한),
-# 대신 역할 이름 앞에 이모지를 붙여서 시각적으로 구분해요. (레벨 2 되면 실제 아이콘도 같이 붙어요)
+# 🕰️ **옛 이름**에 쓰던 이모지예요. 커스텀 이미지 아이콘을 못 붙이던 시절(부스트 레벨 1)의
+# 대체재였어요. 2026-11-03에 `ROLE_ICONS`가 해금돼서 진짜 배지가 붙었고, 이모지까지 같이 두니
+# 아이콘이 둘로 보여서 **이름에서는 뺐어요**(`💠 다이아몬드 2` -> `다이아몬드 2`).
+#
+# 🚨 지우지 말 것. 디스코드에 아직 옛 이름으로 남아 있는 역할을 **알아보는 데** 써요.
+#    이게 없으면 봇이 같은 티어 역할을 이름만 다르게 하나 더 만들어요.
 TIER_EMOJI = {
     "아이언": "⚙️",
     "브론즈": "🥉",
@@ -68,12 +72,31 @@ def parse_korean_tier(tier_name: str) -> Optional[str]:
 
 
 def display_name_for(tier_name: str) -> str:
-    """'골드 2' -> '🥇 골드 2' 처럼, 실제 디스코드에 보일 이모지 포함 역할 이름을 만들어요."""
+    """실제 디스코드에 보일 역할 이름이에요. 지금은 티어 이름 그대로예요 ('골드 2').
+
+    역할에 진짜 배지 이미지가 붙은 뒤로 이모지 접두사를 뺐어요. 이 함수를 거치는 이유는
+    `cogs/team.py` 같은 호출부가 "표시용 이름"을 여기서만 받아가게 하려는 거예요."""
+    return tier_name
+
+
+def text_label_for(tier_name: str) -> str:
+    """글자만 나오는 곳(임베드·명단)에서 쓸 이름이에요. '골드 2' -> '🥇 골드 2'.
+
+    🚨 **역할 아이콘은 글자 출력엔 안 따라와요.** `/팀짜기` 명단처럼 역할이 아니라 텍스트로
+    찍히는 자리에선 이모지가 유일한 색 단서라, 거기서는 이모지를 그대로 써요."""
     if not tier_name:
         return tier_name
     base = tier_name.split()[0]
     emoji = TIER_EMOJI.get(base, "")
     return f"{emoji} {tier_name}".strip()
+
+
+def legacy_display_name_for(tier_name: str) -> str:
+    """🕰️ 2026-11-03 이전의 **역할** 이름이에요. 지금의 텍스트 라벨과 형식이 같아요.
+
+    쓰임이 달라서 이름을 따로 뒀어요 — 이쪽은 "디스코드에 아직 안 바뀐 채 남아 있는 역할을
+    찾는" 용도예요. 나중에 텍스트 라벨 형식을 바꾸더라도 이 함수는 옛 역할 이름 그대로여야 해요."""
+    return text_label_for(tier_name)
 
 
 def _build_tier_role_names() -> list[str]:
@@ -87,17 +110,21 @@ def _build_tier_role_names() -> list[str]:
 
 # 8개 티어 * 3단계 + 레디언트 = 25개 (디스코드 선택지 한도인 25개와도 딱 맞아요)
 TIER_OPTIONS = _build_tier_role_names()
-# 실제 디스코드에 만들어질 이모지 포함 이름 목록/집합이에요. 역할 판별은 이걸로 해요.
+# 실제 디스코드에 만들어질 이름 목록이에요.
 TIER_ROLE_DISPLAY_NAMES = [display_name_for(t) for t in TIER_OPTIONS]
-TIER_ROLE_NAME_SET = set(TIER_ROLE_DISPLAY_NAMES)
+# 🚨 역할 판별용 집합엔 **옛 이름(이모지 붙은 것)도 같이** 넣어요. 개명이 아직 안 된 역할을
+#    "티어 역할이 아니다"라고 보면, 중복 정리도 못 하고 역할만 하나 더 만들게 돼요.
+TIER_ROLE_LEGACY_NAMES = [legacy_display_name_for(t) for t in TIER_OPTIONS]
+TIER_ROLE_NAME_SET = set(TIER_ROLE_DISPLAY_NAMES) | set(TIER_ROLE_LEGACY_NAMES)
 
 
 # 티어 하나를 숫자 한 개로 바꿔주는 자리예요. `/팀짜기` 밸런싱이 "실력 점수"의 축으로 써요.
 # 순서는 TIER_OPTIONS 그대로라, 아이언1=1 … 실버3=9 … 레디언트=25가 돼요.
 # 실버3=9인 건 우연이 아니라 cogs/rank.py의 티어 배수 기준점(실버3·0RR=1.00배)과 같은 축이에요.
 TIER_INDEX_BY_NAME = {name: index for index, name in enumerate(TIER_OPTIONS, start=1)}
-TIER_INDEX_BY_DISPLAY_NAME = {
-    display_name_for(name): index for name, index in TIER_INDEX_BY_NAME.items()
+# 옛 이름(이모지 붙은 것)도 같이 풀어줘요 — 개명 전 역할을 달고 있어도 밸런싱이 멀쩡하도록.
+TIER_INDEX_BY_LEGACY_NAME = {
+    legacy_display_name_for(name): index for name, index in TIER_INDEX_BY_NAME.items()
 }
 # 기준점(실버 3). 티어를 알 수 없는 사람을 어디에 놓을지 정할 때 씁니다.
 BASELINE_TIER_INDEX = TIER_INDEX_BY_NAME["실버 3"]
@@ -108,7 +135,7 @@ def tier_index_of(tier_name: str) -> Optional[int]:
     """'실버 3' -> 9, '✨ 레디언트'(역할 이름) -> 25. 못 알아보면 None."""
     if not tier_name:
         return None
-    return TIER_INDEX_BY_NAME.get(tier_name) or TIER_INDEX_BY_DISPLAY_NAME.get(tier_name)
+    return TIER_INDEX_BY_NAME.get(tier_name) or TIER_INDEX_BY_LEGACY_NAME.get(tier_name)
 
 
 def tier_name_from_index(index: int) -> str:
@@ -135,7 +162,31 @@ async def get_or_create_tier_role(
 ) -> discord.Role:
     display_name = display_name_for(tier_name)
     role = discord.utils.get(guild.roles, name=display_name)
+
+    if role is None:
+        # 🕰️ 아직 옛 이름(`💠 다이아몬드 2`)으로 남아 있는 역할이면 **새로 만들지 말고 개명**해요.
+        # 그냥 만들어버리면 같은 티어 역할이 둘이 되고, 멤버는 옛 쪽에 달려 있어서 조용히 어긋나요.
+        legacy = discord.utils.get(guild.roles, name=legacy_display_name_for(tier_name))
+        if legacy is not None:
+            try:
+                await legacy.edit(name=display_name, reason="티어 역할 이름에서 이모지 제거")
+                log.info(f"✏️ '{legacy.name}' 역할을 '{display_name}'로 바꿨어요.")
+            except discord.HTTPException as error:
+                log.warning(f"⚠️ '{legacy.name}' 개명에 실패했어요 ({error}). 옛 이름 그대로 써요.")
+            role = legacy
+
     if role is not None:
+        # 🚨 예전엔 여기서 그냥 돌아갔어요. 그래서 **아이콘은 역할을 만드는 순간에만** 붙었어요.
+        # 25개 티어 역할은 부스트 레벨 1이던 시절에 이미 다 만들어져 있어서, 2026-11-03에
+        # `ROLE_ICONS`가 해금된 뒤에도 `/전적`을 아무리 돌려도 아이콘이 안 붙었어요.
+        # 비어 있을 때만 채우니까 역할 하나당 사실상 딱 한 번만 PATCH가 나가요.
+        if icon_bytes and role.icon is None:
+            try:
+                await role.edit(display_icon=icon_bytes, reason="티어 역할 아이콘 보충")
+                log.info(f"🏷️ '{display_name}' 역할에 티어 배지 아이콘을 뒤늦게 붙였어요.")
+            except discord.HTTPException as error:
+                # 서버가 ROLE_ICONS를 못 쓰는 상태면(부스트 하락 등) 조용히 넘어가요.
+                log.warning(f"⚠️ '{display_name}' 역할에 아이콘을 못 붙였어요 ({error}).")
         return role
 
     base_name = tier_name.split()[0]
@@ -168,7 +219,9 @@ def get_member_current_tier_roles(member: discord.Member) -> list[discord.Role]:
 async def sync_tier_role(member: discord.Member, tier_name: str, icon_bytes: Optional[bytes] = None) -> dict:
     """
     멤버의 티어 역할을 실제 전적 기준(tier_name, 이모지 없는 순수 이름)에 맞게 동기화해요.
-    - 티어 역할이 없으면: 새로 부여 (이때 icon_bytes를 주면 역할 이미지 아이콘으로 적용돼요. 서버 부스트 레벨 2 필요)
+    - 티어 역할이 없으면: 새로 부여 (icon_bytes를 주면 역할 이미지 아이콘으로 적용돼요)
+      ⭐ 역할이 이미 있는데 아이콘만 비어 있으면 그때도 채워줘요 — 25개 역할이 부스트 레벨 1
+         시절에 만들어졌기 때문이에요. 일괄로 붙이려면 `scripts/apply_tier_role_icons.py`.
     - 있는데 다르면: 이전 역할 제거하고 새 역할 부여
     - 이미 같으면: 아무것도 안 함
 
@@ -198,10 +251,20 @@ async def sync_tier_role(member: discord.Member, tier_name: str, icon_bytes: Opt
 
     new_role = await get_or_create_tier_role(member.guild, tier_name, icon_bytes=icon_bytes)
 
-    if current_roles:
-        await member.remove_roles(*current_roles, reason="티어 변경으로 인한 이전 역할 제거")
+    # 🚨 개명 때문에 생긴 함정: 위 호출이 **멤버가 이미 달고 있던 그 역할의 이름만 바꿔서**
+    # 돌려줄 수 있어요(`💠 다이아몬드 2` -> `다이아몬드 2`). 그걸 "옛 역할"로 보고 떼면
+    # 방금 맞춘 역할을 뗐다 다시 다는 꼴이 돼요. 그래서 새 역할 자신은 제외해요.
+    stale = [r for r in current_roles if r != new_role]
+    if stale:
+        await member.remove_roles(*stale, reason="티어 변경으로 인한 이전 역할 제거")
     if new_role not in member.roles:
         await member.add_roles(new_role, reason=f"티어 자동 동기화: {display_name}")
 
-    status = "updated" if previous_names else "new"
+    if not previous_names:
+        status = "new"
+    elif stale:
+        status = "updated"
+    else:
+        # 달고 있던 역할의 이름만 바뀐 경우예요. 티어는 그대로니 "바뀌었다"고 하면 거짓말이에요.
+        status = "unchanged"
     return {"role": new_role, "status": status, "previous": previous_names[0] if previous_names else None}
