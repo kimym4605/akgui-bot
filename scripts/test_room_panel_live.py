@@ -255,9 +255,14 @@ known = {str(i.custom_id) for i in room_panel.RoomPanelView(None, ROOM_KINDS).ch
 print(f"  봇이 아는 custom_id {len(known)}개: {sorted(known)}")
 
 chans = get(f"/guilds/{conf['GUILD_ID']}/channels")
-PLAN = [("랭크-파티구인", "rank"), ("폐관수련-모집", "practice"),
-        ("내전모집", "scrim"), ("프리미어-모집", "premier")]
-for cname, kind in PLAN:
+# 🚨 채널 하나에 종류가 **여럿** 올 수 있다. 2026-11-01에 `#🏆｜프리미어-모집`을 접으면서
+#    (45일간 사람 글 0건·방 생성 0건) 🏆 버튼을 `#🏆랭크-파티구인` 패널에 **랭크와 나란히**
+#    얹었다. 기능은 그대로 살아 있다 — `/방만들기 종류:프리미어방`도 된다.
+#    그래서 여기서 볼 것은 "프리미어 전용 채널이 있는지"가 아니라 **그 버튼이 어딘가의
+#    패널에 실제로 박혀 있는지**다. 전용 채널을 다시 만들면 그 줄을 따로 추가할 것.
+PLAN = [("랭크-파티구인", ["rank", "premier"]), ("폐관수련-모집", ["practice"]),
+        ("내전모집", ["scrim"])]
+for cname, kinds in PLAN:
     ch = next((c for c in chans if cname in c["name"] and c["type"] == 0), None)
     if ch is None:
         check(False, f"#{cname} 채널")
@@ -286,8 +291,9 @@ for cname, kind in PLAN:
     check(bool(ids) and not unknown,
           f"#{ch['name']}: 게시된 {len(ids)}개가 전부 봇이 아는 것",
           f"모르는 것: {unknown}")
-    check(f"akgui:room:new:{kind}" in ids,
-          f"  └ 그 채널 종류 버튼({kind})이 박혀 있다", str(ids))
+    for kind in kinds:
+        check(f"akgui:room:new:{kind}" in ids,
+              f"  └ 그 채널 종류 버튼({kind})이 박혀 있다", str(ids))
 
 print("\n" + "=" * 52)
 if fails:
