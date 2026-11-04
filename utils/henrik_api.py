@@ -241,6 +241,37 @@ async def request(
     return status, payload
 
 
+async def detect_region(
+    session: aiohttp.ClientSession, headers: dict, name: str, tag: str
+) -> tuple[str | None, int]:
+    """🌏 라이엇 계정이 **어느 지역 서버**에 있는지 알아내요. `(region, status)`를 줘요.
+
+    `region`이 None이면 못 알아낸 거예요. `status`로 왜인지 갈라요:
+      · **404** — 그런 라이엇 계정이 아예 없어요(오타·개명). 다시 불러도 똑같아요.
+      · 그 외 — 일시적 실패(429·5xx). 나중에 다시 하면 돼요.
+
+    🚨 **왜 필요한가** (2026-11-03): 지역이 `"kr"`로 박혀 있어서 아시아(ap) 계정은
+    `/전적`·발로 미션 자동판정·내전 KDA가 전부 404로 조용히 실패했어요. 실측으로
+    `mmr/kr/...`은 404, `mmr/ap/...`은 200이었고, 이 엔드포인트가 `data.region`으로
+    **'ap'를 정확히 알려줬어요.**
+
+    🚨 호출 1회를 더 쓰니까 **정상 경로에서는 부르지 마세요.** 등록할 때 한 번,
+    그리고 404를 맞았을 때만 불러요(그러고 저장해두면 다음부터는 안 불러요).
+    분당 30회를 봇 전체가 나눠 쓰는 걸 잊지 마세요."""
+    status, payload = await request(
+        session,
+        # ⚠️ 일부러 urlencode를 안 해요 — 이 파일의 다른 경로들과 똑같이 맞춘 거예요.
+        #    aiohttp(yarl)가 알아서 인코딩하는데, 여기서 미리 `%`를 넣으면 그게 `%25`로
+        #    한 번 더 인코딩돼서 오히려 깨져요. 공백 든 닉네임도 이대로 잘 나가요.
+        f"/valorant/v1/account/{name}/{tag}",
+        headers=headers,
+    )
+    if status != 200:
+        return None, status
+    region = ((payload or {}).get("data") or {}).get("region")
+    return (region or None), status
+
+
 def retry_after_of(payload: dict) -> int:
     """429 payload에서 '몇 초 뒤에 다시 시도하면 되는지'를 꺼내요. 없으면 30초로 안내해요."""
     if isinstance(payload, dict):

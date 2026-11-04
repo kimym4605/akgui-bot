@@ -293,13 +293,23 @@ async def _one(pending_keys, match=None):
         _completed.append(key)
 
     os.environ.setdefault("HENRIKDEV_API_KEY", "test-key")
-    mission_cog.henrik_api = types.SimpleNamespace(request=fake_request)  # type: ignore
+    # 🚨 `detect_region`까지 넣어둬요. 안 넣으면 "지역을 모르는데 경기도 비었을 때"
+    #    복구 경로에서 AttributeError로 터져요(2026-11-03에 실제로 여기서 걸렸어요).
+    async def _fake_detect(*_a, **_k):
+        return "kr", 200
+
+    mission_cog.henrik_api = types.SimpleNamespace(  # type: ignore
+        request=fake_request, detect_region=_fake_detect)
     # aiohttp 세션은 쓰지 않아요 (요청 자체를 가로챘으니까요).
     cog._get_session = lambda: asyncio.sleep(0, result=None)  # type: ignore[assignment]
     # ⚠️ 미션 완료는 DB를 건드려요. 여기선 알림 도달만 볼 거라 가짜로 막아요.
     cog._complete = complete                                 # type: ignore[assignment]
     mission_cog.riot_account_store = types.SimpleNamespace(   # type: ignore
-        get_account=lambda _uid: ("피카츄", "PXG1"))
+        get_account=lambda _uid: ("피카츄", "PXG1"),
+        # 🌏 지역은 계정마다 저장돼요(2026-11-03). 여기선 한국 계정으로 고정해서
+        #    지역 자동판별 경로를 타지 않게 해요 — 이 테스트가 보는 건 알림 도달이에요.
+        get_region=lambda _uid: "kr",
+        set_region=lambda _uid, _r: False)
     mission_cog.match_feed = types.SimpleNamespace(post_new_matches=_fake_post)  # type: ignore
     mission_cog._extract_player_match_stats = lambda *_a: make_stat()  # type: ignore
     return await cog._check_valorant(USER, pending_keys, None)

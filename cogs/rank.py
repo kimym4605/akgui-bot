@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 import aiohttp
 
-from utils import agwi_weekly_store, henrik_api, valorant_coach
+from utils import agwi_weekly_store, henrik_api, riot_account_store, valorant_coach
 from utils.channel_check import restrict_to_channel
 from utils.rank_stats_store import get_kd_percentile, get_sample_size, record_stats
 from utils.riot_account_store import get_account, is_matching_account
@@ -550,9 +550,24 @@ class Rank(commands.Cog):
         # (안 그러면 남의 닉네임을 검색해서 그 사람 티어 역할을 그대로 받아가는 악용이 가능해져요)
         is_self_query = is_matching_account(interaction.user.id, 닉네임, 태그)
 
-        region = 지역.value if 지역 else "kr"
+        # 🌏 지역은 **고른 값 > 등록해둔 값 > 마지막 기본값(kr)** 순이에요.
+        #
+        # 🚨 예전엔 그냥 `"kr"`이었어요. 그래서 아시아(ap) 계정은 404
+        #    (`No MMR data available for this user`)로 조용히 실패했고, `/프로필`의 🎯
+        #    버튼처럼 **지역을 고를 수 없는 경로**에서는 아예 방법이 없었어요.
+        region = 지역.value if 지역 else (
+            riot_account_store.get_region(interaction.user.id)
+            or riot_account_store.DEFAULT_REGION
+        )
         match_count = 경기수 or DEFAULT_MATCH_COUNT
         headers = {"Authorization": api_key}
+
+        async def fetch_all(region: str):
+            return await asyncio.gather(
+                fetch_current_mmr(self.session, headers, region, 닉네임, 태그),
+                fetch_matches_by_mode(self.session, headers, region, 닉네임, 태그, match_count, mode="competitive"),
+                fetch_matches_by_mode(self.session, headers, region, 닉네임, 태그, match_count, mode="unrated"),
+            )
 
         try:
             # 티어 + 경쟁전 + 일반전 최근 경기를 전부 동시에 보내요.
@@ -564,12 +579,35 @@ class Rank(commands.Cog):
                 (mmr_status, mmr_payload),
                 (comp_status, comp_payload),
                 (normal_status, normal_payload),
-            ) = await asyncio.gather(
-                fetch_current_mmr(self.session, headers, region, 닉네임, 태그),
-                fetch_matches_by_mode(self.session, headers, region, 닉네임, 태그, match_count, mode="competitive"),
-                fetch_matches_by_mode(self.session, headers, region, 닉네임, 태그, match_count, mode="unrated"),
-            )
-            log.info(f"⏱️ [{닉네임}#{태그}] 티어+경쟁전+일반전 동시조회: {time.monotonic() - _t0:.2f}초")
+            ) = await fetch_all(region)
+            log.info(f"⏱️ [{닉네임}#{태그}] 티어+경쟁전+일반전 동시조회({region}): {time.monotonic() - _t0:.2f}초")
+
+            # 🌏 404면 **지역이 틀린 것**일 수 있어요(계정이 없는 게 아니라).
+            # 그때만 지역을 한 번 알아보고, 다르면 다시 조회해요. 정상 경로에서는
+            # 추가 호출이 0회예요 — 분당 30회를 봇 전체가 나눠 쓰거든요.
+            if mmr_status == 404:
+                real_region, detect_status = await henrik_api.detect_region(
+                    self.session, headers, 닉네임, 태그
+                )
+                if real_region and real_region != region:
+                    log.info(f"🌏 [{닉네임}#{태그}] 지역이 {region}가 아니라 {real_region}이었어요. 다시 조회해요.")
+                    region = real_region
+                    (
+                        (mmr_status, mmr_payload),
+                        (comp_status, comp_payload),
+                        (normal_status, normal_payload),
+                    ) = await fetch_all(region)
+                    # 본인 계정일 때만 저장해요 — 남의 닉네임을 검색해서 내 지역이
+                    # 덮어써지면 안 되니까요(티어 역할 자동갱신과 같은 이유예요).
+                    if is_self_query:
+                        riot_account_store.set_region(interaction.user.id, region)
+                elif detect_status == 404:
+                    # 계정 자체가 없어요. 지역 문제가 아니라 오타·개명이에요.
+                    await reply(
+                        f"❌ **{닉네임}#{태그}** 라는 라이엇 계정을 찾을 수 없어요.\n"
+                        f"닉네임과 태그를 다시 확인해주세요. (태그는 `#` **뒷부분만** 적어요)"
+                    )
+                    return
         except asyncio.TimeoutError:
             await reply("HenrikDev API 응답이 너무 느려서 시간 초과됐어요. 잠시 후 다시 시도해주세요.")
             return

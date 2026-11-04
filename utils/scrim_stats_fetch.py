@@ -217,14 +217,19 @@ async def fetch_for_match(
     headers = {"Authorization": api_key}
     for discord_id in lookups:
         name, tag = riot_account_store.get_account(discord_id)
+        # 🌏 사람마다 지역이 달라요. 등록해둔 값이 있으면 그걸 쓰고, 없을 때만 `region`
+        #    (기본 kr)로 떨어져요. 전엔 전원 kr로 찔러서 **아시아 계정은 내전 KDA가
+        #    한 번도 안 쌓였어요** — 여기선 조용히 다음 사람으로 넘어가서 티도 안 났어요.
+        account_region = riot_account_store.get_region(discord_id) or region
         status, payload = await henrik_api.request(
             session,
-            f"/valorant/v3/matches/{region}/{name}/{tag}",
+            f"/valorant/v3/matches/{account_region}/{name}/{tag}",
             headers=headers,
             params={"mode": "custom", "size": FETCH_SIZE},
         )
         if status != 200:
-            log.info("내전 KDA 조회 실패(%s#%s): HTTP %s", name, tag, status)
+            log.info("내전 KDA 조회 실패(%s#%s region=%s): HTTP %s",
+                     name, tag, account_region, status)
             continue
 
         picked = pick_match(payload.get("data") or [], riot_index, roster, reported_at)

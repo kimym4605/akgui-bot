@@ -304,7 +304,7 @@ class Mission(commands.Cog):
     # 3. 발로란트 전적 판정
     # ------------------------------------------------------------------
     async def _fetch_recent_matches(
-        self, name: str, tag: str
+        self, name: str, tag: str, *, user_id: int | None = None
     ) -> tuple[list[dict] | None, int | None]:
         """(최근 경기 전체, 응답 상태코드). 조회 실패면 경기는 None이에요.
 
@@ -323,25 +323,58 @@ class Mission(commands.Cog):
             return None, None
 
         session = await self._get_session()
-        try:
+        headers = {"Authorization": api_key}
+
+        # 🌏 등록해둔 지역을 써요. 전엔 `DEFAULT_REGION`("kr")이 박혀 있어서 **아시아(ap)
+        #    계정은 발로란트 미션이 영원히 0%**였어요. 아래 주석대로 **에러도 안 나서**
+        #    아무도 몰랐어요(`ACCOUNT_NOT_FOUND_NOTE`는 이 경우엔 안 떠요 — 404가 아니거든요).
+        region = (
+            riot_account_store.get_region(user_id) if user_id is not None else None
+        ) or DEFAULT_REGION
+
+        async def ask(region: str):
             # /전적·/오늘의번들과 같은 API 키를 나눠 쓰고 있어서, 호출량 조절은 게이트웨이에 맡겨요.
             # (utils/henrik_api.py 주석 참고)
-            status, payload = await henrik_api.request(
+            return await henrik_api.request(
                 session,
-                f"/valorant/v3/matches/{DEFAULT_REGION}/{name}/{tag}",
-                headers={"Authorization": api_key},
+                f"/valorant/v3/matches/{region}/{name}/{tag}",
+                headers=headers,
                 params={"size": MATCH_FETCH_SIZE},
                 # 이건 30분마다 백그라운드로 도는 거라 사람이 앞에서 기다리지 않아요.
                 # 기본값(15초)으로 두면 "60초 뒤에 오라"는 429에서 그냥 포기해버려서,
                 # 2026-10-05 실측 기준 전적 조회의 64%가 이렇게 실패하고 있었어요.
                 max_retry_wait=90.0,
             )
+
+        try:
+            status, payload = await ask(region)
+
+            # 🚨🚨 **여기서 404를 기다리면 안 돼요.** `/전적`이 쓰는 mmr 엔드포인트는 지역이
+            #    틀리면 404를 주는데, **matches는 `200`에 빈 목록을 줘요**(2026-11-03 실측:
+            #    같은 ap 계정이 `matches/ap` 3건 · `matches/kr` **0건·HTTP 200**).
+            #    그래서 아시아 계정은 "그냥 오늘 경기가 없는 사람"처럼 보였어요 —
+            #    에러도 로그도 없이 발로란트 미션이 영원히 안 깨졌어요.
+            #
+            # 🚨 그렇다고 빈 목록마다 지역을 물어보면 안 돼요. 안 한 날은 원래 비거든요.
+            #    **지역을 아직 모르는 사람에게만, 그것도 알아낸 순간 저장**해서 다시는
+            #    안 묻게 해요. 계정 하나당 평생 한 번이라 한도에 부담이 없어요.
+            unknown_region = user_id is not None and riot_account_store.get_region(user_id) is None
+            looks_empty = status == 404 or (status == 200 and not (payload.get("data") or []))
+            if unknown_region and looks_empty:
+                real_region, _ = await henrik_api.detect_region(session, headers, name, tag)
+                if real_region:
+                    # 같은 값이어도 저장해요 — 그래야 "모름"에서 빠져나와 다시 안 물어봐요.
+                    riot_account_store.set_region(user_id, real_region)
+                    if real_region != region:
+                        log.info("🌏 %s#%s 지역을 %s -> %s로 고쳤어요.", name, tag, region, real_region)
+                        region = real_region
+                        status, payload = await ask(region)
         except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError):
             log.warning("전적 조회 중 네트워크 오류 (%s#%s)", name, tag, exc_info=True)
             return None, None
 
         if status != 200:
-            log.info("전적 조회 실패 (%s#%s status=%s)", name, tag, status)
+            log.info("전적 조회 실패 (%s#%s region=%s status=%s)", name, tag, region, status)
             return None, status
 
         return [m for m in (payload.get("data") or []) if m], status
@@ -360,7 +393,8 @@ class Mission(commands.Cog):
             return NOT_LINKED_NOTE
 
         name, tag = account
-        matches, status = await self._fetch_recent_matches(name, tag)
+        # user_id를 넘겨야 그 사람의 등록 지역을 쓰고, 404일 때 지역을 고쳐 저장할 수 있어요.
+        matches, status = await self._fetch_recent_matches(name, tag, user_id=user_id)
         if matches is None:
             if status == 404:
                 return ACCOUNT_NOT_FOUND_NOTE
