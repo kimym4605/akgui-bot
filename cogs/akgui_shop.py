@@ -42,6 +42,7 @@
 """
 import logging
 import os
+import re
 
 import discord
 from discord import app_commands
@@ -51,6 +52,7 @@ from utils import (
     adult_check, attend_service, coin_wallet, cosmetic_store, inventory_store,
     mission_store, riot_account_store, theme_request_store,
 )
+from utils.channel_check import get_allowed_channel_id
 from utils.interaction_ack import ack
 from utils.inventory_store import PROTECT_MAX, PROTECT_PRICE
 from utils.mission_store import MISSIONS, REROLL_LIMIT_PER_DAY, REROLL_PRICE
@@ -358,6 +360,98 @@ class ThemeRequestModal(discord.ui.Modal, title="🎴 캐릭터 테마 요청"):
         )
 
 
+# ── 📮 평문·그림 줍기 (2026-11-04) ──────────────────────────────────────
+#
+# ⭐ **왜 생겼나**: 📮 모달을 11-03에 달았는데 `theme_requests` 컬렉션이 **아예 생기지도
+#    않았어요**(요청 0건). 그런데 `#🎴｜프로필` 로그를 읽으니 **요청은 이미 와 있었어요**:
+#
+#        05:19 shrimphuntervip  📎IMG_5014.png  "민영아 나 이거"
+#        05:31 swoori86         "ㅇㅋ"
+#
+#    방장이 `"원하는 테마 알려주면 추가 예정"`이라고 적었으니, 사람들은 **채팅으로
+#    말하면 되는 것**으로 읽은 거예요. 반면 📮 버튼은 `/악귀상점` → 🎨 카드 테마 →
+#    ephemeral **3단 깊이**에 있었어요. → [[feedback_pickup_plaintext_not_slash_command]]
+#
+# 🚨 **키워드 게이트로는 이 글을 절대 못 잡아요.** `"민영아 나 이거"`는 8자에
+#    요청 낱말이 **하나도** 없어요. 💡건의함의 `_SUGGEST_WORDS` 방식을 그대로
+#    가져오면 0건이 그대로예요.
+#
+# ⭐ **그래서 실측으로 기준을 바꿨어요** — 그 채널 **사람 글 48개(채널 전체 기록)**를
+#    긁어보니 **그림을 올린 글이 정확히 1건**이고 그게 바로 그 요청이었어요.
+#    → **첨부가 있으면 줍는다**(재현율 1/1 · 오탐 0/48). 평문은 보조 경로로
+#      테마성 낱말 **과** 요청성 낱말이 같이 있을 때만 줍어요.
+#    🚨 이 숫자는 `scripts/test_theme_pickup.py`에 박아뒀어요 — 낱말을 넓히려면
+#      **그 채널 로그로 오탐을 다시 세고** 나서 넓히세요(넓히는 쪽이 훨씬 위험해요).
+#
+# 📌 **며칠 뒤 볼 것**: 이 채널에 **자기 카드 자랑 스크린샷**이 올라오면 거기에도 📮 가
+#    붙어요. 지금 기록(48개)엔 그런 글이 **0건**이라 재볼 수가 없었어요. 눌리지 않으면
+#    무해하지만, `theme_requests`에 엉뚱한 줄이 쌓이기 시작하면 그때는 ⒜ 봇이 올린
+#    카드 이미지(첨부가 아니라 임베드)와 ⒝ 사람이 올린 그림을 가르는 것만으로는 부족하니
+#    **"요청으로 읽히는 말이 같이 있을 때만"**으로 조이세요(= 💡건의함과 같은 모양).
+PICKUP_EMOJI = "📮"
+PICKED_EMOJI = "✅"
+
+# 📮 를 달 채널. 🚨 **`profile`을 물려받아요** — 프로덕션 `settings.json`에
+#    `pokemonChannel:profile = #🎴｜프로필`이 이미 꽂혀 있어서, 새 그룹을 만들어도
+#    `/채널설정`을 안 하면 조용히 죽어요(💡건의함이 죽은 추천방을 가리킨 그 사고).
+THEME_PICKUP_GROUP = "theme_request"
+THEME_PICKUP_FALLBACK = "profile"
+
+# 평문 보조 경로의 낱말 두 벌. **둘 다 있어야** 주워요.
+# 🚨 한쪽만 요구하면 이 채널의 잡담이 걸려요 — `"아 장식이 프로필 보고"`(테마성만) ·
+#    `"나중에 ... 해달라 해야지"`(요청성만, 게다가 **지금 하는 요청이 아니에요**).
+_THEME_WORDS = ("테마", "배경", "캐릭터", "꾸미", "프로필카드", "카드테마", "일러", "도트")
+_WANT_WORDS = ("해달", "해주", "해줘", "넣어", "추가", "만들어", "만들면", "원해",
+               "원하", "하고싶", "되나", "될까", "가능", "추천", "있으면", "했으면")
+
+# 첨부가 없을 때 주울 최소 길이. 🚨 `ㅋㅋㅋㅋㅋㅋㅋㅋ`가 정확히 8자라, 길이로는
+#    잡담을 못 걸러요 — 완성형 한 글자도 없으면 넘기는 자를 따로 대요(아래 `_FILLER_ONLY`).
+MIN_PICKUP_LEN = 5
+MAX_PICKUP_LEN = 500
+
+# 낱자(ㅋ·ㅎ·ㅠ)와 기호만 있는 글. 💡건의함과 같은 자예요.
+_FILLER_ONLY = re.compile(r"^[^가-힣a-zA-Z0-9]*$")
+
+_IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif")
+
+
+def looks_like_theme_request(message: discord.Message) -> bool:
+    """이 글에 📮 를 달아줄까? (내용을 읽을 수 있을 때만 불러요)
+
+    🚨 `@everyone`이 붙은 글은 **빼요.** 그건 방장 공지라 요청이 아니에요
+    (11-04의 `"@everyone 프로필 배경 바꿀수 있는 기능 구현했으니까"`가 실제로 그랬어요).
+    """
+    if message.author.bot or message.guild is None:
+        return False
+    if message.mention_everyone:
+        return False
+
+    # ⭐ **그림이 붙어 있으면 그걸로 끝.** 이 채널에서 그림을 올리는 행동이 곧 요청이에요.
+    #    (글이 비어 있어도 주워요 — 그림만 던지는 게 가장 흔한 모양이에요.)
+    for att in message.attachments:
+        name = (att.filename or "").lower()
+        if name.endswith(_IMAGE_EXT) or (att.content_type or "").startswith("image/"):
+            return True
+
+    # 🚨 **평문 경로에서는 방장(서버 소유자) 글을 빼요.** 이 채널의 평문 공지는 전부
+    #    방장 글이라, 실측 오탐이 정확히 그 한 건이었어요 —
+    #    `"원하는 테마 알려주면 추가 예정"`(테마 ✓ + 추가 ✓ 로 걸려요).
+    #    주워봐야 그게 캐릭터 이름으로 `/테마요청목록`에 들어가서 표만 더럽혀요.
+    #    ⚠️ 그림 경로는 위에서 이미 통과시켜요 — 그쪽은 올리는 행동 자체가 요청이에요.
+    owner_id = getattr(message.guild, "owner_id", None)
+    if owner_id is not None and message.author.id == owner_id:
+        return False
+
+    text = (message.content or "").strip()
+    if len(text) < MIN_PICKUP_LEN or len(text) > MAX_PICKUP_LEN:
+        return False
+    if _FILLER_ONLY.match(text):
+        return False
+    squashed = "".join(text.split())
+    return (any(w in squashed for w in _THEME_WORDS)
+            and any(w in squashed for w in _WANT_WORDS))
+
+
 class ThemeRequestButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="원하는 캐릭터 요청하기", emoji="📮",
@@ -444,6 +538,34 @@ class ThemeView(discord.ui.View):
 MANAGER_CHANNEL_ID = int(os.getenv("MANAGER_CHANNEL_ID") or 0) or None
 
 
+async def notify_theme_request(guild, requester, character: str, votes: int,
+                               source: str = "", note: str = "") -> None:
+    """📮 요청 한 건을 운영진 채널에 알려요. (실패해도 요청은 이미 저장돼 있어요)
+
+    🚨 **모달 경로와 줍기 경로가 같은 함수를 써요.** 두 벌로 들고 있으면 한쪽만
+    고치는 사고가 나요(같은 경고가 `act_title`·`price_of`에도 붙어 있어요).
+    """
+    if not MANAGER_CHANNEL_ID or guild is None:
+        return
+    channel = guild.get_channel(MANAGER_CHANNEL_ID)
+    if channel is None:
+        return
+
+    lines = [f"📮 **캐릭터 테마 요청** — {requester.mention}",
+             f"　└ 캐릭터: **{character}** (누적 **{votes}명**)"]
+    if source:
+        lines.append(f"　└ 출처: {source}")
+    if note:
+        lines.append(f"　└ 메모: {note[:200]}")
+    lines.append("　└ 넣는 법: `assets/card_themes/`에 그림 + `themes.json` 한 줄 "
+                 "→ `python scripts/check_card_themes.py`")
+    try:
+        await channel.send("\n".join(lines),
+                           allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException:
+        log.warning("📮 테마 요청 알림 전송 실패 (user=%s)", requester.id, exc_info=True)
+
+
 async def submit_theme_request(interaction: discord.Interaction,
                                character: str, source: str, note: str) -> None:
     """📮 캐릭터 테마 요청을 받아요. 저장 → 운영진 채널 알림 → 본인에게 응답.
@@ -486,24 +608,8 @@ async def submit_theme_request(interaction: discord.Interaction,
             embed=None, view=None)
         return
 
-    # ── 운영진 채널에 알려요 (실패해도 요청은 이미 저장됐어요) ──────────
-    if MANAGER_CHANNEL_ID and interaction.guild:
-        channel = interaction.guild.get_channel(MANAGER_CHANNEL_ID)
-        if channel is not None:
-            lines = [f"📮 **캐릭터 테마 요청** — {interaction.user.mention}",
-                     f"　└ 캐릭터: **{character}** (누적 **{votes}명**)"]
-            if source:
-                lines.append(f"　└ 출처: {source}")
-            if note:
-                lines.append(f"　└ 메모: {note[:200]}")
-            lines.append(f"　└ 넣는 법: `assets/card_themes/`에 그림 + `themes.json` 한 줄 "
-                         "→ `python scripts/check_card_themes.py`")
-            try:
-                await channel.send("\n".join(lines),
-                                   allowed_mentions=discord.AllowedMentions.none())
-            except discord.HTTPException:
-                log.warning("📮 테마 요청 알림 전송 실패 (user=%s)",
-                            interaction.user.id, exc_info=True)
+    await notify_theme_request(interaction.guild, interaction.user,
+                               character, votes, source, note)
 
     await interaction.edit_original_response(
         content=(f"📮 **{character}** 테마를 요청했어요! (지금 **{votes}명**이 원해요)\n"
@@ -804,6 +910,116 @@ class AkguiShop(commands.Cog):
         #    못해서 **아무 반응이 없어요**(에러도 안 나요).
         self.bot.add_view(ShopPanelView())
 
+    # ── 📮 평문·그림 줍기 ───────────────────────────────────────────────
+    def _pickup_channel_id(self) -> int | None:
+        return get_allowed_channel_id(
+            THEME_PICKUP_GROUP, fallback_group=THEME_PICKUP_FALLBACK)
+
+    async def _register_pickup(self, message: discord.Message) -> tuple[bool, str]:
+        """주운 글을 테마 요청으로 넣어요. (성공했나, 로그에 남길 말)
+
+        🚨 **찜을 먼저 해요** — 두 사람이 동시에 📮 를 누르면 표가 두 번 올라가요.
+        넣지 못했으면 **반드시 풀어줘요**(안 풀면 그 글은 영영 못 주워요).
+        """
+        images = [a for a in message.attachments
+                  if (a.filename or "").lower().endswith(_IMAGE_EXT)
+                  or (a.content_type or "").startswith("image/")]
+
+        # 캐릭터 이름. 🚨 글에 이름이 없는 게 **정상**이에요("민영아 나 이거" + 그림).
+        #    그래서 본문을 그대로 쓰고, 본문이 없으면 그림 요청으로 남겨요.
+        #    표(`_id`)가 지저분해지는 건 알고 있어요 — 방장이 `/테마요청목록`에서 보고
+        #    합치면 돼요(`theme_request_store.normalize` 주석에 같은 얘기가 있어요).
+        name = " ".join((message.content or "").split())[:60]
+        if not name:
+            name = f"📎 그림 요청 ({images[0].filename[:40]})" if images else ""
+        if not name:
+            return False, "본문도 그림도 없어요"
+
+        if not await theme_request_store.claim_source(message.id):
+            return False, "이미 주운 글이에요"
+
+        # 🚨 **링크를 `source`에 넣어요.** `/테마요청목록`이 그 칸을 보여주니까,
+        #    방장이 눌러서 **올린 그림을 바로** 볼 수 있어요(이게 요청의 본체예요).
+        source = message.jump_url
+        note = " ".join(a.url for a in images)[:300]
+
+        try:
+            result, votes = await theme_request_store.add(
+                message.author.id, name, source, note)
+        except Exception:                                # noqa: BLE001
+            await theme_request_store.release_source(message.id)
+            log.warning("📮 줍기 저장 실패 (source=%s)", message.id, exc_info=True)
+            return False, "저장 실패"
+
+        if result != "ok":
+            # 한도·중복이면 찜을 풀어둬요. 내일이면 같은 글을 다시 주울 수 있어요.
+            await theme_request_store.release_source(message.id)
+            return False, result
+
+        await notify_theme_request(message.guild, message.author, name, votes,
+                                   source, note)
+        # ⭐ **답글을 달지 않아요.** 리액션으로만 알려요 — 이 서버는 한 마디를 여러 줄로
+        #    쪼개 적어서, 답글을 달면 채널이 봇 답글로 덮여요.
+        #    → [[feedback_pickup_plaintext_not_slash_command]]
+        try:
+            await message.add_reaction(PICKED_EMOJI)
+        except discord.HTTPException:
+            pass
+        log.info("📮 테마 요청 줍기: %s → %s (%d표)", message.author.id, name, votes)
+        return True, "ok"
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """프로필 채널의 그림·요청글에 📮 를 달아둬요. (누르는 건 아래 리스너가 받아요)
+
+        🚨 내용을 읽을 수 없으면(MESSAGE CONTENT INTENT 꺼짐) 조용히 아무것도 안 해요.
+           판단은 `bot.intents.message_content` **하나로** 해요 — 환경변수를 또 읽으면
+           두 군데가 어긋나서 켜져 있는데도 아무 일이 안 일어나요(💡건의함의 그 함정).
+        """
+        if not self.bot.intents.message_content:
+            return
+        channel_id = self._pickup_channel_id()
+        # 🚨 **채널이 안 잡히면 아무 데도 안 달아요.** 여기서 "제한 없음"으로 풀면
+        #    36개 채널 전부에 📮 가 붙어요(`restrict_to_channel`과 기본값이 반대예요).
+        if channel_id is None or message.channel.id != channel_id:
+            return
+        if not looks_like_theme_request(message):
+            return
+        try:
+            await message.add_reaction(PICKUP_EMOJI)
+        except discord.HTTPException:
+            pass  # 권한이 없거나 리액션이 꽉 찬 경우. 📮 모달 경로는 그대로 돼요.
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        """📮 를 누르면 그 글을 테마 요청으로 넣어요.
+
+        ⭐ **누가 눌러도 돼요.** 요청자는 원글 작성자로 남으니까요. 작성자만 허용하면
+        정작 본인이 📮 를 못 보고 지나간 글을 방장도 못 건집니다.
+        `raw` 이벤트를 쓰는 건 **며칠 전 글에도 달 수 있어야** 해서예요
+        (캐시에 없는 메시지는 `on_reaction_add`가 아예 안 불려요).
+        """
+        if payload.guild_id is None or str(payload.emoji) != PICKUP_EMOJI:
+            return
+        if self.bot.user and payload.user_id == self.bot.user.id:
+            return  # 봇이 달아둔 그 📮
+        channel_id = self._pickup_channel_id()
+        if channel_id is None or payload.channel_id != channel_id:
+            return
+
+        channel = self.bot.get_channel(payload.channel_id)
+        if channel is None:
+            return
+        try:
+            message = await channel.fetch_message(payload.message_id)
+        except discord.HTTPException:
+            return
+
+        ok, note = await self._register_pickup(message)
+        if not ok:
+            # 리액션엔 답할 자리가 없어요. 채널에 거절 메시지를 뿌리면 더 시끄러워요.
+            log.info("📮 줍기 넘김 (source=%s): %s", payload.message_id, note)
+
     @app_commands.command(name="악귀상점", description="악귀코인으로 미션 리롤권·출석 보호권·칭호·카드 테마를 사요.")
     async def shop(self, interaction: discord.Interaction):
         # 채널 제한을 안 걸었어요. 소비처가 없어서 코인이 쌓이는 게 문제였는데, 여기에
@@ -865,10 +1081,13 @@ class AkguiShop(commands.Cog):
             return
 
         rows = await theme_request_store.top(20)
+        channel_id = self._pickup_channel_id()
+        where = f"<#{channel_id}>" if channel_id else "프로필 채널"
         if not rows:
             await interaction.followup.send(
                 "📮 아직 요청이 없어요.\n"
-                "-# `/악귀상점` → 🎨 카드 테마 → 📮 버튼으로 받아요.",
+                f"-# 받는 길이 둘이에요 — {where}에 **그림을 올리면** 봇이 📮 를 달아줘요"
+                "(누르면 요청) · `/악귀상점` → 🎨 카드 테마 → 📮 버튼",
                 ephemeral=True)
             return
 
@@ -879,7 +1098,8 @@ class AkguiShop(commands.Cog):
             line = f"{done} **{row['name']}** — {row['votes']}표"
             src = next((s for s in row["sources"] if s), "")
             if src:
-                line += f" · {src}"
+                # 📮 줍기로 들어온 건 출처가 **원글 링크**예요(눌러서 그림을 봐요).
+                line += f" · [🔗 원글]({src})" if src.startswith("http") else f" · {src}"
             lines.append(line)
         embed = discord.Embed(
             title="📮 캐릭터 테마 요청",
