@@ -9,9 +9,11 @@ DB를 안 건드려요 — `card_store`의 순수 함수(`fuse_materials`·`fuse
    테스트가 죽어도 0이 찍혀요(2026-10-28에 실제로 당했어요).
 """
 import ast
+import copy
 import os
 import random
 import sys
+import types
 from collections import Counter
 
 BOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -172,8 +174,8 @@ fsync = next(n for n in ast.walk(ast.parse(store_src))
 body = ast.unparse(fsync)
 check('"draws"' not in body and "'draws'" not in body.replace("state['draws']", ""),
       "_fuse_sync가 draws를 안 건드려요")
-check('"$gte"' in body or "'$gte'" in body,
-      "🚨 낙관적 동시성을 $gte로 걸어요 (안 걸면 장수가 음수가 돼요)")
+check("_fuse_guard(" in body,
+      "🚨 낙관적 동시성을 _fuse_guard로 걸어요 (안 걸면 장수가 음수가 돼요)")
 
 print("\n[12] 🎴 패널 — 영속 뷰 3요소 + edit 사고 방지")
 gacha_src = open(os.path.join(BOT_DIR, "cogs", "card_gacha.py"), encoding="utf-8").read()
@@ -227,6 +229,175 @@ check(gacha_src.count("async def do_fuse") == 1, "do_fuse 정의는 하나뿐")
 check("async def show_collection" in gacha_src
       and gacha_src.count("async def show_collection") == 1,
       "도감 본체도 모듈 함수 하나 (📖 버튼이 복붙 아님)")
+
+# ------------------------------------------------------------------
+# 여기부터는 `_fuse_sync`(저장)를 **가짜 컬렉션**에 대고 돌려요. 운영 DB는 안 건드려요.
+# ------------------------------------------------------------------
+_MISSING = object()
+
+
+def _field(doc, path):
+    cur = doc
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return _MISSING
+        cur = cur[part]
+    return cur
+
+
+def _matches(doc, flt):
+    """몽고 필터 흉내 — `_fuse_sync`가 쓰는 모양(같음 · $exists · $gte · $in)만요."""
+    for path, cond in flt.items():
+        val = _field(doc, path)
+        if isinstance(cond, dict):
+            for op, arg in cond.items():
+                if op == "$exists":
+                    hit = (val is not _MISSING) == bool(arg)
+                elif op == "$gte":
+                    hit = val is not _MISSING and val is not None and val >= arg
+                elif op == "$in":
+                    hit = (None if val is _MISSING else val) in arg
+                else:
+                    raise AssertionError(f"흉내 안 낸 연산자: {op}")
+                if not hit:
+                    return False
+        elif (None if val is _MISSING else val) != cond:
+            return False            # 몽고에서 {f: None}은 없는 필드도 맞아요
+    return True
+
+
+class FakeCards:
+    """`cs._cards` 대역. find_one / update_one($inc)만 흉내내요.
+
+    `on_read(fake)`를 주면 **읽은 직후**에 불러요 — 그 틈에 누가 끼어든 상황을 만들어요."""
+
+    def __init__(self, counts, on_read=None):
+        self.doc = {"_id": cs._uid(1), "counts": dict(counts)}
+        self.on_read = on_read
+        self.reads = self.writes = 0
+
+    def find_one(self, flt, *args, **kwargs):
+        if flt.get("_id") != self.doc["_id"]:
+            return None
+        snap = copy.deepcopy(self.doc)
+        self.reads += 1
+        if self.on_read:
+            self.on_read(self)
+        return snap
+
+    def update_one(self, flt, update, **kwargs):
+        if not _matches(self.doc, flt):
+            return types.SimpleNamespace(modified_count=0, upserted_id=None)
+        for path, n in (update.get("$inc") or {}).items():
+            key = path.split(".", 1)[1]
+            self.doc["counts"][key] = self.doc["counts"].get(key, 0) + n
+        self.writes += 1
+        return types.SimpleNamespace(modified_count=1, upserted_id=None)
+
+
+def run_fuse(fake, times, seed):
+    """가짜 컬렉션을 끼우고 `_fuse_sync`를 돌려요. 끝나면 원래 컬렉션으로 되돌려요."""
+    real = cs._cards
+    cs._cards = fake
+    random.seed(seed)          # `_fuse_sync`는 rng를 안 받아서 전역 난수를 고정해요
+    try:
+        return cs._fuse_sync(1, times)
+    finally:
+        cs._cards = real
+
+
+print("\n[15] 🚨 혼자 눌렀으면 반드시 저장돼요 — '전부 합성'이 영영 밀리던 버그 (2026-11-18)")
+# 몰아 합성은 **도중에 받은 카드를 다시 재료로** 먹어요. 저장 조건을 "DB에 재료가 used장
+# 이상"으로 걸었더니 used가 원래 장수를 넘는 순간 **아무도 안 끼어들었는데도** 안 맞았어요.
+# 실측: 중복 126장 이상인 4명은 '전부 합성'이 100% "다른 합성이 먼저 처리됐어요"였어요.
+heavy = {k: 8 for k in KEYS["일반"]}
+heavy.update({k: 3 for k in KEYS["레어"]})
+SEEDS = 40
+for label, start, times in (
+    (f"중복 {cs.dup_count(heavy)}장 · 전부", heavy, 0),
+    (f"중복 {cs.dup_count(heavy)}장 · 5회", heavy, 5),
+    ("중복 13장 · 전부", {N1: 6, N2: 5, N3: 4, R1: 2}, 0),
+):
+    stuck, retried, broken = [], [], []
+    for seed in range(SEEDS):
+        fake = FakeCards(start)
+        out = run_fuse(fake, times, seed)
+        if not out or not out[0]:
+            stuck.append(seed)
+            continue
+        res, used = out
+        if fake.reads != 1:
+            retried.append(seed)
+        after = fake.doc["counts"]
+        if (sum(after.values()) != sum(start.values()) - sum(used.values()) + len(res)
+                or any(after[k] < 1 for k in start)
+                or (times == 0 and cs.dup_count(after) >= cs.FUSE_N)):
+            broken.append(seed)
+    check(not stuck, f"{label}: {SEEDS}번 다 저장돼요", f"밀린 횟수 {len(stuck)}/{SEEDS}")
+    check(not retried, f"{label}: 한 번에 저장돼요 (끼어든 사람이 없으면 재시도도 없어요)",
+          f"재시도한 횟수 {len(retried)}/{SEEDS}")
+    check(not broken, f"{label}: 저장된 장수가 계산과 같고 마지막 1장이 남아요",
+          f"어긋난 seed {broken}")
+
+print("\n[16] 🚨 누가 끼어들면 계산을 버리고 다시 해요 (읽은 뒤에 장수가 바뀐 경우)")
+
+
+def eat_one(fake):                  # 읽은 직후, 다른 합성이 N1 한 장을 먼저 먹었어요
+    if fake.reads == 1:
+        fake.doc["counts"][N1] -= 1
+
+
+fake = FakeCards({N1: 4}, on_read=eat_one)
+out = run_fuse(fake, 1, seed=1)
+check(out == ([], {}) and fake.writes == 0,
+      "재료가 먼저 줄었으면 저장을 안 해요 → 다시 세어 보니 3장이라 재료 부족",
+      f"out={out} writes={fake.writes}")
+check(fake.doc["counts"][N1] == 3,
+      "🚨 마지막 1장이 안 타요 (예전 `>=` 조건은 3 >= 3으로 통과해 0장이 될 수 있었어요)",
+      str(fake.doc["counts"]))
+
+
+def add_two(fake):                  # 읽은 직후, 뽑기로 N1이 2장 늘었어요
+    if fake.reads == 1:
+        fake.doc["counts"][N1] += 2
+
+
+fake = FakeCards({N1: 10}, on_read=add_two)
+out = run_fuse(fake, 1, seed=2)
+check(bool(out and out[0]) and fake.reads == 2 and fake.writes == 1,
+      "카드가 늘었으면 최신 상태로 다시 계산해서 저장해요",
+      f"out={out} reads={fake.reads} writes={fake.writes}")
+check(sum(fake.doc["counts"].values()) == 12 - cs.FUSE_N + 1,
+      f"끼어든 2장이 안 사라져요 (12 - {cs.FUSE_N} + 1)", str(fake.doc["counts"]))
+
+real = cs.GRADE_WEIGHTS.copy()
+try:
+    for g in list(cs.GRADE_WEIGHTS):
+        cs.GRADE_WEIGHTS[g] = 100.0 if g == "에픽" else 0.0
+    own = {k: 1 for k in KEYS["에픽"][1:]}      # 에픽은 E1 한 종만 비어 있어요
+    own[N1] = 4
+
+    def buy_e1(fake):               # 읽은 직후, 장터에서 그 E1을 샀어요
+        if fake.reads == 1:
+            fake.doc["counts"][E1] = 1
+
+    fake = FakeCards(own, on_read=buy_e1)
+    out = run_fuse(fake, 1, seed=3)
+    check(fake.doc["counts"].get(E1) == 1,
+          "🚨 그 사이 생긴 에픽을 합성이 또 주지 않아요 (에픽 2장 방지)",
+          str(fake.doc["counts"].get(E1)))
+    check(out == ([], {}) and fake.doc["counts"][N1] == 4,
+          "줄 에픽이 없어졌으니 재료도 안 먹어요", f"out={out} N1={fake.doc['counts'][N1]}")
+finally:
+    cs.GRADE_WEIGHTS.clear()
+    cs.GRADE_WEIGHTS.update(real)
+
+guard = getattr(cs, "_fuse_guard", None)
+check(guard is not None, "_fuse_guard가 있어요")
+if guard:
+    flt = guard("u", {N1: 5}, {N1: 3}, [{"key": N2}])
+    check(flt == {"_id": "u", f"counts.{N1}": 5, f"counts.{N2}": {"$exists": False}},
+          "손댄 카드는 읽은 장수 그대로여야 하고, 없던 카드는 지금도 없어야 해요", str(flt))
 
 print("\n" + "=" * 50)
 print(f"통과 {len(passed)} · 실패 {len(failed)}")

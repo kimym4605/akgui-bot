@@ -518,6 +518,30 @@ def fuse_cards(
     return results, used
 
 
+def _fuse_guard(uid: str, before: dict, used: dict[str, int], results: list[dict]) -> dict:
+    """합성 결과를 저장할 때 거는 조건 — **손댄 카드가 읽은 그때 그대로일 때만** 써요.
+
+    손댄 카드 = 먹은 재료 + 받은 카드. 그 카드들의 장수가 `before`(읽은 값)와 같으면
+    `fuse_cards`가 계산한 결과를 그대로 적용해도 돼요: 음수도 안 되고, 마지막 1장도 남고,
+    에픽·레전드가 두 장이 되지도 않아요. 하나라도 달라졌으면 누가 끼어든 거라 다시 계산해요.
+
+    🚨 2026-11-18까지는 `counts.<재료> >= used[재료]`였어요. 그런데 몰아 합성은 **도중에
+       받은 카드를 다시 재료로** 먹어요(`fuse_cards` 주석). 그러면 `used`가 DB에 있는 원래
+       장수를 넘어서, **아무도 안 끼어들었는데도** 조건이 영영 안 맞았어요. 5번 다시 굴려도
+       마찬가지라 "다른 합성이 먼저 처리됐어요"만 나왔어요 — 실측: 중복 126장 이상 4명은
+       '전부 합성'이 **100% 실패**(뽑기 40번어치만 쌓여도 100%). 중복이 제일 많은 사람이
+       제일 못 쓰는 버그였어요.
+    🚨 `>=`는 반대쪽으로도 틀렸어요. 읽은 뒤 다른 합성이 재료를 먼저 먹어도 남은 장수가
+       `used` 이상이기만 하면 통과해서 **마지막 1장까지 태울 수 있었어요**.
+    """
+    flt: dict = {"_id": uid}
+    for key in {*used, *(d["key"] for d in results)}:
+        # 없던 카드는 "지금도 없어야" 해요. 0과 비교하면 안 돼요 — 한 번도 안 가져본
+        # 카드는 필드가 아예 없어서(대부분이 이 경우) 0과도 안 맞아요.
+        flt[f"counts.{key}"] = before[key] if key in before else {"$exists": False}
+    return flt
+
+
 def _fuse_sync(user_id, times: int = 1) -> tuple[list[dict], dict[str, int]] | None:
     """합성하고 저장해요. 동시 실행에 밀리면 None.
 
@@ -544,12 +568,10 @@ def _fuse_sync(user_id, times: int = 1) -> tuple[list[dict], dict[str, int]] | N
         if not inc:
             return [], {}
 
-        # 낙관적 동시성: 먹을 재료가 **지금도 그만큼 있을 때만** 써요.
+        # 낙관적 동시성: 손댄 카드가 **읽은 그때 장수 그대로일 때만** 써요 (`_fuse_guard`).
         # 🚨 `draws`로 거는 `_pull_sync` 방식은 여기선 못 써요 — 합성은 draws를 안 올려서
         #    같은 값이 유지되고, 그러면 두 합성이 동시에 통과해 **장수가 음수**가 돼요.
-        flt: dict = {"_id": uid}
-        for key, cnt in used.items():
-            flt[f"counts.{key}"] = {"$gte": cnt}
+        flt = _fuse_guard(uid, state["counts"], used, results)
 
         res = _cards.update_one(flt, {"$inc": inc})
         if res.modified_count:
