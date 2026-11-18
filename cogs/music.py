@@ -365,7 +365,12 @@ class Music(commands.Cog):
 
             future.add_done_callback(_log_failure)
 
-        voice_client.play(source, after=_after)
+        # 🔊 인코더 비트레이트를 **채널 음질에 맞춰요**(2026-11-15 부스트 2레벨 → 채널 256kbps).
+        #    discord.py 기본값은 128kbps 고정이라, 채널만 올려선 봇 소리가 그대로였어요.
+        #    채널 값보다 높게 보내봐야 의미가 없고, 512가 Opus 상한이에요.
+        channel_kbps = getattr(voice_client.channel, "bitrate", 128_000) // 1000
+        bitrate = max(64, min(channel_kbps, 512))
+        voice_client.play(source, after=_after, bitrate=bitrate, signal_type="music")
 
         if state.text_channel is not None:
             await state.text_channel.send(embed=_build_track_embed(track, status="🎶 지금 재생 중"))

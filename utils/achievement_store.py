@@ -1,5 +1,6 @@
 """업적 해금 상태와 판정 - "지금 이 사람이 뭘 얼마나 했는지"를 한 번에 모아와서,
-`utils/achievement_data.py`의 60개와 대조하고, 새로 열린 걸 저장하고 코인을 줘요.
+`utils/achievement_data.py`의 업적들(개수는 `achievement_data.TOTAL`)과 대조하고, 새로 열린 걸 저장하고 코인을 줘요.
+(2026-11-15에 🎙️ 음성 레벨 · 🎣 낚시 업적 8개가 추가돼서 `voice_level`·`fish` 컬렉션도 봐요.)
 
 ## 판정 데이터를 한 번에 긁는 이유
 
@@ -24,7 +25,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from utils import achievement_data, coin_wallet
+from utils import achievement_data, coin_wallet, voice_level
 from utils.pokemon_store import _db, _trainers
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ def _collect_sync(user_id, tier_index: int | None, riot_linked: bool, birthday_s
         "scrim_wins": 0, "scrim_losses": 0, "scrim_matches": 0, "scrim_best_streak": 0,
         "agwi_best": 0, "tier_index": tier_index or 0,
         "mission_total": 0, "title_owned": 0,
+        "voice_level": 0, "voice_minutes": 0, "fish_caught": 0,
         "riot_linked": 1 if riot_linked else 0,
         "birthday_set": 1 if birthday_set else 0,
     }
@@ -96,6 +98,17 @@ def _collect_sync(user_id, tier_index: int | None, riot_linked: bool, birthday_s
     mission_doc = _missions.find_one({"_id": uid}, {"totalDone": 1})
     if mission_doc:
         stats["mission_total"] = int(mission_doc.get("totalDone", 0) or 0)
+
+    # --- 🎙️ 음성 레벨 · 🎣 낚시 (2026-11-15) ---
+    # ⚠️ 두 컬렉션 다 `_id`가 **문자열 유저 ID**예요(`voice_level._get_sync`·`fishing_store._uid`).
+    #    레벨은 저장값이 아니라 누적 분에서 매번 계산해요 — 곡선을 바꾸면 같이 움직이게.
+    voice_doc = _db["voice_level"].find_one({"_id": uid}, {"minutes": 1})
+    if voice_doc:
+        stats["voice_minutes"] = int(voice_doc.get("minutes", 0) or 0)
+        stats["voice_level"] = voice_level.level_of(stats["voice_minutes"])
+    fish_doc = _db["fish"].find_one({"_id": uid}, {"caught": 1})
+    if fish_doc:
+        stats["fish_caught"] = int(fish_doc.get("caught", 0) or 0)
 
     # --- 칭호: 지금 달고 있거나, 예전에 사본 적 있으면 인정 ---
     #

@@ -221,6 +221,79 @@ async def build_achievement_embed(
     return embed
 
 
+def scrim_empty_text(target: discord.abc.User) -> str:
+    return (
+        f"**{target.display_name}**님의 내전 기록이 아직 없어요.\n"
+        "-# `/팀짜기`로 팀을 나눈 뒤 결과 버튼(**A팀 승리** / **B팀 승리**)을 누르면 기록돼요."
+    )
+
+
+async def build_scrim_embed(target: discord.abc.User) -> discord.Embed | None:
+    """`/내전전적` 화면. 기록이 없으면 None(→ `scrim_empty_text`).
+
+    `/프로필`의 📋 자세히 보기 → ⚔️ 내전 전적도 이걸 써요(서식이 두 벌이 되지 않게)."""
+    overall = await scrim_record_store.get_record(target.id)
+    season = await scrim_record_store.get_season_record(target.id)
+    if overall["wins"] + overall["losses"] == 0:
+        return None
+
+    rate = scrim_record_store.win_rate(overall) or 0
+    embed = discord.Embed(
+        title=f"⚔️ {target.display_name}님의 내전 전적",
+        color=0x57F287 if rate >= 50 else 0xED4245,
+    )
+    embed.add_field(
+        name="통산",
+        value=(
+            f"**{overall['wins']}승 {overall['losses']}패** (승률 {rate:.1f}%)\n"
+            f"최고 연승 **{overall.get('bestStreak', 0)}** · "
+            f"최다 연패 **{abs(overall.get('worstStreak', 0))}**"
+        ),
+        inline=False,
+    )
+
+    season_total = season["wins"] + season["losses"]
+    embed.add_field(
+        name=f"시즌 {scrim_record_store.current_season()}",
+        value=(
+            f"**{season['wins']}승 {season['losses']}패** "
+            f"(승률 {scrim_record_store.win_rate(season) or 0:.1f}%)"
+            if season_total else "이번 시즌 기록 없음"
+        ),
+        inline=False,
+    )
+    embed.add_field(name="현재", value=scrim_record_store.streak_text(overall), inline=False)
+
+    recent = await scrim_record_store.recent_matches(target.id, limit=5)
+    if recent:
+        uid = str(target.id)
+        marks = " · ".join(
+            ("🟩" if uid in match.get("winners", []) else "🟥")
+            + (f" {match['map']}" if match.get("map") else "")
+            for match in recent
+        )
+        embed.add_field(name="최근 5경기 (왼쪽이 최신)", value=marks, inline=False)
+
+    kda = await scrim_record_store.kda_summary(target.id)
+    if kda.get("matches"):
+        embed.add_field(name="🗡️ 내전 KDA", value=_kda_text(kda), inline=False)
+
+    map_rows = await scrim_record_store.map_stats(target.id)
+    if map_rows:
+        embed.add_field(name="🗺️ 맵별 성적", value=_map_stats_text(map_rows), inline=False)
+    else:
+        embed.add_field(
+            name="🗺️ 맵별 성적",
+            value=(
+                "아직 맵이 기록된 경기가 없어요.\n"
+                "-# `/팀짜기`의 **🗺️ 맵** 버튼으로 맵을 정해두거나, "
+                "승리 보고 뒤에 뜨는 맵 드롭다운에서 골라주세요."
+            ),
+            inline=False,
+        )
+    return embed
+
+
 def _bar(percent: float, length: int = 12) -> str:
     filled = int(length * percent / 100)
     return "🟨" * filled + "⬜" * (length - filled)
@@ -273,77 +346,10 @@ class Achievement(commands.Cog):
     async def scrim_record(self, interaction: discord.Interaction, 유저: discord.Member | None = None):
         await interaction.response.defer()
         target = 유저 or interaction.user
-
-        overall = await scrim_record_store.get_record(target.id)
-        season = await scrim_record_store.get_season_record(target.id)
-        total = overall["wins"] + overall["losses"]
-
-        if total == 0:
-            await interaction.followup.send(
-                f"**{target.display_name}**님의 내전 기록이 아직 없어요.\n"
-                "-# `/팀짜기`로 팀을 나눈 뒤 결과 버튼(**A팀 승리** / **B팀 승리**)을 누르면 기록돼요.",
-            )
+        embed = await build_scrim_embed(target)
+        if embed is None:
+            await interaction.followup.send(scrim_empty_text(target))
             return
-
-        rate = scrim_record_store.win_rate(overall) or 0
-        embed = discord.Embed(
-            title=f"⚔️ {target.display_name}님의 내전 전적",
-            color=0x57F287 if rate >= 50 else 0xED4245,
-        )
-        embed.add_field(
-            name="통산",
-            value=(
-                f"**{overall['wins']}승 {overall['losses']}패** (승률 {rate:.1f}%)\n"
-                f"최고 연승 **{overall.get('bestStreak', 0)}** · "
-                f"최다 연패 **{abs(overall.get('worstStreak', 0))}**"
-            ),
-            inline=False,
-        )
-
-        season_total = season["wins"] + season["losses"]
-        embed.add_field(
-            name=f"시즌 {scrim_record_store.current_season()}",
-            value=(
-                f"**{season['wins']}승 {season['losses']}패** "
-                f"(승률 {scrim_record_store.win_rate(season) or 0:.1f}%)"
-                if season_total else "이번 시즌 기록 없음"
-            ),
-            inline=False,
-        )
-        embed.add_field(name="현재", value=scrim_record_store.streak_text(overall), inline=False)
-
-        recent = await scrim_record_store.recent_matches(target.id, limit=5)
-        if recent:
-            uid = str(target.id)
-            marks = " · ".join(
-                ("🟩" if uid in match.get("winners", []) else "🟥")
-                + (f" {match['map']}" if match.get("map") else "")
-                for match in recent
-            )
-            embed.add_field(name="최근 5경기 (왼쪽이 최신)", value=marks, inline=False)
-
-        kda = await scrim_record_store.kda_summary(target.id)
-        if kda.get("matches"):
-            embed.add_field(name="🗡️ 내전 KDA", value=_kda_text(kda), inline=False)
-
-        map_rows = await scrim_record_store.map_stats(target.id)
-        if map_rows:
-            embed.add_field(
-                name="🗺️ 맵별 성적",
-                value=_map_stats_text(map_rows),
-                inline=False,
-            )
-        else:
-            embed.add_field(
-                name="🗺️ 맵별 성적",
-                value=(
-                    "아직 맵이 기록된 경기가 없어요.\n"
-                    "-# `/팀짜기`의 **🗺️ 맵** 버튼으로 맵을 정해두거나, "
-                    "승리 보고 뒤에 뜨는 맵 드롭다운에서 골라주세요."
-                ),
-                inline=False,
-            )
-
         await interaction.followup.send(embed=embed)
 
     # ------------------------------------------------------------------

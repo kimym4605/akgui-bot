@@ -21,6 +21,54 @@ COIN_IMAGE_PATH = Path(__file__).resolve().parent.parent / "assets" / "coin.png"
 MAX_TRANSFER = 1000
 
 
+def _log_line(entry: dict, uid: str) -> str:
+    """coin_log 한 줄 → `+5 미션완주 · 11/15 01:04`.
+
+    ⚠️ 송금(`transfer`)은 from·to가 둘 다 있어서, 내가 어느 쪽인지로 부호를 정해요."""
+    from utils.coin_ledger import kst_of
+
+    amount = int(entry.get("amount") or 0)
+    kind = entry.get("kind")
+    if kind == "add":
+        sign = "+"
+    elif kind == "transfer":
+        sign = "+" if entry.get("to") == uid else "−"
+    else:
+        sign = "−"
+    note = entry.get("note") or ("송금" if kind == "transfer" else "기타")
+    when = kst_of(entry["_id"]).strftime("%m/%d %H:%M")
+    return f"`{sign}{amount}` {note} — {when}"
+
+
+async def build_coin_embed(user: discord.abc.User) -> discord.Embed:
+    """잔액 + 최근 입출금 10건. `/프로필`의 📋 자세히 보기 → 🪙 코인이 써요.
+
+    ⭐ "코인이 왜 늘었/줄었지?"에 답하는 화면이에요. 지금까진 coin_log를 DB에서 직접
+    봐야만 알 수 있었어요. **본인에게만** 보여요(남의 지출 내역은 사생활이에요)."""
+    uid = str(user.id)
+    balance = await coin_wallet.get_balance(user.id)
+    rows = await coin_wallet.recent_log(user.id, limit=10)
+
+    embed = discord.Embed(
+        title=f"🪙 {user.display_name}님의 악귀코인",
+        description=f"보유 **{balance}코인**",
+        color=0xF1C40F,
+    )
+    if rows:
+        embed.add_field(
+            name="최근 입출금 (위가 최신)",
+            value="\n".join(_log_line(r, uid) for r in rows),
+            inline=False,
+        )
+        gained = sum(int(r.get("amount") or 0) for r in rows
+                     if r.get("kind") == "add" or (r.get("kind") == "transfer" and r.get("to") == uid))
+        spent = sum(int(r.get("amount") or 0) for r in rows) - gained
+        embed.set_footer(text=f"이 10건 합계: 받은 {gained} · 쓴 {spent}")
+    else:
+        embed.add_field(name="최근 입출금", value="아직 기록이 없어요.", inline=False)
+    return embed
+
+
 class Coin(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot

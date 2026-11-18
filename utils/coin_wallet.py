@@ -144,6 +144,22 @@ def _transfer_sync(from_id, to_id, amount: int, note: str = "") -> tuple[bool, s
 # DB 작업은 동기 pymongo라, 그대로 부르면 이벤트 루프가 멈춰요(2026-09-04 먹통 사고의
 # 원인). pokemon_store와 똑같이 asyncio.to_thread로 넘겨서 루프는 계속 돌게 해요.
 # ------------------------------------------------------------------
+def _recent_log_sync(user_id, limit: int) -> list[dict]:
+    """이 사람이 받거나(`to`) 낸(`from`) 기록, 최신순.
+
+    ⚠️ coin_log엔 인덱스가 `_id`뿐이에요. 2026-11-15 실측 4,846건에서 이 조회가 ~40ms라
+    지금은 괜찮지만, 수만 건이 넘어 느려지면 `to`·`from` 인덱스를 거세요."""
+    uid = _uid(user_id)
+    return list(
+        _coin_log.find({"$or": [{"to": uid}, {"from": uid}]}).sort("_id", -1).limit(limit)
+    )
+
+
+async def recent_log(user_id, limit: int = 10) -> list[dict]:
+    """`/프로필` 📋 자세히 보기 → 🪙 코인에서 최근 입출금을 보여줄 때 써요."""
+    return await asyncio.to_thread(_recent_log_sync, user_id, limit)
+
+
 async def is_trainer(user_id) -> bool:
     """포켓몬을 시작한 사람인지(= 코인이 트레이너 문서에 들어있는지)."""
     return await asyncio.to_thread(_is_trainer_sync, user_id)

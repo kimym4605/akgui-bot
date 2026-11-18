@@ -219,7 +219,33 @@ DAILY_CAST_CAP = 20   # 하루에 던질 수 있는 횟수 (0이면 무제한)
 #    같은 함정). 그 값을 그대로 쓰면 **안 오는 사람이 보너스를 영구히 받아요.**
 STREAK_CAST_EVERY = 5     # 연속 출석 N일마다
 STREAK_CAST_BONUS = 2     # 캐스트 +M회
-STREAK_CAST_MAX = 10      # 보너스 최대치 (= 새 발행 천장 · 0으로 두면 보너스 끔)
+STREAK_CAST_MAX = 10      # **1단계** 보너스 최대치 (25일에 도달 · 0으로 두면 보너스 끔)
+
+# ------------------------------------------------------------------
+# ⭐ 🔥 **2단계: 장기 연속 출석** (2026-11-08 사용자 결정)
+#
+# 1단계(5일마다 +2, 25일에 +10 = 하루 30번)를 다 받은 사람에게 그 뒤로도 목표를 줘요.
+# **연속 40일부터 20일마다 +10번**: 40일 40번 · 60일 50번 · 80일 60번 · ...
+#
+#     연속   0~4일 20번 │ 25~39일 30번 │ 40~59일 40번 │ 60~79일 50번 │ 80일~ 60번 ...
+#
+# 🚨 **2단계에는 천장이 없어요 — 사용자가 알고 고른 거예요.** "최대치를 둘까요?"에
+#    "제한 없음"을 골랐어요. 위 7차 주석의 "천장이 사라지면 발행이 계속 자란다"는 경고는
+#    그대로 사실이고, 이제 1인 하루 발행은 **연속 일수에 비례해서** 자라요.
+#    끊기면 0으로 돌아가니(`_streak_sync`) 매일 오는 사람에게만 열리는 건 그대로예요.
+#    ⚠️ 경제가 과열되면(`scripts/report_economy.py`) 제일 먼저 볼 곳이 여기예요 —
+#       `LONG_STREAK_MAX`를 넣으면 천장이 다시 생겨요(0 = 천장 없음).
+#
+# ⚠️ 시작점은 **20의 배수로 센 40일**이에요("30일 다음부터 20일씩" = 50일이 아니에요).
+#    사용자가 두 안 중 40·60·80일 안을 골랐어요.
+LONG_STREAK_START = 40    # 2단계가 시작되는 연속 일수 (0이면 2단계 끔)
+LONG_STREAK_EVERY = 20    # 그 뒤로 N일마다
+LONG_STREAK_BONUS = 10    # 캐스트 +M회
+LONG_STREAK_MAX = 0       # 2단계 보너스 최대치 (0 = 천장 없음 · 사용자 결정)
+
+# 1단계를 다 채우는 연속 일수 (지금 25일). 안내문이 "25"를 직접 적지 않게 계산해 둬요.
+SHORT_FULL_DAYS = (STREAK_CAST_EVERY * -(-STREAK_CAST_MAX // STREAK_CAST_BONUS)
+                   if STREAK_CAST_EVERY and STREAK_CAST_BONUS else 0)
 
 # ------------------------------------------------------------------
 # ⭐ 🎣 **몰아 던지기** (2026-10-27 8차 · 사용자 요청)
@@ -404,13 +430,36 @@ def net_issue_per_cast() -> float:
 def streak_cast_bonus(streak: int) -> int:
     """연속 출석 `streak`일로 얻는 **추가 캐스트 횟수**. (7차)
 
-    🚨 `STREAK_CAST_MAX`에서 멈춰요 — 그게 발행 천장이에요.
+    = 1단계(5일마다 +2, `STREAK_CAST_MAX`에서 멈춤) + 2단계(40일부터 20일마다 +10).
+    🚨 2단계는 천장이 없어요(2026-11-08 사용자 결정, `LONG_STREAK_*` 주석).
     ⚠️ `streak`은 **살아있는 연속**이어야 해요(끊긴 기록은 0으로 넘기세요).
        판정은 `fishing_store._streak_sync`가 해요.
     ⚠️ `DAILY_CAST_CAP`이 0(무제한)이면 보너스는 의미가 없으니 0이에요."""
     if streak <= 0 or not DAILY_CAST_CAP or not STREAK_CAST_EVERY:
         return 0
-    return min(STREAK_CAST_MAX, (streak // STREAK_CAST_EVERY) * STREAK_CAST_BONUS)
+    short = min(STREAK_CAST_MAX, (streak // STREAK_CAST_EVERY) * STREAK_CAST_BONUS)
+    return short + long_streak_cast_bonus(streak)
+
+
+def long_streak_cast_bonus(streak: int) -> int:
+    """🔥 2단계(장기 연속) 보너스만. 40일 +10 · 60일 +20 · 80일 +30 ... (2026-11-08)
+
+    ⚠️ 1단계와 **더해서** 쓰여요(`streak_cast_bonus`). 따로 부를 일은 안내문뿐이에요."""
+    if (not DAILY_CAST_CAP or not LONG_STREAK_START or not LONG_STREAK_EVERY
+            or streak < LONG_STREAK_START):
+        return 0
+    bonus = ((streak - LONG_STREAK_START) // LONG_STREAK_EVERY + 1) * LONG_STREAK_BONUS
+    return min(bonus, LONG_STREAK_MAX) if LONG_STREAK_MAX else bonus
+
+
+def long_streak_note() -> str:
+    """안내문에 붙이는 2단계 설명 한 조각. 2단계가 꺼져 있으면 빈 문자열이에요.
+
+    🚨 **안내문에 40·20·10을 직접 타이핑하지 말고 이걸 쓰세요.** 상수를 바꾸면 따라와요.
+    ⚠️ `scripts/scan_guides.py`가 이 문구 모양(`N일부터 M일마다 +K번`)을 읽어요."""
+    if not DAILY_CAST_CAP or not LONG_STREAK_START or not LONG_STREAK_EVERY:
+        return ""
+    return f"{LONG_STREAK_START}일부터 {LONG_STREAK_EVERY}일마다 +{LONG_STREAK_BONUS}번"
 
 
 def daily_cap_for(streak: int) -> int:
@@ -445,7 +494,11 @@ def ceiling_daily_net_issue() -> float:
     보너스가 없는 사람 기준이라 **천장을 낮게 잡아요.**"""
     if not DAILY_CAST_CAP:
         return float("inf")
-    return (DAILY_CAST_CAP + STREAK_CAST_MAX) * net_issue_per_cast()
+    # 🚨 2026-11-08부터 2단계(장기 연속)에 천장이 없으면 경제 천장도 없어요(사용자 결정).
+    #    `inf`를 돌려줘서 "천장이 있다"고 착각하지 않게 해요.
+    if LONG_STREAK_START and LONG_STREAK_EVERY and not LONG_STREAK_MAX:
+        return float("inf")
+    return (DAILY_CAST_CAP + STREAK_CAST_MAX + LONG_STREAK_MAX) * net_issue_per_cast()
 
 
 def income_for_cap(cap: int) -> float:

@@ -97,6 +97,25 @@ def _cache_put_sync(key: str, text: str, feature: str) -> None:
     )
 
 
+# 악귀브리핑과 같은 DB·같은 모양으로 적어요. 비용 계산(가격표)은 브리핑 쪽 한 곳에만 있어요 —
+# 여기서는 토큰 수만 남겨요. 그래야 가격이 바뀌어도 한 곳만 고치면 돼요.
+_usage = _db.client[os.getenv("AI_USAGE_DB_NAME", "ai_usage")]["calls"]
+
+
+def _usage_put_sync(feature: str, message) -> None:
+    u = message.usage
+    _usage.insert_one({
+        "at": datetime.now(timezone.utc),
+        "app": "bot",
+        "feature": feature,
+        "model": getattr(message, "model", None) or DEFAULT_MODEL,
+        "input": int(getattr(u, "input_tokens", 0) or 0),
+        "cache_write": int(getattr(u, "cache_creation_input_tokens", 0) or 0),
+        "cache_read": int(getattr(u, "cache_read_input_tokens", 0) or 0),
+        "output": int(getattr(u, "output_tokens", 0) or 0),
+    })
+
+
 async def ask(
     system: str,
     user: str,
@@ -152,6 +171,13 @@ async def ask(
         #    기능이 죽으면 안 되니 **반드시 삼키고 None**이에요.
         log.warning("🤖 [%s] 호출 실패", feature, exc_info=True)
         return None
+
+    # 💰 사용량 기록 — 악귀브리핑의 'AI 사용량' 탭이 같은 Atlas 의 `ai_usage.calls` 를 읽어요.
+    #    거절돼도 돈은 나가니 거절 판정보다 먼저 적어요. 실패해도 답변은 그대로 써요.
+    try:
+        await asyncio.to_thread(_usage_put_sync, feature, message)
+    except Exception:  # noqa: BLE001
+        log.warning("🤖 [%s] 사용량 기록 실패 (답변은 그대로 써요)", feature)
 
     if message.stop_reason == "refusal":
         log.info("🤖 [%s] 답변이 거절됐어요", feature)

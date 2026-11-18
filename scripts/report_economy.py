@@ -236,9 +236,19 @@ if balances:
         print(f"  ⏳ 낚시 하루 상한 {DAILY_CAST_CAP}회 = 1인 최대 순발행 "
               f"{cap_net:+.1f}코인/일")
         if STREAK_CAST_MAX:
+            from utils.fish_data import (
+                LONG_STREAK_EVERY, LONG_STREAK_START, SHORT_FULL_DAYS, daily_cap_for,
+                long_streak_note,
+            )
             print(f"     └ 🔥 연속 출석 {STREAK_CAST_EVERY}일마다 +{STREAK_CAST_BONUS}회"
-                  f"(최대 +{STREAK_CAST_MAX}회) → **천장은 "
-                  f"{DAILY_CAST_CAP + STREAK_CAST_MAX}회 / {ceil_net:+.1f}코인/일**")
+                  f"(1단계 최대 +{STREAK_CAST_MAX}회 = {DAILY_CAST_CAP + STREAK_CAST_MAX}회 / "
+                  f"{max_daily_net_issue(SHORT_FULL_DAYS):+.1f}코인/일)")
+            # 🚨 2026-11-08: 2단계(장기 연속)는 천장이 없어요(사용자 결정). 단계별로 찍어요.
+            if long_streak_note():
+                steps = [LONG_STREAK_START + LONG_STREAK_EVERY * i for i in range(4)]
+                print(f"     └ 🔥 2단계 {long_streak_note()} · **천장 {ceil_net}** → "
+                      + " · ".join(f"{d}일 {daily_cap_for(d)}회/{max_daily_net_issue(d):+.0f}코인"
+                                   for d in steps))
         if cap_net > 0:
             print(f"     └ 중앙값({med:.1f}코인)인 사람이 상위권(최대 {max(balances)}코인)을 "
                   f"따라잡는 데 {(max(balances) - med) / cap_net:.0f}일")

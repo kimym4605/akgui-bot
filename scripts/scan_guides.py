@@ -260,6 +260,9 @@ def _asserts() -> list:
         add("낚시터", "연속 보너스 상한", r"최대 \+(\d+)번 = 하루 (\d+)번",
             lambda: (fd.STREAK_CAST_MAX,
                      fd.DAILY_CAST_CAP + fd.STREAK_CAST_MAX))
+        # ⭐ 2026-11-08 2단계(장기 연속). 문구는 `fd.long_streak_note()`가 만들어요.
+        add("낚시터", "장기 연속 보너스", r"(\d+)일부터 (\d+)일마다 \+(\d+)번",
+            lambda: (fd.LONG_STREAK_START, fd.LONG_STREAK_EVERY, fd.LONG_STREAK_BONUS))
         add("악귀상점", "소형 낚시대 값", r"소형\*{0,2}\)?\s*\*{0,2}(\d+)코인",
             lambda: (fd.SMALL_ROD_PRICE,))
     except Exception:                                  # noqa: BLE001

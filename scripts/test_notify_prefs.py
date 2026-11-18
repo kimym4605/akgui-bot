@@ -183,6 +183,52 @@ ch2 = FakeChannel()
 asyncio.run(cog._complete(11, "use_rank", ch2))
 check("끈 사람에겐 채널 알림이 안 간다", ch2.sent == [], str(ch2.sent))
 
+print("7-1) interaction을 넘기면 본인만 보이게(ephemeral) 간다 — 2026-11-08")
+
+
+class _FakeResp:
+    def __init__(self, done):
+        self._done = done
+        self.sent = []
+
+    def is_done(self):
+        return self._done
+
+    async def send_message(self, *a, **kw):  # 🚨 이게 불리면 호출부 응답을 가로챈 거예요
+        self.sent.append((a, kw))
+
+
+class _FakeFollowup:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, *a, **kw):
+        self.sent.append((a, kw))
+
+
+class FakeInteraction:
+    def __init__(self, done=True):
+        self.response, self.followup = _FakeResp(done), _FakeFollowup()
+        self.user = type("U", (), {"id": 0})()
+
+
+itx = FakeInteraction(done=True)
+asyncio.run(cog._complete(10, "use_rank", itx))
+check("followup 1건", len(itx.followup.sent) == 1, str(itx.followup.sent))
+check("ephemeral=True", bool(itx.followup.sent) and itx.followup.sent[0][1].get("ephemeral") is True,
+      str(itx.followup.sent))
+check("멘션 없음(나만 보니까)", bool(itx.followup.sent) and "<@" not in itx.followup.sent[0][0][0])
+
+itx2 = FakeInteraction(done=False)
+asyncio.run(cog._complete(10, "use_rank", itx2))
+check("응답 전 상호작용은 건드리지 않는다",
+      itx2.response.sent == [] and itx2.followup.sent == [], str((itx2.response.sent, itx2.followup.sent)))
+
+itx3 = FakeInteraction(done=True)
+asyncio.run(notify_prefs.set_enabled(11, "mission_channel", False))
+asyncio.run(cog._complete(11, "use_rank", itx3))
+check("끈 사람에겐 ephemeral 알림도 안 간다", itx3.followup.sent == [], str(itx3.followup.sent))
+
 asyncio.run(notify_prefs.set_enabled(12, "mission_dm", False))
 asyncio.run(cog._notify_auto_complete(12, ["val_play"]))
 check("끈 사람에겐 자동판정 DM이 안 간다", fake_user.dms == [], str(fake_user.dms))

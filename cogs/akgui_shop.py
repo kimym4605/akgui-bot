@@ -59,12 +59,15 @@ from utils.mission_store import MISSIONS, REROLL_LIMIT_PER_DAY, REROLL_PRICE
 from utils.fish_data import (
     DAILY_CAST_CAP, ROD_DURABILITY, ROD_PRICE, SMALL_ROD_DURABILITY,
     SMALL_ROD_PRICE, STREAK_CAST_BONUS, STREAK_CAST_EVERY, STREAK_CAST_MAX,
+    long_streak_note,
 )
 from utils.profile_card import (
     ALL_THEMES, CHARACTER_THEME_PRICE, CHARACTER_THEMES, COLOR_THEME_PRICE,
-    THEMES, is_character, price_of,
+    CUSTOM_THEME, CUSTOM_THEME_KEY, CUSTOM_THEME_PRICE, THEMES, is_character, price_of,
 )
-from utils.title_store import TITLE_DAYS, TITLE_PLANS
+from utils.title_store import (
+    TITLE_DAYS, TITLE_ICON_EMOJI_PRICE, TITLE_ICON_IMAGE_PRICE, TITLE_PLANS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -106,7 +109,10 @@ def _item_fields(state: dict | None = None) -> list[tuple[str, str]]:
            # ⭐ 7차 연속 출석 보너스. 🚨 **여기도 상수에서 뽑아요** — 공개 패널이라
            #    사람별 값은 못 넣지만, 규칙 자체는 알려줘야 눌러볼 수 있어요.
            + (f"　└ 🔥 `/출석`을 **{STREAK_CAST_EVERY}일 연속**하면 "
-              f"**+{STREAK_CAST_BONUS}번** 늘어나요 (최대 +{STREAK_CAST_MAX}번)\n"
+              f"**+{STREAK_CAST_BONUS}번** 늘어나요 (최대 +{STREAK_CAST_MAX}번"
+              # ⭐ 2026-11-08 2단계(장기 연속). 문구는 fish_data가 만들어요.
+              + (f" · 그 뒤로 {long_streak_note()}" if long_streak_note() else "")
+              + ")\n"
               if STREAK_CAST_MAX else "")
            if DAILY_CAST_CAP else
            "　└ **몇 개든** 살 수 있어요 (하루 제한 없어요)\n")
@@ -126,7 +132,9 @@ def _item_fields(state: dict | None = None) -> list[tuple[str, str]]:
     fields.append((
         f"🏷️ 칭호 — {TITLE_PLANS[10]}코인(10일) / {TITLE_PLANS[TITLE_DAYS]}코인({TITLE_DAYS}일)",
         "이름과 색을 직접 정하는 나만의 역할이에요.\n"
-        "　└ `/칭호구매` 에서 기간을 골라 사요 (기간이 남았을 때 또 사면 이어붙어요)",
+        "　└ `/칭호구매` 에서 기간을 골라 사요 (기간이 남았을 때 또 사면 이어붙어요)\n"
+        f"　└ 🎖️ `/칭호아이콘` 으로 칭호 옆에 아이콘 — 이모지 **{TITLE_ICON_EMOJI_PRICE}코인** · "
+        f"그림 **{TITLE_ICON_IMAGE_PRICE}코인**(방장 승인)",
     ))
 
     protect = (
@@ -143,23 +151,26 @@ def _item_fields(state: dict | None = None) -> list[tuple[str, str]]:
     theme = (f"`/프로필` 카드 배경을 바꿔요.\n"
              f"　└ 🎨 **색 테마** {len(THEMES)}종 — {COLOR_THEME_PRICE}코인\n")
     if CHARACTER_THEMES:
-        theme += (f"　└ 🎴 **캐릭터 테마** {len(CHARACTER_THEMES)}종 — "
+        theme += (f"　└ 🎴 **그림 테마** {len(CHARACTER_THEMES)}종 — "
                   f"{CHARACTER_THEME_PRICE}코인 (그림이 배경으로 깔려요)\n")
+    # 🖼️ 2026-11-15. 승인제라 "바로 바뀐다"고 적으면 거짓이에요 → 승인·환불을 같이 적어요.
+    theme += (f"　└ 🖼️ **내 그림** — {CUSTOM_THEME_PRICE}코인 · `/커스텀테마`로 올리면 "
+              "방장 확인 후 적용 (거절 시 전액 환불)\n")
     theme += "　└ 📮 원하는 캐릭터가 없으면 테마 화면에서 **요청**할 수 있어요\n"
     if state:
         owned_extra = [t for t in state["themes"] if t != cosmetic_store.DEFAULT_THEME]
         selected = state["theme"]
+        _sel = CUSTOM_THEME if selected == CUSTOM_THEME_KEY else ALL_THEMES.get(selected, THEMES['기본'])
         theme += (
             f"　└ 지금 쓰는 테마: "
-            f"**{ALL_THEMES.get(selected, THEMES['기본'])['emoji']} {selected}**\n"
+            f"**{_sel['emoji']} {selected}**\n"
             f"　└ 가진 테마: "
             f"{('**' + '** · **'.join(owned_extra) + '**') if owned_extra else '기본만'}"
         )
     else:
         theme += "　└ 한 번 사면 **영구히** 남아서 언제든 다시 골라 쓸 수 있어요"
     # 🚨 가격을 손으로 적지 않아요 — 캐릭터 테마가 없으면 범위 표기가 거짓이 돼요.
-    _price_label = (f"{COLOR_THEME_PRICE}~{CHARACTER_THEME_PRICE}코인"
-                    if CHARACTER_THEMES else f"{COLOR_THEME_PRICE}코인")
+    _price_label = f"{COLOR_THEME_PRICE}~{CUSTOM_THEME_PRICE}코인"
     fields.append((f"🎨 프로필 카드 테마 — {_price_label} (영구)", theme))
 
     return fields
@@ -464,6 +475,20 @@ class ThemeRequestButton(discord.ui.Button):
         await interaction.response.send_modal(ThemeRequestModal())
 
 
+class CustomThemeButton(discord.ui.Button):
+    """🖼️ 내 그림 테마 (2026-11-15). 승인된 그림이 있으면 그걸로 바꾸고, 없으면
+    `/커스텀테마` 신청 안내를 띄워요. 실제 처리는 `cogs/custom_theme.py`."""
+
+    def __init__(self):
+        super().__init__(label=f"내 그림 ({CUSTOM_THEME_PRICE}코인)", emoji="🖼️",
+                         style=discord.ButtonStyle.primary, row=2)
+
+    async def callback(self, interaction: discord.Interaction):
+        # 순환 import를 피하려고 여기서 불러와요(custom_theme도 profile_card를 봐요).
+        from cogs.custom_theme import use_custom
+        await use_custom(interaction)
+
+
 class ThemeView(discord.ui.View):
     def __init__(self, user_id: int, owned: list[str], selected: str):
         super().__init__(timeout=180)
@@ -475,8 +500,9 @@ class ThemeView(discord.ui.View):
         #    Select는 디스코드가 거부해요(뷰 전체가 안 떠요).
         if CHARACTER_THEMES:
             self.add_item(ThemeSelect(CHARACTER_THEMES, owned, selected,
-                                      placeholder="🎴 캐릭터 테마를 골라주세요",
+                                      placeholder="🎴 그림 테마를 골라주세요",
                                       price=CHARACTER_THEME_PRICE))
+        self.add_item(CustomThemeButton())
         self.add_item(ThemeRequestButton())
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -522,7 +548,7 @@ class ThemeView(discord.ui.View):
 
         await cosmetic_store.select_theme(interaction.user.id, key)
         info = ALL_THEMES[key]
-        kind = "🎴 캐릭터" if is_character(key) else "🎨 색"
+        kind = "🎴 그림" if is_character(key) else "🎨 색"
         balance = await coin_wallet.get_balance(interaction.user.id)
         await interaction.edit_original_response(
             content=(
@@ -718,14 +744,33 @@ async def act_protect(interaction: discord.Interaction) -> None:
         )
         return
 
+    # 🧊 오늘 출석으로 연속이 **막 끊긴** 사람이면 산 보호권을 바로 써서 되살려요.
+    #    (2026-11-05 서아: 끊긴 걸 보고 1분 뒤에 샀는데 안 쓰여서 손으로 복구했어요)
+    #    ⚠️ 소급 실패가 구매를 깨면 안 돼요 — 보호권은 이미 들어갔으니 그대로 남겨요.
+    restored = None
+    try:
+        restored = await attend_service.retro_protect(interaction.user.id)
+    except Exception:  # noqa: BLE001
+        log.warning("🧊 보호권 소급 실패: %s", interaction.user.id, exc_info=True)
+
     have = await inventory_store.protect_count(interaction.user.id)
     balance = await coin_wallet.get_balance(interaction.user.id)
-    await interaction.followup.send(
-        f"🧊 출석 보호권을 샀어요. 지금 **{have}장** · 남은 코인 {balance}개\n"
-        "-# 하루 빠진 뒤 `/출석`을 하면 **자동으로** 쓰여서 연속이 이어져요.",
-        ephemeral=True,
-    )
-    log.info("🧊 출석 보호권 구매: %s (보유 %d장)", interaction.user.id, have)
+    if restored:
+        bonus = f" · 못 받은 연속 보너스 **+{restored['owed']}코인**" if restored["owed"] else ""
+        text = (
+            f"🧊 출석 보호권을 사서 **바로 썼어요!** 끊겼던 연속 **{restored['prev']}일**이 "
+            f"되살아나서 지금 **{restored['streak']}일째**예요.{bonus}\n"
+            f"-# 남은 보호권 {have}장 · 남은 코인 {balance}개"
+        )
+    else:
+        text = (
+            f"🧊 출석 보호권을 샀어요. 지금 **{have}장** · 남은 코인 {balance}개\n"
+            "-# 하루 빠진 뒤 `/출석`을 하면 **자동으로** 쓰여서 연속이 이어져요. "
+            "출석 후에 끊긴 걸 봤다면 그날 안에 사도 바로 되살아나요."
+        )
+    await interaction.followup.send(text, ephemeral=True)
+    log.info("🧊 출석 보호권 구매: %s (보유 %d장%s)", interaction.user.id, have,
+             ", 소급 적용" if restored else "")
 
 
 async def act_theme(interaction: discord.Interaction) -> None:
@@ -737,7 +782,8 @@ async def act_theme(interaction: discord.Interaction) -> None:
         # 🚨 값이 두 가지라 **둘 다 적어야** 해요. 한쪽만 적으면 다른 쪽을 고른
         #    사람에게 거짓말이 돼요.
         f"테마를 고르면 바로 적용돼요. 안 가진 테마는 고르는 순간 코인이 빠져요 — "
-        f"🎨 색 **{COLOR_THEME_PRICE}코인** · 🎴 캐릭터 **{CHARACTER_THEME_PRICE}코인**\n"
+        f"🎨 색 **{COLOR_THEME_PRICE}코인** · 🎴 그림 **{CHARACTER_THEME_PRICE}코인** · "
+        f"🖼️ 내 그림 **{CUSTOM_THEME_PRICE}코인**\n"
         "-# 한 번 산 테마는 영구히 남아서 언제든 다시 고를 수 있어요.",
         view=ThemeView(interaction.user.id, state["themes"], state["theme"]),
         ephemeral=True,
@@ -750,7 +796,9 @@ async def act_title(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(
         f"칭호는 `/칭호구매` 에서 사요 (이름·색을 직접 적어야 해서요).\n"
         f"　└ **{TITLE_PLANS[10]}코인 = 10일** · **{TITLE_PLANS[TITLE_DAYS]}코인 = {TITLE_DAYS}일**\n"
-        f"-# `기간` 선택지에서 고를 수 있어요. 하루 단가는 {TITLE_DAYS}일권이 더 싸요.",
+        f"-# `기간` 선택지에서 고를 수 있어요. 하루 단가는 {TITLE_DAYS}일권이 더 싸요.\n"
+        f"🎖️ 칭호를 단 뒤 `/칭호아이콘` 으로 옆에 아이콘도 달 수 있어요 "
+        f"(이모지 {TITLE_ICON_EMOJI_PRICE}코인 · 그림 {TITLE_ICON_IMAGE_PRICE}코인).",
         ephemeral=True,
     )
 

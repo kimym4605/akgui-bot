@@ -204,6 +204,14 @@ class Assistant(commands.Cog):
             log.warning("❓ 매니저: Claude 호출 실패", exc_info=True)
             return None
 
+        # 💰 이 cog 는 `utils/ai.ask()` 를 안 거치고 직접 불러요. 사용량 기록만은 같은 곳에 남겨요
+        #    (빠뜨리면 브리핑의 'AI 사용량' 탭에서 봇 매니저 몫이 조용히 빠져요).
+        try:
+            from utils.ai import _usage_put_sync
+            await asyncio.to_thread(_usage_put_sync, "봇매니저", message)
+        except Exception:  # noqa: BLE001
+            log.warning("❓ 매니저: 사용량 기록 실패 (답변은 그대로 써요)")
+
         if message.stop_reason == "refusal":
             log.info("❓ 매니저: Claude가 답변을 거절했어요.")
             return None

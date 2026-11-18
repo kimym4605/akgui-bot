@@ -870,7 +870,11 @@ for _label, _val in [("소형 낚시대값", fish_data.SMALL_ROD_PRICE),
                      ("내구도", fish_data.ROD_DURABILITY),
                      ("하루 상한", fish_data.DAILY_CAST_CAP),
                      ("보너스 포함 천장",
-                      fish_data.DAILY_CAST_CAP + fish_data.STREAK_CAST_MAX)]:
+                      fish_data.DAILY_CAST_CAP + fish_data.STREAK_CAST_MAX),
+                     # ⭐ 2026-11-08 2단계 — 패널이 40일 40번을 말하는가
+                     ("2단계 시작일", f"{fish_data.LONG_STREAK_START}일"),
+                     ("2단계 시작 상한",
+                      f"{fish_data.daily_cap_for(fish_data.LONG_STREAK_START)}번")]:
     check(f"패널 글의 {_label}이 상수와 같다 ({_val})", str(_val) in _emb_text)
 check("패널 글에 등급별 확률표를 적지 않았다 (/낚시확률이 계산해서 보여줘요)",
       "%" not in _emb_text, _emb_text[:80])
@@ -1683,13 +1687,25 @@ print(f"  설정: 연속 {EVERY}일마다 +{PER}회 · 최대 +{BMAX}회 "
 check("🚨 보너스에 천장이 있다 (없으면 발행 상한이 사라진다)", BMAX > 0, f"MAX={BMAX}")
 check("한 칸 보너스가 천장을 넘지 않는다", PER <= BMAX, f"{PER} vs {BMAX}")
 
-# ⒜ 계산식
+# ⒜ 계산식 — 1단계(5일마다 +2, 25일에 +10)와 2단계(40일부터 20일마다 +10, 2026-11-08)
+LS, LE, LB = fish_data.LONG_STREAK_START, fish_data.LONG_STREAK_EVERY, fish_data.LONG_STREAK_BONUS
 for _streak, _want in ((0, 0), (EVERY - 1, 0), (EVERY, PER), (EVERY * 2, PER * 2),
-                       (EVERY * 999, BMAX)):
+                       (fish_data.SHORT_FULL_DAYS, BMAX),
+                       (LS - 1, BMAX),                     # 39일: 아직 1단계 만땅
+                       (LS, BMAX + LB),                    # 40일: +10 더 = 하루 40번
+                       (LS + LE - 1, BMAX + LB),           # 59일
+                       (LS + LE, BMAX + LB * 2),           # 60일: 하루 50번
+                       (LS + LE * 2, BMAX + LB * 3),       # 80일: 하루 60번
+                       (LS + LE * 5, BMAX + LB * 6)):      # 140일: 천장 없음(사용자 결정)
     check(f"연속 {_streak}일 → +{_want}회",
           fish_data.streak_cast_bonus(_streak) == _want,
           f"{fish_data.streak_cast_bonus(_streak)}회")
 check("🚨 음수·0 연속은 보너스 0", fish_data.streak_cast_bonus(-5) == 0)
+check("⭐ 사용자 예시 그대로: 40일 40번 · 60일 50번 · 80일 60번",
+      [fish_data.daily_cap_for(d) for d in (40, 60, 80)] == [40, 50, 60],
+      str([fish_data.daily_cap_for(d) for d in (40, 60, 80)]))
+check("⭐ 25~39일은 지금처럼 30번 (1단계는 안 바뀌었다)",
+      {fish_data.daily_cap_for(d) for d in range(25, 40)} == {30})
 check(f"daily_cap_for({EVERY}) = 기본 + 보너스",
       fish_data.daily_cap_for(EVERY) == CAP + PER, str(fish_data.daily_cap_for(EVERY)))
 check("🚨 상한이 무제한(0)이면 보너스도 0 (이중 의미 금지)",
@@ -1732,8 +1748,8 @@ fake_guest.docs.pop(G2, None)
 # ⒜ **조건부 update가 실제로 늘어난 상한까지 허용하는가** — 이게 핵심이에요
 U = "streak-cast-user"
 fake.docs.pop(U, None)
-fake_attend.set_streak(U, EVERY * 999)        # 보너스 만땅
-_my_cap = CAP + BMAX
+fake_attend.set_streak(U, LS + LE)            # 60일 = 1단계 만땅 + 2단계 2칸
+_my_cap = fish_data.daily_cap_for(LS + LE)
 for _ in range((_my_cap // ROD_DURABILITY) + 2):
     run(fishing_store.buy_rod(U, ROD_DURABILITY))
 _boosted = [run(fishing_store.use_rod(U)) for _ in range(_my_cap)]
@@ -1749,11 +1765,16 @@ check("막힌 뒤 안내용 상한도 늘어난 값이다",
       str(run(fishing_store.cast_quota(U))[1]))
 fake_attend.docs.pop(U, None)
 
-# ⒞ 발행 천장
-check("🚨 ceiling_daily_net_issue = (기본+최대) × 캐스트당 순발행",
-      abs(fish_data.ceiling_daily_net_issue()
-          - (CAP + BMAX) * fish_data.net_issue_per_cast()) < 1e-9,
-      f"{fish_data.ceiling_daily_net_issue():.2f}코인")
+# ⒞ 발행 천장 — 🚨 2026-11-08부터 2단계에 천장이 없어요(사용자가 "제한 없음"을 골랐어요).
+#    그래서 천장 함수는 inf를 줘야 해요. 유한한 값을 주면 "천장이 있다"고 착각해요.
+if fish_data.LONG_STREAK_MAX:
+    check("ceiling_daily_net_issue = (기본+1단계+2단계 최대) × 캐스트당 순발행",
+          abs(fish_data.ceiling_daily_net_issue()
+              - (CAP + BMAX + fish_data.LONG_STREAK_MAX) * fish_data.net_issue_per_cast()) < 1e-9)
+else:
+    check("🚨 2단계 천장이 없으면 ceiling_daily_net_issue는 inf다",
+          fish_data.ceiling_daily_net_issue() == float("inf"),
+          str(fish_data.ceiling_daily_net_issue()))
 check("⚠️ max_daily_net_issue()의 기본값은 **보너스 없음**이다 "
       "(안내문 7곳이 그 기준으로 쓰여 있다)",
       abs(fish_data.max_daily_net_issue() - CAP * fish_data.net_issue_per_cast()) < 1e-9,
@@ -1771,7 +1792,14 @@ check("보너스가 없으면 '연속하면 늘어난다'를 알려준다",
       "연속" in _hint_none and f"+{PER}" in _hint_none, _hint_none.strip())
 check("보너스를 받고 있으면 받는 양을 알려준다",
       f"+{PER}번" in _hint_some, _hint_some.strip())
-check("최대치면 '최대치'라고 말한다", "최대치" in _hint_full, _hint_full.strip())
+if fish_data.long_streak_note():
+    check("⭐ 1단계 만땅이면 2단계(장기 연속)를 알려준다",
+          fish_data.long_streak_note() in _hint_full and "최대치" not in _hint_full,
+          _hint_full.strip())
+    for _h in (_hint_none, _hint_some):
+        check("늘리는 법 안내에도 2단계가 붙는다", fish_data.long_streak_note() in _h, _h.strip())
+else:
+    check("최대치면 '최대치'라고 말한다", "최대치" in _hint_full, _hint_full.strip())
 _src18 = _Path(os.path.join(BOT_DIR, "cogs/fishing.py")).read_text(encoding="utf-8")
 check("🚨 상한 안내가 DAILY_CAST_CAP을 그대로 박지 않는다 (사람마다 달라졌다)",
       "오늘은 **{DAILY_CAST_CAP}번**을 다 던졌어요" not in _src18)
@@ -1892,12 +1920,13 @@ check("낚시대가 비면 0개 + no_rod", (_g5, _r5) == (0, "no_rod"), f"{_g5}�
 # ⭐ 7차 연속 보너스가 묶음에도 적용되는가
 BB = "batch-bonus"
 fake.docs.pop(BB, None)
-fake_attend.set_streak(BB, fish_data.STREAK_CAST_EVERY * 999)
-for _ in range(((CAP + BMAX) // ROD_DURABILITY) + 3):
+fake_attend.set_streak(BB, fish_data.LONG_STREAK_START)     # 40일 = 하루 40번
+_bb_cap = fish_data.daily_cap_for(fish_data.LONG_STREAK_START)
+for _ in range((_bb_cap // ROD_DURABILITY) + 3):
     run(fishing_store.buy_rod(BB, ROD_DURABILITY))
-_g6, _, _ = run(fishing_store.use_rods(BB, CAP + BMAX + 50))
-check(f"⭐ 연속 보너스를 받으면 묶음도 {CAP + BMAX}개까지 받는다",
-      _g6 == CAP + BMAX, f"{_g6}개")
+_g6, _, _ = run(fishing_store.use_rods(BB, _bb_cap + 50))
+check(f"⭐ 연속 보너스를 받으면 묶음도 {_bb_cap}개까지 받는다 (2단계 포함)",
+      _g6 == _bb_cap, f"{_g6}개")
 fake_attend.docs.pop(BB, None)
 
 # ── ⒟ 환불 ───────────────────────────────────────────────────────

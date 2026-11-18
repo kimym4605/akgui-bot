@@ -11,7 +11,8 @@
   - `coin_wallet`: 악귀코인
   - `scrim_record_store`: 내전 승/패/연승
   - `agwi_weekly_store`: 이번 주 악귀력
-  - `achievement_store`: 업적 해금 수 (겸 새 업적 판정)
+  - `achievement_store`: 업적 해금 수 (겸 새 업적 판정) · 음성 누적 분 · 낚은 수 · 누적 미션
+  - `voice_level` / `fishing_store`: 다음 레벨까지 남은 분 · 최대어 (2026-11-15)
 
 ## HenrikDev를 부르지 않아요
 
@@ -29,10 +30,14 @@ from utils import (
     birthday_store,
     coin_wallet,
     cosmetic_store,
+    custom_theme_store,
+    fish_data,
+    fishing_store,
     riot_account_store,
     scrim_record_store,
     tier_roles,
     title_store,
+    voice_level,
 )
 
 log = logging.getLogger(__name__)
@@ -112,6 +117,24 @@ async def collect(member: discord.Member | discord.User, *, evaluate_achievement
     if newly:
         coin += sum(a["reward"] for a in newly)
 
+    # --- 🎙️ 음성 레벨 · 🎣 낚시 (2026-11-15 카드 2번째 줄) ---
+    # 레벨·누적 분·낚은 수는 업적 판정용 `stats`에 이미 있어요(같은 값이 두 군데서 따로
+    # 계산되면 카드와 업적이 어긋나요). 다음 레벨까지 남은 분과 최대어만 여기서 더 구해요.
+    v_level, v_done, v_need = voice_level.progress(stats.get("voice_minutes", 0))
+    best_fish = None
+    try:
+        best = (await fishing_store.get(member.id)).get("best") or {}
+        if best.get("key") in fish_data.BY_KEY:
+            grade, fname = fish_data.BY_KEY[best["key"]]
+            best_fish = {"name": fname, "grade": grade, "size": best.get("size")}
+    except Exception:  # noqa: BLE001 — 최대어 한 줄 때문에 카드가 죽으면 안 돼요
+        log.warning("최대어 조회 실패 (user=%s)", member.id, exc_info=True)
+
+    # --- 🖼️ 커스텀 테마 그림 (고른 사람만 DB에서 꺼내요 — ~100KB라 아무나 꺼내면 낭비) ---
+    theme = await cosmetic_store.selected_theme(member.id)
+    custom_art = (await custom_theme_store.approved_art(member.id)
+                  if theme == custom_theme_store.THEME_KEY else None)
+
     total_games = record["wins"] + record["losses"]
     return {
         "name": member.display_name,
@@ -120,7 +143,8 @@ async def collect(member: discord.Member | discord.User, *, evaluate_achievement
         "tier": tier_name,
         "accent_color": accent,
         # 카드 배경 테마 (`/악귀상점`에서 사서 고른 것). 모르는 이름이면 카드가 기본으로 그려요.
-        "theme": await cosmetic_store.selected_theme(member.id),
+        "theme": theme,
+        "custom_art": custom_art,
         "coin": coin,
         "record": {
             "wins": record["wins"],
@@ -135,6 +159,12 @@ async def collect(member: discord.Member | discord.User, *, evaluate_achievement
         "achievements_total": summary["total"],
         "attendance": stats["attendance"],
         "attendance_streak": stats["attendance_streak"],
+        "voice": {
+            "level": v_level, "minutes": stats.get("voice_minutes", 0),
+            "into": v_done, "need": v_need,
+        },
+        "fishing": {"caught": stats.get("fish_caught", 0), "best": best_fish},
+        "mission_total": stats.get("mission_total", 0),
         "season": scrim_record_store.current_season(),
         # 발로란트 간략 전적 (없으면 None → 카드에서 그 줄을 통째로 빼요)
         "valorant": valorant,

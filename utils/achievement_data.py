@@ -40,6 +40,8 @@ CATEGORIES = {
     "scrim": "⚔️ 내전",
     "valorant": "🎯 발로란트",
     "mission": "📋 미션",
+    "voice": "🎙️ 통화",
+    "fishing": "🎣 낚시",
     "etc": "✨ 그 외",
 }
 
@@ -117,6 +119,21 @@ ACHIEVEMENTS = [
     _a("mission_10",  "미션 수행자",    "미션 10개 완료",  "📋", "mission", "mission_total", 10,  "bronze"),
     _a("mission_50",  "성실한 악귀",    "미션 50개 완료",  "📝", "mission", "mission_total", 50,  "silver"),
     _a("mission_150", "미션 장인",      "미션 150개 완료", "🗂️", "mission", "mission_total", 150, "gold"),
+
+    # -- 🎙️ 통화 레벨 (4) — 2026-11-15 ---------------------------------
+    # 음성 레벨(2026-10-18)·낚시가 업적보다 늦게 생겨서 빠져 있었어요. 둘 다 누적 기록이
+    # 이미 쌓여 있어서 **소급 해금돼요**(위 설계 원칙 그대로). 단계는 음성 레벨 역할
+    # (`voice_level.ROLE_TIERS` 5/10/20/30)과 맞췄어요 — 역할을 받는 날 업적도 열려요.
+    _a("voice_5",     "말동무",          "음성 레벨 5 달성",  "🎙️", "voice", "voice_level", 5,  "bronze"),
+    _a("voice_10",    "수다쟁이",        "음성 레벨 10 달성", "🎙️", "voice", "voice_level", 10, "silver"),
+    _a("voice_20",    "통화방 단골",     "음성 레벨 20 달성", "🎧", "voice", "voice_level", 20, "gold"),
+    _a("voice_30",    "통화방 터줏대감", "음성 레벨 30 달성", "📻", "voice", "voice_level", 30, "platinum"),
+
+    # -- 🎣 낚시 (4) — 2026-11-15 ------------------------------------
+    _a("fish_10",     "초보 강태공",     "물고기 10마리 낚기",  "🎣", "fishing", "fish_caught", 10,  "bronze"),
+    _a("fish_50",     "손맛을 안다",     "물고기 50마리 낚기",  "🐟", "fishing", "fish_caught", 50,  "silver"),
+    _a("fish_200",    "어부",            "물고기 200마리 낚기", "🐠", "fishing", "fish_caught", 200, "gold"),
+    _a("fish_500",    "바다의 지배자",   "물고기 500마리 낚기", "🐋", "fishing", "fish_caught", 500, "platinum"),
 
     # -- ✨ 그 외 (4) ----------------------------------------------
     _a("has_title",   "이름을 얻다",    "칭호를 달아본 적 있음", "🏷️", "etc", "title_owned",     1, "silver"),

@@ -16,7 +16,8 @@ import asyncio
 import os
 import sys
 
-BOT_DIR = r"C:\Users\user\Desktop\악귀봇프로젝트\discord-bot-starter-py"
+# ⚠️ 예전엔 `C:\Users\user\...`로 박혀 있어서 PC가 바뀌자 바로 깨졌어요 → 이 파일 기준으로 찾아요.
+BOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, BOT_DIR)
 os.chdir(BOT_DIR)
 
@@ -49,7 +50,8 @@ def check(label, condition, detail=""):
 
 async def cleanup():
     for name in ("scrim_records", "scrim_matches", "agwi_weekly", "achievements",
-                 "coin_reset_backup", "coin_log", "missions", "trainers"):
+                 "coin_reset_backup", "coin_log", "missions", "trainers",
+                 "voice_level", "fish"):
         _db[name].delete_many({})
 
 
@@ -181,8 +183,20 @@ async def test_achievements():
 
     summary = await achievement_store.summary(U1, stats)
     # 2026-09-30 포켓몬 기능을 접으면서 도감 5 + 레벨 4 + 스타팅 1 = 10개를 뺐어요 (60 → 50).
-    check("요약 집계", summary["unlocked"] == len(newly) and summary["total"] == 50,
+    # 2026-11-15 🎙️ 통화 4 + 🎣 낚시 4 추가 (50 → 58).
+    check("요약 집계", summary["unlocked"] == len(newly) and summary["total"] == 58,
           f"{summary['unlocked']}/{summary['total']}")
+
+    # 🎙️ · 🎣 소급 해금 (2026-11-15) — 기록이 이미 쌓여 있는 사람은 보는 순간 열려야 해요.
+    from utils import voice_level  # noqa: E402
+    _db["voice_level"].insert_one({"_id": str(U1), "minutes": voice_level.minutes_for_level(10)})
+    _db["fish"].insert_one({"_id": str(U1), "caught": 55})
+    stats_vf = await achievement_store.collect_stats(U1)
+    check("음성 레벨 수집", stats_vf["voice_level"] == 10, str(stats_vf["voice_level"]))
+    check("낚은 수 수집", stats_vf["fish_caught"] == 55, str(stats_vf["fish_caught"]))
+    newly_vf = {a["key"] for a in await achievement_store.evaluate(U1, stats_vf)}
+    check("음성·낚시 업적 소급 해금",
+          newly_vf == {"voice_5", "voice_10", "fish_10", "fish_50"}, str(sorted(newly_vf)))
 
     # 조건 근처 경계값
     tier_ach = achievement_data.BY_KEY["tier_asc"]  # 초월자 = 19
@@ -220,8 +234,10 @@ async def test_card():
     png = await profile_card.render_card(data, None)
     check("카드 렌더링", png is not None and len(png) > 10000, f"{len(png or b''):,} bytes")
     if png:
-        open(r"C:\tmp\card_real.png", "wb").write(png)
-        print("     → C:\\tmp\\card_real.png 저장")
+        import tempfile
+        out = os.path.join(tempfile.gettempdir(), "card_real.png")
+        open(out, "wb").write(png)
+        print(f"     → {out} 저장")
 
 
 async def test_concurrency():

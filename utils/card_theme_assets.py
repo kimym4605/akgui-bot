@@ -38,7 +38,8 @@ MANIFEST = THEME_DIR / "themes.json"
 
 # 카드 크기(profile_card.CARD_WIDTH/HEIGHT와 같아야 해요). 여기 두는 이유는
 # profile_card가 이 모듈을 import하는데 반대로도 하면 순환 import가 되기 때문이에요.
-CARD_SIZE = (1000, 560)
+# 🚨 2026-11-15에 카드가 560 → 630으로 커졌어요(프로필 2번째 줄). 같이 바꿔요.
+CARD_SIZE = (1000, 630)
 
 # 🚨 터무니없이 큰 그림을 막아요(디코딩 폭탄 + 512MB 머신). 4K면 충분해요.
 MAX_PIXELS = 4000 * 4000

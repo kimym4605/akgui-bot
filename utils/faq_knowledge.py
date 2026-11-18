@@ -63,6 +63,8 @@ from utils.fish_data import (
     STREAK_CAST_BONUS,
     STREAK_CAST_EVERY,
     STREAK_CAST_MAX,
+    LONG_STREAK_EVERY,
+    LONG_STREAK_START,
     SMALL_ROD_DURABILITY,
     SMALL_ROD_PRICE,
     TOTAL_SPECIES as FISH_SPECIES,
@@ -262,7 +264,11 @@ def _fishing() -> str:
 같이 올랐어요 — **짧게 해도 벌리게** 하려는 거예요.
 · 🔥 **연속 출석 {STREAK_CAST_EVERY}일마다 +{STREAK_CAST_BONUS}번** 늘어나요
   (최대 **+{STREAK_CAST_MAX}번** = 하루 {DAILY_CAST_CAP + STREAK_CAST_MAX}번).
-  2026-10-27에 생겼어요 — 상한에 막히는 사람이 많아서 늘렸는데, 전체를 올리면
+  🔥 그 뒤로도 **연속 {fish_data.long_streak_note() or "(꺼짐)"}** 더 늘어요 — 연속
+  {LONG_STREAK_START}일이면 하루 {fish_data.daily_cap_for(LONG_STREAK_START)}번,
+  {LONG_STREAK_START + LONG_STREAK_EVERY}일이면 {fish_data.daily_cap_for(LONG_STREAK_START + LONG_STREAK_EVERY)}번이고
+  **끝없이** 계속돼요(2026-11-08).
+  1단계는 2026-10-27에 생겼어요 — 상한에 막히는 사람이 많아서 늘렸는데, 전체를 올리면
   애초에 안 막히던 사람까지 발행이 늘어서 **매일 오는 사람에게만** 열어뒀어요.
   ⚠️ **연속이 끊기면 보너스도 없어져요**(그래서 🧊 출석 보호권이 쓸모가 있어요).
   내 상한은 `/낚시확률`이나 낚시 결과 화면의 "오늘 남은 횟수"에서 봐요.
@@ -292,8 +298,10 @@ def _fishing() -> str:
   낚시대값을 빼면 **{fish_data.net_issue_per_rod():+.0f}코인**쯤 남아요.
 · 🏁 하루 {DAILY_CAST_CAP}번을 다 쓰면 약 **{fish_data.max_daily_income():.0f}코인**이고,
   낚시대값을 빼면 **{fish_data.max_daily_net_issue():+.0f}코인**이 남아요.
-  🔥 연속 출석 보너스를 최대로 받으면(하루 {DAILY_CAST_CAP + STREAK_CAST_MAX}번)
-  **{fish_data.ceiling_daily_net_issue():+.0f}코인**까지 돼요.
+  🔥 연속 {fish_data.SHORT_FULL_DAYS}일 이상(하루 {DAILY_CAST_CAP + STREAK_CAST_MAX}번)이면
+  **{fish_data.max_daily_net_issue(fish_data.SHORT_FULL_DAYS):+.0f}코인**,
+  연속 {LONG_STREAK_START}일(하루 {fish_data.daily_cap_for(LONG_STREAK_START)}번)이면
+  **{fish_data.max_daily_net_issue(LONG_STREAK_START):+.0f}코인**까지 돼요.
 · **꽝은 없어요.** 입질이 온 뒤에 누르면 반드시 뭔가 나와요.
   **늦게 눌러도 괜찮아요** — '늦었다'는 판정이 없어요(모바일에서 반응이 늦게
   전달될 때가 있어서 없앴어요). 입질 **전에** 누르거나 아예 안 누르면 놓치지만,
@@ -971,6 +979,12 @@ def build_system_prompt(bot: discord.Client) -> str:
         "상한에 걸려도 낚시대는 안 없어지고 남은 횟수는 다음 날 쓸 수 있어. "
         f"🔥 **연속 출석 {STREAK_CAST_EVERY}일마다 +{STREAK_CAST_BONUS}번** 늘어나고 "
         f"최대 +{STREAK_CAST_MAX}번이야(=하루 {DAILY_CAST_CAP + STREAK_CAST_MAX}번). "
+        + (f"그 뒤로 **연속 {fish_data.long_streak_note()}** 더 늘고 끝이 없어"
+           f"(연속 {LONG_STREAK_START}일 하루 {fish_data.daily_cap_for(LONG_STREAK_START)}번 · "
+           f"{LONG_STREAK_START + LONG_STREAK_EVERY}일 "
+           f"{fish_data.daily_cap_for(LONG_STREAK_START + LONG_STREAK_EVERY)}번). "
+           if fish_data.long_streak_note() else "")
+        +
         "연속이 끊기면 보너스도 사라져. "
         f"🎣 **몰아 던지기**가 있어(`/낚시 횟수:{BATCH_SIZES[0]}` 또는 결과 화면 버튼) — "
         "입질을 기다려 한 번만 챔질하면 묶음 전체가 판정돼. "

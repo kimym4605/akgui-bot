@@ -90,6 +90,45 @@ async def on_minutes_added(member: discord.Member, minutes: int, channel) -> Non
         log.info("🎙️ 레벨업 알림 실패 (user=%s)", member.id)
 
 
+async def build_voice_embed(target: discord.abc.User) -> discord.Embed:
+    """`/음성레벨` 화면. `/프로필`의 📋 자세히 보기 → 🎙️ 음성 레벨도 이걸 써요."""
+    data = await voice_level.get(target.id)
+    level, done, need = voice_level.progress(data["minutes"])
+
+    filled = int(10 * done / need) if need else 0
+    bar = "▓" * filled + "░" * (10 - filled)
+
+    embed = discord.Embed(
+        title=f"🎙️ {target.display_name} 님의 음성 활동",
+        color=0x5865F2,
+    )
+    embed.add_field(name="레벨", value=f"**Lv.{level}**", inline=True)
+    embed.add_field(name="누적", value=voice_level.format_minutes(data["minutes"]), inline=True)
+    embed.add_field(name="이번 주", value=voice_level.format_minutes(data["weekMinutes"]),
+                    inline=True)
+    rank = await voice_level.rank_of(data["minutes"])
+    if rank:
+        embed.add_field(name="서버 순위", value=f"**{rank[0]}위** / {rank[1]}명 (누적)",
+                        inline=False)
+    embed.add_field(
+        name="다음 레벨까지",
+        value=f"`{bar}` {voice_level.format_minutes(need - done)} 남음",
+        inline=False,
+    )
+    role = voice_level.role_for(level)
+    if role:
+        embed.add_field(name="역할", value=role, inline=False)
+    else:
+        next_need, next_name = voice_level.ROLE_TIERS[-1]
+        embed.add_field(
+            name="역할",
+            value=f"**Lv.{next_need}** 부터 {next_name} 역할을 받아요",
+            inline=False,
+        )
+    embed.set_footer(text="혼자 있는 시간은 세지 않아요 (2명 이상일 때만)")
+    return embed
+
+
 class VoiceRank(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -101,38 +140,7 @@ class VoiceRank(commands.Cog):
     ):
         await interaction.response.defer()
         target = 유저 or interaction.user
-        data = await voice_level.get(target.id)
-        level, done, need = voice_level.progress(data["minutes"])
-
-        filled = int(10 * done / need) if need else 0
-        bar = "▓" * filled + "░" * (10 - filled)
-
-        embed = discord.Embed(
-            title=f"🎙️ {target.display_name} 님의 음성 활동",
-            color=0x5865F2,
-        )
-        embed.add_field(name="레벨", value=f"**Lv.{level}**", inline=True)
-        embed.add_field(name="누적", value=voice_level.format_minutes(data["minutes"]),
-                        inline=True)
-        embed.add_field(name="이번 주", value=voice_level.format_minutes(data["weekMinutes"]),
-                        inline=True)
-        embed.add_field(
-            name="다음 레벨까지",
-            value=f"`{bar}` {voice_level.format_minutes(need - done)} 남음",
-            inline=False,
-        )
-        role = voice_level.role_for(level)
-        if role:
-            embed.add_field(name="역할", value=role, inline=False)
-        else:
-            next_need, next_name = voice_level.ROLE_TIERS[-1]
-            embed.add_field(
-                name="역할",
-                value=f"**Lv.{next_need}** 부터 {next_name} 역할을 받아요",
-                inline=False,
-            )
-        embed.set_footer(text="혼자 있는 시간은 세지 않아요 (2명 이상일 때만)")
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=await build_voice_embed(target))
 
     @app_commands.command(name="음성랭킹", description="통화방에 오래 머문 사람 순위를 봐요.")
     @app_commands.describe(기간="이번 주만 볼지, 누적으로 볼지")

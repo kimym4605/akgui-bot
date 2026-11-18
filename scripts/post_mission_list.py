@@ -42,7 +42,7 @@ load_dotenv(os.path.join(BOT_DIR, ".env"))
 os.environ.setdefault("MONGODB_URI", "mongodb://127.0.0.1:27017")
 
 from utils.mission_store import (                   # noqa: E402
-    ADULT_ONLY_KEYS, DAILY_MISSION_COUNT, MAX_DAILY_REWARD, MISSIONS,
+    ADULT_ONLY_KEYS, DAILY_MISSION_COUNT, FULL_CLEAR_BONUS, MAX_DAILY_REWARD, MISSIONS,
     ONE_TIME_MISSIONS, RARITY, REROLL_LIMIT_PER_DAY, REROLL_PRICE,
     SERVER_KEYS, VALORANT_KEYS, VOICE_MIN_MEMBERS, rarity_of, reward_of,
 )
@@ -74,6 +74,7 @@ def build() -> str:
         f"하루 **{DAILY_MISSION_COUNT}개**가 배정되고, 깬 미션의 **희귀도만큼** 악귀코인을 받아요 "
         f"(하루 최대 {MAX_DAILY_REWARD}코인).",
         f"　└ {rarity_desc}",
+        f"　└ 🏁 그날 미션을 **전부** 깨면 완주 보너스 **+{FULL_CLEAR_BONUS}코인**",
         "　└ 일부러 하러 가야 하는 미션이 더 많이 줘요. 그냥 있어도 깨지는 미션은 적게 줘요.",
         "오늘 내 미션은 `/미션`으로 확인하세요.",
         "",

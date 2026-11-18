@@ -212,6 +212,159 @@ check("누적 순위는 안 온 사람도 포함(99회가 1등)",
 check("누적 순위에 5명 전원", len(data["total"]) == 5, str(len(data["total"])))
 
 # ==================================================================
+print("\n8) 🧊 보호권 소급 — 출석으로 연속이 끊긴 '뒤에' 사도 그날이면 되살린다 (2026-11-05)")
+# 서아: 11-03 출석(연속 15) → 11-04 빠짐 → 11-05 07:35 출석(보호권 0장 → 연속 1)
+#       → 07:36 보호권 구매. 예전엔 안 쓰여서 손으로 복구했어요.
+
+
+class FakeAttendCol:
+    """attend_service가 쓰는 만큼만 흉내내요: find_one / update_one($set·$unset·$inc, 점 표기 필터)."""
+
+    def __init__(self, docs=None):
+        self.docs = {d["_id"]: dict(d) for d in (docs or [])}
+
+    @staticmethod
+    def _get(doc, dotted):
+        cur = doc
+        for part in dotted.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                return None
+            cur = cur[part]
+        return cur
+
+    def find_one(self, flt, projection=None):
+        d = self.docs.get(flt["_id"])
+        return dict(d) if d else None
+
+    def update_one(self, flt, update, upsert=False):
+        class Res:
+            modified_count = 0
+            upserted_id = None
+        res = Res()
+        doc = self.docs.get(flt["_id"])
+        if doc is None:
+            if not upsert:
+                return res
+            doc = self.docs[flt["_id"]] = {"_id": flt["_id"]}
+            res.upserted_id = flt["_id"]
+        elif any(self._get(doc, k) != v for k, v in flt.items() if k != "_id"):
+            return res
+        doc.update(update.get("$set") or {})
+        for k in update.get("$unset") or {}:
+            doc.pop(k, None)
+        for k, v in (update.get("$inc") or {}).items():
+            doc[k] = int(doc.get(k) or 0) + v
+        res.modified_count = 1
+        return res
+
+
+paid = []
+
+
+async def _fake_is_trainer(uid):
+    return True
+
+
+async def _fake_add(uid, amount, *, reason=""):
+    paid.append((str(uid), amount, reason))
+    return 0
+
+
+async def _fake_balance(uid):
+    return 0
+
+
+attend_service.coin_wallet.is_trainer = _fake_is_trainer
+attend_service.coin_wallet.add = _fake_add
+attend_service.coin_wallet.get_balance = _fake_balance
+attend_service._migrate_sync = lambda uid: None
+inventory_store._inventory = FakeInventory()
+
+
+def fresh(uid, last, streak):
+    attend_service._trainers = FakeAttendCol(
+        [{"_id": uid, "lastAttendanceDate": last, "attendanceStreak": streak, "attendance": 30}])
+    attend_service._guest = FakeAttendCol()
+    paid.clear()
+
+
+# ⒜ 서아 시나리오 그대로
+fresh("seoa", iso(2), 15)
+ok, info = asyncio.run(attend_service.attend("seoa"))
+check("보호권 없이 출석 → 연속 1로 끊김", ok and info["streak"] == 1, str(info.get("streak")))
+check("끊긴 연속(15)을 응답에 알려준다", info.get("brokenPrev") == 15, str(info.get("brokenPrev")))
+asyncio.run(inventory_store.grant_protect("seoa"))
+r = asyncio.run(attend_service.retro_protect("seoa"))
+doc = attend_service._trainers.docs["seoa"]
+check("보호권을 사면 바로 되살아난다 (15 → 16)", r is not None and doc["attendanceStreak"] == 16,
+      f"{r} / {doc.get('attendanceStreak')}")
+check("보호권 1장이 쓰였다", asyncio.run(inventory_store.protect_count("seoa")) == 0)
+want = attend_service.streak_bonus(16) + attend_service.weekly_bonus(16)
+retro_paid = [p for p in paid if p[2] == "출석:보호권소급"]
+check(f"못 받은 연속 보너스 +{want}를 '출석:보호권소급'으로 한 번 준다",
+      retro_paid == [("seoa", want, "출석:보호권소급")], str(paid))
+check("표시는 지워진다 (두 번 살리지 않게)", attend_service.BREAK_FIELD not in doc)
+
+asyncio.run(inventory_store.grant_protect("seoa"))
+check("두 번째 구매는 소급하지 않는다(보호권은 그대로 남음)",
+      asyncio.run(attend_service.retro_protect("seoa")) is None
+      and asyncio.run(inventory_store.protect_count("seoa")) == 1)
+asyncio.run(inventory_store.consume_protect("seoa"))
+
+# ⒝ 주간 보너스 경계: 끊기기 전 13일 → 되살리면 14일(7의 배수) → +1+3 = 4
+fresh("w", iso(2), 13)
+asyncio.run(attend_service.attend("w"))
+asyncio.run(inventory_store.grant_protect("w"))
+r = asyncio.run(attend_service.retro_protect("w"))
+check("14일로 되살리면 구간+주간 보너스 차액 4코인", r and r["owed"] == 4, str(r))
+asyncio.run(inventory_store.consume_protect("w")) if asyncio.run(inventory_store.protect_count("w")) else None
+
+# ⒞ 이틀 이상 빠졌으면 살릴 수 없다 (연속의 의미 유지)
+fresh("x", iso(3), 20)
+_, info = asyncio.run(attend_service.attend("x"))
+check("이틀 빠짐 → 끊긴 표시를 남기지 않는다", not info.get("brokenPrev"))
+asyncio.run(inventory_store.grant_protect("x"))
+check("이틀 빠짐 → 사도 소급 안 됨, 보호권은 남는다",
+      asyncio.run(attend_service.retro_protect("x")) is None
+      and asyncio.run(inventory_store.protect_count("x")) == 1)
+asyncio.run(inventory_store.consume_protect("x"))
+
+# ⒟ 어제 출석했으면 끊긴 게 아니다
+fresh("y", iso(1), 9)
+_, info = asyncio.run(attend_service.attend("y"))
+asyncio.run(inventory_store.grant_protect("y"))
+check("정상 연속 → 소급 안 됨", info["streak"] == 10 and not info.get("brokenPrev")
+      and asyncio.run(attend_service.retro_protect("y")) is None)
+asyncio.run(inventory_store.consume_protect("y"))
+
+# ⒠ 표시가 어제 날짜면(어제 끊기고 오늘 삼) 소급하지 않는다 — '그날 안에'만
+fresh("z", iso(0), 1)
+attend_service._trainers.docs["z"][attend_service.BREAK_FIELD] = {"date": iso(1), "prev": 30}
+asyncio.run(inventory_store.grant_protect("z"))
+check("어제 끊긴 건 오늘 사도 소급 안 됨",
+      asyncio.run(attend_service.retro_protect("z")) is None
+      and attend_service._trainers.docs["z"]["attendanceStreak"] == 1)
+asyncio.run(inventory_store.consume_protect("z"))
+
+# ⒡ 보호권이 있으면 출석 때 자동으로 쓰이고, 끊긴 표시는 안 남는다
+fresh("p", iso(2), 8)
+asyncio.run(inventory_store.grant_protect("p"))
+_, info = asyncio.run(attend_service.attend("p"))
+check("미리 사둔 보호권은 출석 때 쓰인다 (8 → 9)",
+      info.get("usedProtect") and info["streak"] == 9 and not info.get("brokenPrev"), str(info))
+
+# ⒢ 차감했는데 그 사이 상태가 바뀌어 못 살리면 보호권을 돌려준다
+fresh("q", iso(2), 5)
+asyncio.run(attend_service.attend("q"))
+asyncio.run(inventory_store.grant_protect("q"))
+_orig = attend_service._retro_restore_sync
+attend_service._retro_restore_sync = lambda uid, t: None
+check("소급 실패 → None + 보호권 환불",
+      asyncio.run(attend_service.retro_protect("q")) is None
+      and asyncio.run(inventory_store.protect_count("q")) == 1)
+attend_service._retro_restore_sync = _orig
+
+# ==================================================================
 print("\n🚨 /출석 응답에는 소비 버튼이 붙지 않는다 (2026-10-17 사용자 지시)")
 # ------------------------------------------------------------------
 # 한동안 🎴 카드 뽑기 버튼(10코인·5연속)이 `/출석` 응답에 달려 있었다. "상점에 진열만

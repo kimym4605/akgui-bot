@@ -84,6 +84,9 @@ class FakeCollection:
         ne = flt.get("done", {})
         if isinstance(ne, dict) and "$ne" in ne and ne["$ne"] in (doc.get("done") or []):
             return res
+        fc = flt.get("fullClear", {})
+        if isinstance(fc, dict) and "$ne" in fc and doc.get("fullClear") == fc["$ne"]:
+            return res
         for key, value in (update.get("$set") or {}).items():
             target, _, leaf = key.partition(".")
             if leaf:
@@ -350,6 +353,9 @@ def _patch_outside_mission():
 _patch_outside_mission()
 
 
+private_sent: list = []
+
+
 class FakeChannel:
     async def send(self, content=None, **kw):
         sent.append(content)
@@ -361,10 +367,14 @@ class FakeInter:
     def __init__(self, uid):
         self.user = type("U", (), {"id": uid, "bot": False})()
         self.channel = FakeChannel()
-        self.followup = type("F", (), {"send": _mk_async(lambda *a, **k: None)})()
+        # 🔒 미션 완료 알림은 본인만 보이게(ephemeral followup) 가요 (2026-11-08).
+        self.followup = type("F", (), {"send": _mk_async(
+            # 클래스 속성이라 self가 앞에 붙어요 → 마지막 위치 인자가 본문이에요.
+            lambda *a, **k: private_sent.append((a[-1], k.get("ephemeral"))))})()
         self.response = type("R", (), {
             "defer": _mk_async(lambda *a, **k: None),
             "send_message": _mk_async(lambda *a, **k: None),
+            "is_done": lambda self: True,   # 호출부는 전부 defer를 먼저 해요
         })()
 
     async def edit_original_response(self, **kw):
@@ -391,7 +401,7 @@ from cogs import casino as casino_cog
 from utils import casino_store
 
 install_doc(9001, ["play_gamble", "use_map", "use_rank"])
-granted.clear(); sent.clear()
+granted.clear(); sent.clear(); private_sent.clear()
 casino_store.bet_limit_today = _mk_async(lambda uid: (5, 0))
 casino_store.try_wager = _mk_async(lambda uid, amt: (True, amt))
 casino_store.refund_wager = _mk_async(lambda uid, amt: None)
@@ -401,7 +411,9 @@ ok, err, limited = asyncio.run(casino_cog.take_bet(FakeInter(9001), 1))
 check("🎰 베팅이 성립하면 도박 미션이 완료된다",
       ok is True and "play_gamble" in done_of(9001), f"ok={ok} done={done_of(9001)}")
 check("🎰 코인이 실제로 지급됐다", any(g[0] == "9001" for g in granted), str(granted))
-check("🎰 완료 알림이 채널로 갔다", any("한 판 걸어보기" in (s or "") for s in sent), str(sent))
+check("🎰 완료 알림이 본인만 보이게(ephemeral) 갔다",
+      any("한 판 걸어보기" in (c or "") and eph is True for c, eph in private_sent), str(private_sent))
+check("🔒 채널엔 모두에게 보이는 알림이 안 갔다", sent == [], str(sent))
 
 # 🚨 **잔액 부족으로 못 걸었으면 올라가면 안 돼요** (= COMMAND_MISSIONS를 피한 이유)
 install_doc(9002, ["play_gamble", "use_map", "use_rank"])
@@ -619,11 +631,12 @@ check(f"최저 보상이 옛 고정값(1코인) 이상 — {_min_reward}코인",
 # 🚨 티어를 바꾸고 싶으면 **먼저 다시 재세요.** 느낌으로 바꾸면 여기서 FAIL이 나요 —
 #    실제로 "학살자 15킬은 어려우니 비싸게"가 숫자와 **반대**였어요(68%로 쉬운 쪽).
 # 🚨 풀을 섞어서 비교하면 안 돼요(발로 5종 vs 서버 8종은 분모가 달라요).
+# 🔄 2026-11-15: 11/02~11/13 재측정값으로 바꿨어요(배정을 pick_missions로 복원, 분모 = 그날
+#    1개 이상 깬 사람). 이름은 옛 그대로 둬요 — 아래 검사들이 이 이름을 써요.
 RATE_2026_11_02 = {
-    "voice_together": 83, "use_myshop": 42, "attend_check": 42, "use_rank": 34,
-    "play_gamble": 34,  # 🔞라 배정 분모를 절반으로 보정한 값
-    "catch_fish": 28, "use_map": 28, "create_room": 25,
-    "val_kd1": 87, "val_win": 79, "val_play": 71, "val_kills15": 68, "val_comp": 65,
+    "voice_together": 76, "attend_check": 53, "catch_fish": 49, "use_rank": 46,
+    "use_myshop": 43, "use_map": 42, "create_room": 35, "play_gamble": 30,
+    "val_kd1": 74, "val_win": 73, "val_play": 72, "val_kills15": 68, "val_comp": 65,
 }
 check("실측 표가 미션 13종을 전부 덮는다",
       set(RATE_2026_11_02) == set(MISSIONS),
@@ -682,6 +695,35 @@ check("🚨 total_reward가 '개수 × 최저보상'과 다르다 (고정 지급
 check("🚨 REWARD_PER_MISSION 상수가 되살아나지 않았다",
       not hasattr(mission_store, "REWARD_PER_MISSION"),
       "희귀도별 reward_of()로 대체됐어요 — 고정 상수를 다시 만들지 마세요")
+
+
+# ==================================================================
+# 🏁 완주 보너스 (2026-11-15) — 3개 다 깨면 하루 1회 +FULL_CLEAR_BONUS
+# ==================================================================
+print("\n🏁 완주 보너스")
+_B = mission_store.FULL_CLEAR_BONUS
+install_doc(9800, ["use_rank", "use_map", "use_myshop"], done=["use_rank", "use_map"])
+granted.clear(); sent.clear()
+asyncio.run(mission_cog.complete(9800, "use_myshop", FakeChannel()))
+_g = [(a, r) for u, a, r in granted if u == "9800"]
+check("마지막 미션을 깨면 보상 + 완주 보너스가 나간다",
+      _g == [(mission_store.reward_of("use_myshop"), "미션:use_myshop"), (_B, "미션완주")], str(_g))
+check("알림에 완주 보너스가 적힌다", any(f"+{_B}개" in (s or "") and "완주" in (s or "") for s in sent), str(sent))
+
+install_doc(9801, ["use_rank", "use_map", "use_myshop"])
+granted.clear()
+asyncio.run(mission_cog.complete(9801, "use_rank", FakeChannel()))
+check("🚨 일부만 깨면 보너스가 없다",
+      not any(r == "미션완주" for _u, _a, r in granted), str(granted))
+
+# 이미 받은 날 다시 불려도 두 번 안 나가요
+granted.clear()
+check("🚨 완주 보너스는 하루 1회", asyncio.run(mission_cog.pay_full_clear(9800)) == ""
+      and not granted, str(granted))
+
+# 리포트가 `미션:<키>`를 MISSIONS 키로 해석해요 — 보너스는 그 형식이면 안 돼요.
+check("완주 보너스 reason이 '미션:'으로 시작하지 않는다",
+      not mission_cog.FULL_CLEAR_REASON.startswith("미션:"), mission_cog.FULL_CLEAR_REASON)
 
 
 # ==================================================================

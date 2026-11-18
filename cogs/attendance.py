@@ -41,6 +41,26 @@ def _fallback_embed(user: discord.abc.User, data: dict) -> discord.Embed:
         value=f"{data['agwi']:,.0f}" if data.get("agwi") else "`/전적`을 돌려주세요",
         inline=True,
     )
+    voice = data.get("voice") or {}
+    embed.add_field(
+        name="🎙️ 음성 레벨",
+        value=f"Lv.{voice.get('level', 0)}" if voice.get("minutes") else "-", inline=True,
+    )
+    fishing = data.get("fishing") or {}
+    best = fishing.get("best") or {}
+    embed.add_field(
+        name="🎣 낚시",
+        value=(f"{fishing.get('caught', 0):,}마리"
+               + (f" (최대 {best['name']})" if best.get("name") else ""))
+        if fishing.get("caught") else "-",
+        inline=True,
+    )
+    embed.add_field(name="📋 누적 미션", value=f"{data.get('mission_total', 0):,}개", inline=True)
+    embed.add_field(
+        name="📅 출석",
+        value=f"연속 {data.get('attendance_streak', 0)}일 · 누적 {data.get('attendance', 0)}회",
+        inline=True,
+    )
     embed.add_field(
         name="업적", value=f"{data['achievements']} / {data['achievements_total']}", inline=True
     )
@@ -142,11 +162,171 @@ class ProfileButton(
         await rank_cog.send_rank_report(interaction, ephemeral=True)
 
 
+# ============================================================
+# 📋 자세히 보기 메뉴 (2026-11-15)
+#
+# 카드엔 내전·악귀력·음성·낚시·출석·미션·코인이 다 한 줄씩 있는데, 펼쳐볼 수 있는 건
+# 업적·발로란트 전적 버튼 2개뿐이었어요. 버튼을 7개로 늘리면 카드 밑이 버튼으로 덮여서
+# **드롭다운 하나**로 모았어요(항목이 늘어도 한 줄이에요).
+#
+# ⚠️ 위 ProfileButton은 **지우지 마세요.** 이 메뉴 이전에 띄운 카드들의 버튼이 아직
+#    채널에 남아 있고, 등록이 빠지면 그 버튼들이 조용히 죽어요.
+#
+# ⚠️ 각 화면은 원래 명령어(/내전전적·/음성레벨·/어항 …)의 **빌더 함수를 그대로** 불러요.
+#    여기서 서식을 새로 짜면 같은 정보가 두 모양으로 나와요.
+# ============================================================
+class ProfileMoreSelect(
+    discord.ui.DynamicItem[discord.ui.Select],
+    template=r"profile:more:(?P<user_id>\d+)",
+):
+    # value -> (라벨, 이모지, 설명)
+    OPTIONS = {
+        "achv":   ("업적", "🏆", "달성한 업적 · 거의 다 온 업적"),
+        "rank":   ("발로란트 전적", "🎯", "KDA · ADR · HS% · 선호 요원 (/전적과 같아요)"),
+        "scrim":  ("내전 전적", "⚔️", "통산·시즌 승패 · 최근 5경기 · 맵별 성적"),
+        "voice":  ("음성 레벨", "🎙️", "누적·이번 주 시간 · 서버 순위 · 다음 레벨"),
+        "fish":   ("낚시", "🎣", "어항 · 최고 기록 · 챔질 성공률 · 낚시대"),
+        "attend": ("출석", "📅", "연속·누적 출석 · 보호권 · 다음 보너스"),
+        "coin":   ("코인", "🪙", "보유 코인 · 최근 입출금 10건"),
+    }
+
+    def __init__(self, user_id: int):
+        super().__init__(
+            discord.ui.Select(
+                placeholder="📋 자세히 보기",
+                custom_id=f"profile:more:{user_id}",
+                options=[
+                    discord.SelectOption(label=label, value=key, emoji=emoji, description=desc)
+                    for key, (label, emoji, desc) in self.OPTIONS.items()
+                ],
+            )
+        )
+        self.user_id = user_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Select, match):
+        return cls(int(match["user_id"]))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """카드 주인만 열 수 있어요(사용자 결정 2026-11-15). 🪙 코인 내역이 섞여 있어서요."""
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message(
+            "이 카드의 주인만 열 수 있어요. `/프로필`로 본인 카드를 열어주세요.", ephemeral=True
+        )
+        return False
+
+    async def callback(self, interaction: discord.Interaction):
+        kind = (self.item.values or [""])[0]
+        log.info("🎴 프로필 자세히 보기: kind=%s user=%s", kind, interaction.user.id)
+
+        # 3초 안에 ack부터. 컴포넌트에서 thinking 없는 defer는 '카드는 그대로 둔다'는 뜻이에요.
+        await interaction.response.defer()
+
+        try:
+            await self._send(interaction, kind)
+        except Exception:
+            log.exception("🎴 프로필 자세히 보기 실패: kind=%s user=%s", kind, interaction.user.id)
+            await interaction.followup.send(
+                "화면을 불러오지 못했어요. 잠시 후 다시 시도해주세요.", ephemeral=True
+            )
+
+        # ⭐ 메뉴를 빈 상태로 되돌려요. 드롭다운은 고른 값이 남아 있으면 **같은 항목을 다시
+        #    골라도 이벤트가 안 와요.** 방금 본 걸 또 열 수 있게 매번 새로 그려요.
+        try:
+            await interaction.edit_original_response(view=build_profile_view(self.user_id))
+        except discord.HTTPException:
+            pass  # 카드가 지워졌으면 되돌릴 메뉴도 없어요.
+
+    async def _send(self, interaction: discord.Interaction, kind: str):
+        user = interaction.user
+        send = interaction.followup.send
+
+        if kind == "achv":
+            from cogs.achievement import build_achievement_embed
+            await send(embed=await build_achievement_embed(user), ephemeral=True)
+
+        elif kind == "rank":
+            rank_cog = interaction.client.get_cog("Rank")
+            if rank_cog is None:
+                await send("지금은 전적 기능을 쓸 수 없어요. 잠시 후 `/전적`으로 시도해주세요.",
+                           ephemeral=True)
+                return
+            await rank_cog.send_rank_report(interaction, ephemeral=True)
+
+        elif kind == "scrim":
+            from cogs.achievement import build_scrim_embed, scrim_empty_text
+            embed = await build_scrim_embed(user)
+            if embed is None:
+                await send(scrim_empty_text(user), ephemeral=True)
+            else:
+                await send(embed=embed, ephemeral=True)
+
+        elif kind == "voice":
+            from cogs.voice_rank import build_voice_embed
+            await send(embed=await build_voice_embed(user), ephemeral=True)
+
+        elif kind == "fish":
+            from cogs.fishing import build_tank_embed
+            await send(embed=await build_tank_embed(user.id), ephemeral=True)
+
+        elif kind == "attend":
+            await send(embed=await build_attend_embed(user), ephemeral=True)
+
+        elif kind == "coin":
+            from cogs.coin import build_coin_embed
+            await send(embed=await build_coin_embed(user), ephemeral=True)
+
+        else:
+            await send("알 수 없는 항목이에요. `/프로필`을 다시 열어주세요.", ephemeral=True)
+
+
+async def build_attend_embed(user: discord.abc.User) -> discord.Embed:
+    """📅 출석 상세. 출석 데이터는 이 cog가 주인이라 화면도 여기 있어요."""
+    st = await attend_service.status(user.id)
+    streak = st["streak"]
+
+    embed = discord.Embed(title=f"📅 {user.display_name}님의 출석", color=0xFFC850)
+    embed.add_field(name="🔥 연속", value=f"**{streak}일**", inline=True)
+    embed.add_field(name="📅 누적", value=f"**{st['total']}회**", inline=True)
+    embed.add_field(name="🧊 보호권", value=f"**{st['protect']}개**", inline=True)
+
+    if st["done_today"]:
+        today = "✅ 오늘 출석했어요"
+    elif st["at_risk"]:
+        today = f"⏳ **아직이에요** — 오늘 안 하면 연속 {streak}일이 끊겨요"
+    elif st["protectable"]:
+        today = ("🧊 어제 빠졌어요. " + ("오늘 출석하면 **보호권이 자동으로 쓰여서** 이어져요"
+                 if st["protect"] else "`/악귀상점`에서 보호권을 사고 출석하면 이어져요"))
+    else:
+        today = "⏳ 아직이에요 — `/출석`으로 시작해요"
+    embed.add_field(name="오늘", value=today, inline=False)
+
+    # 다음에 받을 보너스. 오늘 했으면 내일 기준, 아직이면 오늘 출석 기준이에요.
+    nxt = streak + 1
+    lines = []
+    bonus = attend_service.streak_bonus(nxt)
+    if bonus:
+        lines.append(f"연속 보너스 **+{bonus}코인** (매일)")
+    else:
+        lines.append(f"연속 7일부터 매일 +1코인 — **{7 - nxt}일** 더")
+    to_week = attend_service.WEEKLY_BONUS_EVERY - (nxt % attend_service.WEEKLY_BONUS_EVERY)
+    if nxt % attend_service.WEEKLY_BONUS_EVERY == 0:
+        lines.append(f"🎁 다음 출석이 **{nxt}일째** — 주간 보너스 +{attend_service.WEEKLY_BONUS_COIN}코인")
+    else:
+        lines.append(f"🎁 주간 보너스 +{attend_service.WEEKLY_BONUS_COIN}코인까지 **{to_week}일**")
+    if 7 <= nxt < 30:
+        lines.append(f"연속 30일부터 매일 +2코인 — **{30 - nxt}일** 더")
+    embed.add_field(name="다음 출석 때", value="\n".join(lines), inline=False)
+    if st["last_date"]:
+        embed.set_footer(text=f"마지막 출석 {st['last_date']}")
+    return embed
+
+
 def build_profile_view(user_id: int) -> discord.ui.View:
-    """카드에 붙일 버튼 3개짜리 화면. `timeout=None`이라 시간이 지나도 안 죽어요."""
+    """카드에 붙일 📋 자세히 보기 메뉴. `timeout=None` + DynamicItem이라 재시작돼도 살아 있어요."""
     view = discord.ui.View(timeout=None)
-    for kind in ProfileButton.KINDS:
-        view.add_item(ProfileButton(kind, user_id))
+    view.add_item(ProfileMoreSelect(user_id))
     return view
 
 
@@ -248,7 +428,7 @@ class Attendance(commands.Cog):
         #    미션은 🔵보통이에요).
         # ⚠️ 예외는 `on_action`이 안에서 삼켜요. 미션 때문에 출석이 깨지면 안 되니까요.
         await mission.on_action(
-            interaction.user.id, "attend_check", interaction.channel, interaction.user
+            interaction.user.id, "attend_check", interaction, interaction.user
         )
 
         streak = info["streak"]
@@ -262,6 +442,13 @@ class Attendance(commands.Cog):
         lines.append(f"🔥 연속 출석: **{streak}일째**")
         if info.get("usedProtect"):
             lines.append("🧊 **출석 보호권을 써서 연속이 안 끊겼어요!** (어제 빠진 걸 메웠어요)")
+        elif info.get("brokenPrev"):
+            # 🧊 보호권 소급 (2026-11-05 서아 사례). 끊긴 걸 **보고 나서** 사도 되게 바꿨으니
+            #    그 사실을 이 자리에서 알려줘요. ⚠️ 버튼은 달지 않아요(아래 🚨 사용자 지시).
+            lines.append(
+                f"💔 어제 빠져서 연속 **{info['brokenPrev']}일**이 끊겼어요.\n"
+                "-# **오늘 안에** `/악귀상점`에서 🧊 출석 보호권을 사면 바로 되살아나요."
+            )
         else:
             # 다음 보너스까지 얼마나 남았는지 알려줘요. 이게 없으면 연속이 그냥 숫자예요.
             to_weekly = attend_service.WEEKLY_BONUS_EVERY - (streak % attend_service.WEEKLY_BONUS_EVERY)
@@ -295,7 +482,7 @@ class Attendance(commands.Cog):
         #    -> [[project_akgui_shop_coin_sinks]] · [[project_akgui_card_gacha]]
         await interaction.followup.send(embed=embed, file=coin_file)
 
-    @app_commands.command(name="프로필", description="내 악귀 프로필 카드를 봐요. (내전 전적 · 악귀력 · 업적 · 칭호)")
+    @app_commands.command(name="프로필", description="내 악귀 프로필 카드를 봐요. (내전 · 악귀력 · 음성 레벨 · 낚시 · 업적)")
     # ⚠️ 채널 그룹이 "attendance"(=#포켓몬)가 아니라 "profile"이에요.
     #
     # 예전 /프로필은 포켓몬 전용이라 #포켓몬에 묶는 게 맞았어요. 지금은 카드 내용의 대부분이
@@ -381,4 +568,5 @@ async def setup(bot: commands.Bot):
     await bot.add_cog(Attendance(bot))
     # ⚠️ 이 등록이 없으면 카드 버튼을 눌러도 봇이 custom_id를 알아보지 못해서
     #    아무 반응이 없어요(room.py의 SpeakGrantButton과 같아요).
-    bot.add_dynamic_items(ProfileButton)
+    # ProfileButton은 11/15 이전 카드용(지우지 말 것), ProfileMoreSelect가 지금 카드의 메뉴예요.
+    bot.add_dynamic_items(ProfileButton, ProfileMoreSelect)

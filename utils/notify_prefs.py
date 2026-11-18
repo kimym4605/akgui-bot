@@ -32,8 +32,9 @@ _prefs = _db["notify_prefs"]
 NOTIFY_KINDS: dict[str, dict] = {
     "mission_channel": {
         "emoji": "💬",
-        "title": "채널 미션 완료 알림",
-        "desc": "명령어·통화방 미션을 깼을 때 그 채널에 뜨는 축하 메시지예요.",
+        # ⚠️ 키 이름(`mission_channel`)은 그대로 둬요 — 바꾸면 이미 꺼둔 사람 설정이 풀려요.
+        "title": "미션 완료 알림",
+        "desc": "출석·낚시·명령어 미션을 깼을 때 나만 보이게 뜨는 메시지예요 (통화방 미션은 DM).",
     },
     "mission_dm": {
         "emoji": "🎯",

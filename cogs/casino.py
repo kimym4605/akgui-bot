@@ -127,7 +127,7 @@ async def take_bet(interaction: discord.Interaction, amount: int) -> tuple[bool,
     # 🚨 `COMMAND_MISSIONS`로는 못 해요 - 한도 초과나 잔액 부족으로 **위에서 return된
     #    경우에도** 명령어 자체는 정상 종료되니까요(= 안 걸고 공짜로 깸).
     await mission.on_action(
-        interaction.user.id, "play_gamble", interaction.channel, interaction.user
+        interaction.user.id, "play_gamble", interaction, interaction.user
     )
 
     return True, "", False

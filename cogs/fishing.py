@@ -150,13 +150,20 @@ def _streak_cast_hint(my_cap: int) -> str:
         return ""
     every, per = fish_data.STREAK_CAST_EVERY, fish_data.STREAK_CAST_BONUS
     bonus = my_cap - DAILY_CAST_CAP
+    long_note = fish_data.long_streak_note()
     if bonus >= fish_data.STREAK_CAST_MAX:
+        # ⭐ 2026-11-08: 1단계를 다 받아도 끝이 아니에요 — 2단계를 알려줘요.
+        if long_note:
+            return (f"-# 🔥 연속 출석 보너스 **+{bonus}번**을 받고 있어요 · "
+                    f"연속 **{long_note}** 더 늘어요\n")
         return f"-# 🔥 연속 출석 보너스 **+{bonus}번**을 받고 있어요 (최대치예요)\n"
     if bonus > 0:
         return (f"-# 🔥 연속 출석으로 **+{bonus}번** 받고 있어요 · "
-                f"{every}일마다 **+{per}번** (최대 +{fish_data.STREAK_CAST_MAX}번)\n")
+                f"{every}일마다 **+{per}번** (최대 +{fish_data.STREAK_CAST_MAX}번"
+                + (f" · 그 뒤로 {long_note}" if long_note else "") + ")\n")
     return (f"-# 🔥 `/출석`을 **{every}일 연속**하면 던지는 횟수가 **+{per}번** 늘어요 "
-            f"({every}일마다 · 최대 +{fish_data.STREAK_CAST_MAX}번)\n")
+            f"({every}일마다 · 최대 +{fish_data.STREAK_CAST_MAX}번"
+            + (f" · 그 뒤로 {long_note}" if long_note else "") + ")\n")
 
 # ------------------------------------------------------------------
 # 🎣 한 사람당 **동시에 한 판만** (2026-10-18 사용자 결정)
@@ -355,7 +362,7 @@ async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> 
     #    아직 없는 순간이 생겨요.
     if key:
         await mission.on_action(
-            interaction.user.id, "catch_fish", interaction.channel, interaction.user
+            interaction.user.id, "catch_fish", interaction, interaction.user
         )
 
     state = await fishing_store.get(interaction.user.id)
@@ -494,7 +501,7 @@ async def finish_batch(interaction: discord.Interaction, view: "FishingView") ->
     # 🚨 목표치를 손으로 적지 마세요 — `MISSIONS`에서 읽어요.
     target = int((mission.MISSIONS.get("catch_fish") or {}).get("target") or 1)
     for _ in range(min(len(catches), target)):
-        await mission.on_action(uid, "catch_fish", interaction.channel, interaction.user)
+        await mission.on_action(uid, "catch_fish", interaction, interaction.user)
 
     # ── 결과 표 ──────────────────────────────────────────────────────
     total_pieces = sum(pieces_of(k, s) for k, s in catches)
@@ -985,7 +992,13 @@ class FishingView(discord.ui.View):
 
 async def act_tank(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
-    data = await fishing_store.get(interaction.user.id)
+    embed = await build_tank_embed(interaction.user.id)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+async def build_tank_embed(user_id: int) -> discord.Embed:
+    """`/어항` 화면. `/프로필`의 📋 자세히 보기 → 🎣 낚시도 이걸 써요."""
+    data = await fishing_store.get(user_id)
     tank = data["tank"]
 
     embed = discord.Embed(title="🪣 내 어항", color=0x3B82F6)
@@ -1030,14 +1043,14 @@ async def act_tank(interaction: discord.Interaction) -> None:
     #
     # ⚠️ 전엔 "부서졌어요 (내일 다시)"를 띄웠는데, 하루 제한을 푼 뒤로는
     #    **거짓 안내**예요. 지금은 바로 또 살 수 있어요.
-    left, _bought_today = await fishing_store.rod_state(interaction.user.id)
+    left, _bought_today = await fishing_store.rod_state(user_id)
     rod = (f"**{left}/{ROD_DURABILITY}번** 남음" if left
            else f"없어요 (`/악귀상점` {ROD_PRICE}코인)")
     embed.add_field(name="🎣 낚시대", value=rod, inline=True)
 
     # ⭐ 하루 상한(2026-10-20 6차). 낚시대 남은 횟수와 **별개**라 따로 보여줘요 —
     #    "낚시대는 8번 남았는데 왜 못 던지냐"를 막는 자리예요.
-    used, cap = await fishing_store.cast_quota(interaction.user.id)
+    used, cap = await fishing_store.cast_quota(user_id)
     if cap:
         # ⭐ 7차: 연속 출석 보너스를 받고 있으면 그 몫을 따로 적어요.
         _b = cap - DAILY_CAST_CAP
@@ -1056,7 +1069,7 @@ async def act_tank(interaction: discord.Interaction) -> None:
                         value=f"{GRADES.get(bg, {}).get('emoji', '')} {bn}", inline=True)
     if data["sold"]:
         embed.add_field(name="누적 판매", value=f"**{data['sold']}코인**", inline=True)
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    return embed
 
 
 async def act_sell(interaction: discord.Interaction) -> None:
@@ -1165,6 +1178,13 @@ def _panel_embed() -> discord.Embed:
             f"　└ 🔥 연속 출석 **{fish_data.STREAK_CAST_EVERY}일마다 "
             f"+{fish_data.STREAK_CAST_BONUS}번** (최대 +{fish_data.STREAK_CAST_MAX}번 = "
             f"하루 {DAILY_CAST_CAP + fish_data.STREAK_CAST_MAX}번)\n"
+            + (f"　└ 🔥 그 뒤로 연속 **{fish_data.long_streak_note()}** 더 "
+               f"({fish_data.LONG_STREAK_START}일 "
+               f"{fish_data.daily_cap_for(fish_data.LONG_STREAK_START)}번 · "
+               f"{fish_data.LONG_STREAK_START + fish_data.LONG_STREAK_EVERY}일 "
+               f"{fish_data.daily_cap_for(fish_data.LONG_STREAK_START + fish_data.LONG_STREAK_EVERY)}번 · ...)\n"
+               if fish_data.long_streak_note() else "")
+            +
             f"　└ 🎣 **몰아 던지기**는 챔질 한 번으로 여러 판 — 확률은 한 판씩과 똑같아요\n"
             f"　└ 상한에 걸려도 **낚시대는 안 없어져요** (다음 날 이어서 써요)"
         ),
@@ -1380,12 +1400,17 @@ class Fishing(commands.Cog):
                 value=(f"기본 **{DAILY_CAST_CAP}번** · **내 상한은 {my_cap}번**이에요 "
                        "(한국 시간 자정에 채워져요)\n"
                        + (f"　└ 🔥 연속 출석 보너스 **+{_bonus}번**을 받고 있어요"
-                          + ("  (최대치예요)\n" if _bonus >= fish_data.STREAK_CAST_MAX
-                             else "\n")
+                          # ⭐ 2026-11-08: 1단계를 다 채워도 2단계가 있어요.
+                          + ((f" · 연속 {fish_data.long_streak_note()} 더\n"
+                              if fish_data.long_streak_note() else "  (최대치예요)\n")
+                             if _bonus >= fish_data.STREAK_CAST_MAX else "\n")
                           if _bonus > 0 else
                           f"　└ 🔥 `/출석`을 **{fish_data.STREAK_CAST_EVERY}일 연속**하면 "
                           f"**+{fish_data.STREAK_CAST_BONUS}번** 늘어나요 "
-                          f"(최대 +{fish_data.STREAK_CAST_MAX}번)\n")
+                          f"(최대 +{fish_data.STREAK_CAST_MAX}번"
+                          + (f" · 그 뒤로 {fish_data.long_streak_note()}"
+                             if fish_data.long_streak_note() else "")
+                          + ")\n")
                        + "　└ ⭐ 상한에 걸려도 **낚시대는 안 없어져요** — 남은 횟수는 "
                        "다음 날 이어서 써요\n"
                        f"　└ 어떤 낚시대를 쓰든 상한은 같아요 "

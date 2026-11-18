@@ -685,6 +685,9 @@ class DynamicRoomEngine:
                 category=category,
                 overwrites=overwrites,
                 user_limit=인원수 if 인원수 else 0,
+                # 🔊 서버 부스트 레벨이 허용하는 최대 음질로 만들어요(2레벨=256kbps).
+                #    안 넣으면 디스코드 기본 64kbps라 고정 통화방보다 소리가 나빠요.
+                bitrate=int(interaction.guild.bitrate_limit),
                 reason=f"/방만들기 {room_label} 사용 (방장: {interaction.user.display_name})",
             )
         except discord.Forbidden:

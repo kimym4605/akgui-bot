@@ -1110,6 +1110,11 @@ async def _ensure_static_data():
             await valorant_accessories.load(static_session)
 
 
+# riot-geo가 실패해서 샤드 탐색으로 찾은 지역을 계정(puuid)별로 기억해요. 다음 /오상 때
+# 맞는 샤드부터 찔러서 왕복이 한 번으로 끝나요. 재시작하면 비지만 다시 찾으면 돼요.
+_probed_region_by_puuid: dict[str, str] = {}
+
+
 async def _fetch_storefront(
     session, access_token: str, id_token: str, who: str = ""
 ) -> tuple[dict | None, dict | None, set[str] | None, str]:
@@ -1136,21 +1141,42 @@ async def _fetch_storefront(
     if isinstance(entitlement, BaseException):
         log.warning(f"⚠️ [{who}] 오상 권한 토큰 예외: {entitlement!r}")
 
-    if isinstance(region, BaseException) or not region:
-        return None, None, None, "라이엇 서버 지역 확인에 실패했어요. 다시 시도해주세요."
     if isinstance(entitlement, BaseException) or not entitlement:
         return None, None, None, "라이엇 서버에서 권한 토큰을 못 받았어요. 잠시 후 다시 시도해주세요."
 
-    # 아래 세 호출이 각자 내부에서 클라이언트 버전을 필요로 하는데, 캐시가 비어있으면
-    # 셋이 동시에 같은 값을 받아오려고 해요. 여기서 먼저 한 번 데워두면 그 낭비가 없어요.
+    # 아래 호출들이 각자 내부에서 클라이언트 버전을 필요로 하는데, 캐시가 비어있으면
+    # 동시에 같은 값을 받아오려고 해요. 여기서 먼저 한 번 데워두면 그 낭비가 없어요.
     await riot_auth.get_client_version(session)
+
+    probed_storefront = None
+    if isinstance(region, BaseException) or not region:
+        # 🌏 riot-geo가 401을 주는 계정이 있어요(2026-11-10). 지역을 몰라도 상점 서버를
+        # 샤드별로 찔러보면 맞는 곳이 200을 줘서, 그걸로 지역을 대신 알아내요.
+        region, probed_storefront = await riot_auth.probe_storefront_region(
+            session,
+            access_token=access_token,
+            entitlement=entitlement,
+            puuid=puuid,
+            preferred=_probed_region_by_puuid.get(puuid),
+            who=who,
+        )
+        if not region:
+            if riot_auth.storefront_blocked_recently():
+                return None, None, None, riot_auth.CLOUDFLARE_BLOCK_MESSAGE
+            return None, None, None, "라이엇 서버 지역 확인에 실패했어요. 다시 시도해주세요."
+        _probed_region_by_puuid[puuid] = region
+
+    async def _storefront():
+        if probed_storefront is not None:
+            return probed_storefront  # 탐색하면서 이미 받아왔으니 또 안 불러요.
+        return await riot_auth.get_storefront(
+            session, access_token=access_token, entitlement=entitlement, region=region, puuid=puuid
+        )
 
     # 상점·지갑·보유스킨은 서로 독립이라 한꺼번에 보내요. 정적 데이터(스킨 이름/이미지)
     # 준비도 라이엇이 아니라 valorant-api.com이라 같이 태워도 서로 방해하지 않아요.
     storefront, wallet, owned, _static = await asyncio.gather(
-        riot_auth.get_storefront(
-            session, access_token=access_token, entitlement=entitlement, region=region, puuid=puuid
-        ),
+        _storefront(),
         riot_auth.get_wallet(
             session, access_token=access_token, entitlement=entitlement, region=region, puuid=puuid
         ),
@@ -1165,6 +1191,8 @@ async def _fetch_storefront(
         log.warning(f"⚠️ 오상 상점 조회 실패: {storefront!r}")
         storefront = None
     if storefront is None:
+        if riot_auth.storefront_blocked_recently():
+            return None, None, None, riot_auth.CLOUDFLARE_BLOCK_MESSAGE
         return None, None, None, "상점 정보를 못 받아왔어요. 잠시 후 다시 시도해주세요."
 
     # 지갑과 보유 스킨은 부가 정보라, 실패해도 상점은 그대로 보여줘요.

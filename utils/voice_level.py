@@ -187,3 +187,20 @@ async def top(limit: int = 10, weekly: bool = False) -> list[dict]:
         return await asyncio.to_thread(_top_sync, limit, weekly)
     except Exception:  # noqa: BLE001
         return []
+
+
+def _rank_sync(minutes: int) -> tuple[int, int]:
+    """(누적 순위, 기록 있는 사람 수). 나보다 **많은** 사람 수 + 1이라 동점은 같은 등수예요."""
+    above = _voice.count_documents({"minutes": {"$gt": minutes}})
+    total = _voice.count_documents({"minutes": {"$gt": 0}})
+    return above + 1, total
+
+
+async def rank_of(minutes: int) -> tuple[int, int] | None:
+    """누적 시간 서버 순위. 기록이 없거나(0분) 조회에 실패하면 None."""
+    if minutes <= 0:
+        return None
+    try:
+        return await asyncio.to_thread(_rank_sync, minutes)
+    except Exception:  # noqa: BLE001
+        return None

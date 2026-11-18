@@ -48,7 +48,11 @@ except ImportError:  # pragma: no cover
 _RENDER_LOCK = asyncio.Semaphore(2)
 
 CARD_WIDTH = 1000
-CARD_HEIGHT = 560
+# 🔄 2026-11-15 560 → 630: 통계 칸 **2번째 줄**(🎙️ 음성 레벨 · 🎣 낚시 · 📋 미션 · 📅 출석)을
+#    넣으면서 키웠어요. 하단 출석 한 줄은 그 칸으로 옮겨서 없앴어요.
+CARD_HEIGHT = 630
+VOICE_COLOR = (120, 200, 255)
+FISH_COLOR = (110, 220, 210)
 
 # 색 (어두운 카드 위에 흰 글씨)
 BG_TOP = (15, 17, 25)
@@ -97,6 +101,15 @@ COLOR_THEME_PRICE = 15
 #    "좋아하는 캐릭터"는 색 배경과 달리 **욕심이 나는** 품목이라 이 값으로 뒀어요
 #    (사용자 결정, 2026-11-03). 📌 팔리는지 `coin_log`의 `카드테마:*`로 재볼 것.
 CHARACTER_THEME_PRICE = 25
+# 🖼️ 커스텀(내가 올린 그림)은 100코인. 낚시꾼 하루 벌이(~39)의 2~3일치예요.
+#    🚨 **방장 승인 후 적용**이고 거절되면 전액 환불(사용자 결정, 2026-11-15).
+#    그림을 바꿀 때도 같은 값이에요(새로 그려 넣는 것과 같으니까요).
+#    ⚠️ 이 테마는 `ALL_THEMES`에 **넣지 않아요** — 드롭다운에서 25코인처럼 팔리면 안 되고,
+#       그림이 사람마다 달라서 카탈로그 항목이 될 수 없어요. → utils/custom_theme_store.py
+CUSTOM_THEME_PRICE = 100
+CUSTOM_THEME_KEY = "커스텀"
+CUSTOM_THEME = {"kind": "custom", "emoji": "🖼️", "desc": "내가 올린 그림",
+                "top": BG_TOP, "bottom": BG_BOTTOM}
 
 
 def price_of(key: str) -> int:
@@ -204,9 +217,18 @@ def _gradient_background(top=BG_TOP, bottom=BG_BOTTOM) -> "Image.Image":
 #    가운데(x 400~700)까지 밝아져서 "VALORANT"·하단 출석 줄이 묻혔어요. 그래서
 #    **x가 SCRIM_HOLD까지는 진하게 유지**하다가 거기서부터 옅어지게 2단으로 바꿨어요.
 #    글씨는 전부 왼쪽 62% 안에 있고, 오른쪽 38%가 그림 자리예요.
-SCRIM_LEFT = 0.90
-SCRIM_RIGHT = 0.30
-SCRIM_HOLD = 0.62
+#
+# 🚨🚨 **2026-11-15에 다시 옅게 바꿨어요.** 카드에 통계 2번째 줄이 생기면서 칸이
+#    **가로 전체(x 44~956)**를 덮게 됐어요. 불투명 칸 + 0.90 스크림이면 그림은 칸
+#    사이 틈과 오른쪽 위 귀퉁이에만 보였어요(그림 테마 8종을 실제로 뽑아보고 찾았어요).
+#    → ⒜ 그림 테마에서는 칸을 **반투명**(`ART_PANEL_ALPHA`)으로 그리고
+#      ⒝ 스크림을 옅게 내려서 칸 너머로 그림이 비치게 했어요.
+#    글씨는 칸 위에 있으니 칸이 한 번 더 어둡게 받쳐줘요. 칸 밖 글씨에는 검은 테두리.
+SCRIM_LEFT = 0.55
+SCRIM_RIGHT = 0.18
+SCRIM_HOLD = 0.40
+# 그림 테마의 통계 칸 불투명도(0~255). 낮출수록 그림이 잘 보이지만 보조 글씨가 묻혀요.
+ART_PANEL_ALPHA = 178
 
 
 def _cover_resize(art: "Image.Image") -> "Image.Image":
@@ -291,13 +313,24 @@ def _fit_text(draw, text: str, font, max_width: int) -> str:
 
 
 def _stat_box(draw, x, y, width, height, label: str, value: str, value_color=TEXT, sub: str = "",
-              panel=PANEL, edge=PANEL_EDGE):
-    """작은 통계 칸 하나. 라벨(위 작은 글씨) + 값(아래 큰 글씨) + 보조설명."""
+              panel=PANEL, edge=PANEL_EDGE, sub_color=TEXT_DIM):
+    """작은 통계 칸 하나. 라벨(위 작은 글씨) + 값(아래 큰 글씨) + 보조설명.
+    ⚠️ 그림 테마는 칸이 반투명이라 `sub_color`를 한 단계 밝게 넘겨받아요."""
     _rounded_panel(draw, (x, y, x + width, y + height), fill=panel, outline=edge)
     draw.text((x + 18, y + 16), label, font=_font("regular", 19), fill=TEXT_SUB)
     draw.text((x + 18, y + 44), value, font=_font("bold", 34), fill=value_color)
     if sub:
-        draw.text((x + 18, y + 88), sub, font=_font("regular", 17), fill=TEXT_DIM)
+        # 칸이 좁아서(약 216px) "최대 철갑상어 210cm" 같은 줄이 넘칠 수 있어요 → 잘라요.
+        sub_font = _font("regular", 17)
+        draw.text((x + 18, y + 88), _fit_text(draw, sub, sub_font, width - 30),
+                  font=sub_font, fill=sub_color)
+
+
+def _short_minutes(minutes: int) -> str:
+    """칸이 좁아서 "1시간 5분" 대신 "1시간"/"35분"처럼 짧게. 60분 이상은 시간만(올림)."""
+    if minutes >= 60:
+        return f"{-(-minutes // 60)}시간"
+    return f"{max(1, minutes)}분"
 
 
 def _progress_bar(draw, x, y, width, height, ratio: float, color=GOLD, track=(38, 42, 62)):
@@ -317,6 +350,13 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
     # 🚨 **`ALL_THEMES`를 봐야 해요** — `THEMES`만 보면 캐릭터 테마를 산 사람이
     #    조용히 기본 배경을 받아요(돈만 내고 안 바뀌는, 제일 나쁜 결과).
     theme = ALL_THEMES.get(data.get("theme") or "", THEMES["기본"])
+    # 🖼️ 커스텀 테마: 그림이 파일이 아니라 **DB 바이트**예요(profile_service가 넣어줘요).
+    #    Image.open이 파일 객체도 받으니 BytesIO로 감싸서 같은 길로 그려요.
+    #    ⚠️ 그림이 없으면(승인 전·조회 실패) 위에서 고른 기본 테마로 물러나요.
+    custom = data.get("custom_art")
+    if data.get("theme") == CUSTOM_THEME_KEY and custom and custom.get("image"):
+        theme = {**CUSTOM_THEME, "image": io.BytesIO(custom["image"]),
+                 "top": custom["top"], "bottom": custom["bottom"]}
     if theme.get("image"):
         image = _art_background(theme["image"], theme["top"], theme["bottom"])
     else:
@@ -330,7 +370,26 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
     on_art = bool(theme.get("image"))
     art_stroke = {"stroke_width": 2, "stroke_fill": (0, 0, 0)} if on_art else {}
     panel, panel_edge = _panel_colors(theme)
-    draw = ImageDraw.Draw(image)
+    if on_art:
+        # ⭐ `Draw(image, "RGBA")`는 RGB 그림 위에서도 **알파 섞기**를 해줘요. 그래서
+        #    칸 색에 알파만 붙이면 반투명 칸이 돼요(그리기 순서를 바꿀 필요가 없어요).
+        #    글씨 색은 3채널이라 그대로 불투명하게 찍혀요.
+        # 🚨 **밝은 그림은 칸을 더 진하게.** 케이오(밝은 보라)로 뽑아보니 오른쪽 칸의
+        #    보라 글씨(악귀력)가 연보라 칸 위에서 묻혔어요. 스크림까지 덮인 배경의
+        #    오른쪽 절반 밝기를 재서, 밝을수록 알파를 올려요(어두운 그림은 그대로).
+        try:
+            from PIL import ImageStat
+            right = image.crop((CARD_WIDTH // 2, 0, CARD_WIDTH, CARD_HEIGHT)).convert("L")
+            lum = ImageStat.Stat(right).mean[0]
+        except Exception:                    # noqa: BLE001
+            lum = 255.0                      # 못 재면 진한 쪽으로 틀려요(가독성 우선)
+        alpha = ART_PANEL_ALPHA + int(max(0.0, min(1.0, (lum - 45) / 60)) * 50)
+        panel = (*panel, min(235, alpha))
+        panel_edge = (*panel_edge, 220)
+        draw = ImageDraw.Draw(image, "RGBA")
+    else:
+        draw = ImageDraw.Draw(image)
+    sub_color = TEXT_SUB if on_art else TEXT_DIM
 
     accent = data.get("accent_color") or (88, 101, 242)
 
@@ -362,7 +421,7 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
     draw.text(
         (text_x, avatar_y + 2),
         _fit_text(draw, data["name"], name_font, CARD_WIDTH - text_x - 170),
-        font=name_font, fill=TEXT,
+        font=name_font, fill=TEXT, **art_stroke,
     )
 
     title = data.get("title")
@@ -373,7 +432,7 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
         draw.text(
             (text_x, avatar_y + 58),
             _fit_text(draw, label, title_font, CARD_WIDTH - text_x - 60),
-            font=title_font, fill=title_color,
+            font=title_font, fill=title_color, **art_stroke,
         )
 
     tier_text = data.get("tier") or "티어 미확인"
@@ -382,7 +441,7 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
               **art_stroke)
     draw.text(
         (text_x + 96, tier_y - 4), tier_text, font=_font("bold", 26),
-        fill=accent if data.get("tier") else TEXT_DIM,
+        fill=accent if data.get("tier") else TEXT_DIM, **art_stroke,
     )
 
     # ── 발로란트 간략 전적 (티어 줄 바로 아래 한 줄) ─────────
@@ -404,11 +463,11 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
         x = text_x
         for index, (label, value) in enumerate(pairs):
             if index:
-                draw.text((x, stat_y + 2), "·", font=label_font, fill=TEXT_DIM)
+                draw.text((x, stat_y + 2), "·", font=label_font, fill=TEXT_DIM, **art_stroke)
                 x += draw.textlength("·", font=label_font) + 12
-            draw.text((x, stat_y + 2), label, font=label_font, fill=TEXT_SUB)
+            draw.text((x, stat_y + 2), label, font=label_font, fill=TEXT_SUB, **art_stroke)
             x += draw.textlength(label, font=label_font) + 7
-            draw.text((x, stat_y), value, font=value_font, fill=TEXT)
+            draw.text((x, stat_y), value, font=value_font, fill=TEXT, **art_stroke)
             x += draw.textlength(value, font=value_font) + 12
 
         tail_font = _font("regular", 16)
@@ -435,28 +494,65 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
     rate_sub = f"승률 {record['win_rate']:.0f}%" if total_games else "아직 기록 없음"
 
     _stat_box(draw, left, box_y, box_w, box_h, "악귀코인", f"{data['coin']:,}", GOLD,
-              panel=panel, edge=panel_edge)
+              panel=panel, edge=panel_edge, sub_color=sub_color)
     _stat_box(
         draw, left + (box_w + gap), box_y, box_w, box_h, "내전 전적",
         f"{record['wins']}승 {record['losses']}패",
         WIN_COLOR if record["wins"] >= record["losses"] and total_games else TEXT,
-        rate_sub, panel=panel, edge=panel_edge,
+        rate_sub, panel=panel, edge=panel_edge, sub_color=sub_color,
     )
     _stat_box(
         draw, left + (box_w + gap) * 2, box_y, box_w, box_h, "최고 연승",
         f"{record['best_streak']}", TEXT, data.get("streak_now", ""),
-        panel=panel, edge=panel_edge,
+        panel=panel, edge=panel_edge, sub_color=sub_color,
     )
     agwi = data.get("agwi")
     _stat_box(
         draw, left + (box_w + gap) * 3, box_y, box_w, box_h, "이번 주 악귀력",
         f"{agwi:,.0f}" if agwi else "-", accent,
         data.get("agwi_grade", "") if agwi else "/전적 을 돌려주세요",
-        panel=panel, edge=panel_edge,
+        panel=panel, edge=panel_edge, sub_color=sub_color,
     )
 
+    # ── 통계 2번째 줄 (2026-11-15) ───────────────────────────
+    # 🚨 값이 없는 사람(통화·낚시 0)도 칸은 그려요. 줄마다 칸 수가 달라지면 카드끼리
+    #    비교할 때 자리가 엇갈려요. 대신 값 자리에 "-"와 시작 안내를 적어요.
+    row2_y = box_y + box_h + gap
+    voice = data.get("voice") or {}
+    v_level = int(voice.get("level") or 0)
+    v_left = max(0, int(voice.get("need") or 0) - int(voice.get("into") or 0))
+    if voice.get("minutes"):
+        v_value, v_sub = f"Lv.{v_level}", f"Lv.{v_level + 1}까지 {_short_minutes(v_left)}"
+    else:
+        v_value, v_sub = "-", "통화하면 쌓여요"
+    _stat_box(draw, left, row2_y, box_w, box_h, "음성 레벨", v_value, VOICE_COLOR, v_sub,
+              panel=panel, edge=panel_edge, sub_color=sub_color)
+
+    fishing = data.get("fishing") or {}
+    caught = int(fishing.get("caught") or 0)
+    best = fishing.get("best") or {}
+    if best.get("name"):
+        f_sub = f"최대 {best['name']}" + (f" {best['size']}cm" if best.get("size") else "")
+    else:
+        f_sub = "/낚시 로 시작" if not caught else ""
+    _stat_box(draw, left + (box_w + gap), row2_y, box_w, box_h, "낚시",
+              f"{caught:,}마리" if caught else "-", FISH_COLOR, f_sub,
+              panel=panel, edge=panel_edge, sub_color=sub_color)
+
+    missions = int(data.get("mission_total") or 0)
+    _stat_box(draw, left + (box_w + gap) * 2, row2_y, box_w, box_h, "누적 미션",
+              f"{missions:,}개" if missions else "-", TEXT, "/미션 으로 확인",
+              panel=panel, edge=panel_edge, sub_color=sub_color)
+
+    streak = int(data.get("attendance_streak") or 0)
+    attend_total = int(data.get("attendance") or 0)
+    _stat_box(draw, left + (box_w + gap) * 3, row2_y, box_w, box_h, "연속 출석",
+              f"{streak}일" if streak else "-", GOLD,
+              f"누적 {attend_total:,}회" if attend_total else "/출석 으로 시작",
+              panel=panel, edge=panel_edge, sub_color=sub_color)
+
     # ── 업적 진행 ────────────────────────────────────────────
-    ach_y = box_y + box_h + 24
+    ach_y = row2_y + box_h + 24
     _rounded_panel(draw, (left, ach_y, CARD_WIDTH - 44, ach_y + 92),
                    fill=panel, outline=panel_edge)
     unlocked, total = data["achievements"], data["achievements_total"]
@@ -475,19 +571,7 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
     _progress_bar(draw, left + 160, ach_y + 56, CARD_WIDTH - 44 - left - 160 - 18, 16,
                   percent / 100, track=panel_edge)
 
-    # ── 하단 한 줄 (출석) ───────────────────────────
-    footer_y = ach_y + 108
-    footer_parts = []
-    if data.get("attendance"):
-        footer_parts.append(f"누적 출석 {data['attendance']}회")
-    if data.get("attendance_streak"):
-        footer_parts.append(f"연속 {data['attendance_streak']}일")
-
-    if footer_parts:
-        draw.text(
-            (left, footer_y), "  ·  ".join(footer_parts),
-            font=_font("regular", 20), fill=TEXT_SUB, **art_stroke,
-        )
+    # (하단 출석 한 줄은 2026-11-15에 2번째 줄 '연속 출석' 칸으로 옮겼어요.)
 
     # ── 워터마크 ─────────────────────────────────────────────
     #

@@ -550,7 +550,49 @@ async def get_region(
         log.info(f"🔍 {tag}오상 지역 확인 디버그: status={resp.status_code} body={resp.text[:200]!r}")
         return None
     data = resp.json()
-    return (data.get("affinities") or {}).get("live")
+    live = (data.get("affinities") or {}).get("live")
+    if not live:
+        # 200인데 지역이 비는 경우도 원인 추적이 되게 남겨요(예전엔 조용히 None이었어요).
+        log.info(f"🔍 {tag}오상 지역 확인 디버그: status=200 인데 live 없음 body={resp.text[:200]!r}")
+    return live
+
+
+# 게임 서버(pd.*) 샤드는 이 넷뿐이에요. latam·br 계정도 상점은 pd.na를 써요.
+# 한국 서버 커뮤니티라 kr → ap 순으로 먼저 찔러봐요.
+GAME_SHARDS = ("kr", "ap", "na", "eu")
+
+
+async def probe_storefront_region(
+    session: AsyncSession,
+    *,
+    access_token: str,
+    entitlement: str,
+    puuid: str,
+    preferred: Optional[str] = None,
+    who: str = "",
+) -> tuple[Optional[str], Optional[dict]]:
+    """지역 확인(riot-geo)이 실패했을 때 상점 서버를 샤드별로 직접 찔러서 지역을 찾아요.
+    `(region, storefront)` — 다 실패하면 `(None, None)`.
+
+    🚨 2026-11-10: 어떤 계정은 재인증은 멀쩡한데 riot-geo만 401 "User not authenticated"를
+    돌려줘서 `/오상`이 "지역 확인에 실패했어요"로 막혔어요. 상점 서버는 같은 토큰을 받아주니,
+    지역을 몰라도 맞는 샤드는 상점이 200을 줘요(틀린 샤드는 404)."""
+    tag = f"[{who}] " if who else ""
+    order = [preferred] if preferred in GAME_SHARDS else []
+    order += [shard for shard in GAME_SHARDS if shard not in order]
+    for shard in order:
+        try:
+            storefront = await get_storefront(
+                session, access_token=access_token, entitlement=entitlement, region=shard, puuid=puuid
+            )
+        except Exception as error:  # noqa: BLE001
+            log.warning(f"⚠️ {tag}오상 샤드 탐색 실패({shard}): {error!r}")
+            continue
+        if storefront is not None:
+            log.info(f"🌏 {tag}오상 지역 확인 대신 샤드 탐색으로 찾았어요: {shard}")
+            return shard, storefront
+    log.warning(f"⚠️ {tag}오상 샤드 탐색: {', '.join(order)} 전부 실패")
+    return None, None
 
 
 _FALLBACK_CLIENT_VERSION = "release-08.00-shipping-1-000000"
@@ -608,6 +650,28 @@ async def _game_headers(session: AsyncSession, access_token: str, entitlement: s
     }
 
 
+# 🚧 2026-11-10부터 상점 서버(pd.*.a.pvp.net)가 봇 요청에 Cloudflare 챌린지 페이지
+# ("Just a moment...", 403)를 돌려줘요. 토큰·지역 문제가 아니라 다시 눌러도 소용이 없어서,
+# 이걸 감지하면 유저에게 "지금 라이엇이 막는 중"이라고 솔직하게 알려줘요. 우회는 안 해요.
+_last_cloudflare_block_at: float = 0.0
+CLOUDFLARE_BLOCK_MESSAGE = (
+    "지금 라이엇 상점 서버가 봇 접속을 막고 있어서 상점을 불러올 수 없어요. "
+    "봇이나 계정 문제가 아니라서 다시 시도해도 같아요. 라이엇 쪽에서 풀리면 다시 쓸 수 있어요."
+)
+
+
+def _is_cloudflare_challenge(resp) -> bool:
+    if resp.status_code not in (403, 503):
+        return False
+    head = resp.text[:300] if resp.text else ""
+    return "Just a moment" in head or "cf-chl" in head
+
+
+def storefront_blocked_recently(within_sec: float = 120.0) -> bool:
+    """방금(기본 2분 안에) 상점 조회가 Cloudflare 챌린지에 막혔는지."""
+    return _last_cloudflare_block_at > 0 and time.monotonic() - _last_cloudflare_block_at < within_sec
+
+
 async def get_storefront(
     session: AsyncSession,
     *,
@@ -620,7 +684,12 @@ async def get_storefront(
     # v2 GET는 라이엇 쪽에서 폐기됐어요. 지금은 v3 POST(빈 바디)로 조회해야 해요.
     url = f"https://pd.{region}.a.pvp.net/store/v3/storefront/{puuid}"
     resp = await _game_post(session, url, json={}, headers=headers)
+    if _is_cloudflare_challenge(resp):
+        global _last_cloudflare_block_at
+        _last_cloudflare_block_at = time.monotonic()
     if resp.status_code != 200:
+        # 토큰 값은 안 찍어요. 상태코드·본문만 있어도 "샤드가 틀림(404)"과 "토큰 거절(401/403)"이 갈려요.
+        log.info(f"🔍 오상 상점 조회 디버그({region}): status={resp.status_code} body={resp.text[:200]!r}")
         return None
     return resp.json()
 

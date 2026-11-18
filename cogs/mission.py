@@ -89,15 +89,62 @@ def _is_today_kst(unix_seconds: int | None) -> bool:
 #    경우까지 전부 완료로 잡혀서 **공짜로 깨져요.** 반드시 아래처럼 실제로 행동이
 #    성립한 지점에서 불러야 해요.
 # ------------------------------------------------------------------
-async def complete(user_id: int, key: str, channel: discord.abc.Messageable | None = None):
-    """이번에 새로 깼으면 코인을 주고 알려줘요. 이미 깬 미션이면 아무 일도 안 해요."""
+async def _send_private(where, content: str) -> bool:
+    """미션 완료 알림을 **본인에게만** 보여줘요 (2026-11-08 사용자 요청: 채팅창이 혼잡해져서).
+
+    - `Interaction`이면 나만 보이는(ephemeral) followup으로 보내요.
+      🚨 **응답이 아직 안 된 상호작용엔 아무것도 안 보내요.** 여기서 `response`를 써버리면
+         호출한 쪽(출석·낚시·도박)의 본 응답이 "이미 응답함"으로 터져요. 지금 호출부는
+         전부 defer를 먼저 하니 실제로는 거의 안 걸려요.
+    - 그 밖(테스트용 가짜 채널 등)은 예전처럼 `.send`예요.
+    """
+    # 덕 타이핑으로 봐요(테스트의 가짜 Interaction도 같은 길을 타게).
+    if hasattr(where, "followup") and hasattr(where, "response"):
+        if not where.response.is_done():
+            log.info("미션 알림 생략: 아직 응답 안 된 상호작용 (user=%s)", where.user.id)
+            return False
+        await where.followup.send(content, ephemeral=True)
+        return True
+    await where.send(content, allowed_mentions=discord.AllowedMentions.none())
+    return True
+
+
+FULL_CLEAR_REASON = "미션완주"
+
+
+async def pay_full_clear(user_id: int) -> str:
+    """🏁 오늘 미션을 전부 깼으면 완주 보너스를 주고 알림에 덧붙일 문구를 돌려줘요(아니면 "").
+
+    🚨 미션 코인을 주는 **모든 경로**(`complete()`·통화 미션)에서 지급 직후 불러요.
+    하루 1회는 `claim_full_clear`가 보장해요. reason을 `미션:`으로 시작하게 하지 않은 건
+    리포트들이 `미션:<키>`를 미션 키로 해석하기 때문이에요."""
+    try:
+        if not await mission_store.claim_full_clear(user_id):
+            return ""
+        bonus = mission_store.FULL_CLEAR_BONUS
+        await coin_wallet.add(user_id, bonus, reason=FULL_CLEAR_REASON)
+        log.info("🏁 미션 완주: %s (+%d코인)", user_id, bonus)
+        return f"\n🏁 오늘 미션 **완주!** 보너스 **+{bonus}개**"
+    except Exception:  # noqa: BLE001 — 보너스 때문에 본 지급 흐름이 깨지면 안 돼요
+        log.warning("완주 보너스 지급 실패 (user=%s)", user_id, exc_info=True)
+        return ""
+
+
+async def complete(user_id: int, key: str, channel=None):
+    """이번에 새로 깼으면 코인을 주고 알려줘요. 이미 깬 미션이면 아무 일도 안 해요.
+
+    ⭐ `channel`에는 **`interaction`을 넘기세요** — 그래야 본인만 보이는 알림이 돼요.
+       채널을 넘기면 모두에게 보이는 메시지가 돼서 채팅창이 지저분해져요."""
     if not await mission_store.progress(user_id, key):
         return
 
-    # 🚨 지급액은 **희귀도마다 달라요**(🟢1 · 🔵3 · 🟣5). 상수를 쓰지 말고 반드시
+    # 🚨 지급액은 **희귀도마다 달라요**(🟢2 · 🔵5 · 🟣8). 상수를 쓰지 말고 반드시
     #    `reward_of`로 꺼내요 - 안 그러면 알림 문구와 실제 지급액이 어긋나요.
     reward = mission_store.reward_of(key)
     balance = await coin_wallet.add(user_id, reward, reason=f"미션:{key}")
+    bonus_line = await pay_full_clear(user_id)
+    if bonus_line:
+        balance += mission_store.FULL_CLEAR_BONUS
     info = MISSIONS[key]
     rarity = mission_store.rarity_of(key)
     log.info("🎯 미션 완료: %s / %s (%s +%d코인)", user_id, key, rarity["label"], reward)
@@ -108,11 +155,11 @@ async def complete(user_id: int, key: str, channel: discord.abc.Messageable | No
     if not await notify_prefs.is_enabled(user_id, "mission_channel"):
         return
     try:
-        await channel.send(
-            f"🎯 <@{user_id}> {rarity['emoji']} **{info['title']}** 미션 완료! "
-            f"악귀코인 **+{reward}개** (보유 {balance}개)",
-            # 멘션 글씨는 남기고 핑만 안 쏴요. 미션은 하루 3개라 핑까지 가면 꽤 거슬려요.
-            allowed_mentions=discord.AllowedMentions.none(),
+        await _send_private(
+            channel,
+            f"🎯 {rarity['emoji']} **{info['title']}** 미션 완료! "
+            f"악귀코인 **+{reward}개** (보유 {balance}개) · 남은 미션은 `/미션`"
+            f"{bonus_line}",
         )
     except discord.HTTPException:
         # 알림 실패로 코인 지급을 되돌리진 않아요. 코인은 이미 들어갔어요.
@@ -122,7 +169,7 @@ async def complete(user_id: int, key: str, channel: discord.abc.Messageable | No
 async def on_action(
     user_id: int,
     key: str,
-    channel: discord.abc.Messageable | None = None,
+    channel=None,
     member: discord.abc.User | discord.Member | None = None,
 ) -> None:
     """다른 cog가 "이 행동이 성립했다"고 알려주는 입구. 🎣 낚시·📅 출석·🎰 도박이 써요.
@@ -170,7 +217,7 @@ class Mission(commands.Cog):
     # ⭐ 본체는 모듈 함수 `complete()`예요 (다른 cog도 써야 해서 클래스 밖에 뒀어요).
     #    여기는 기존 호출부를 그대로 두기 위한 얇은 위임이에요.
     # ------------------------------------------------------------------
-    async def _complete(self, user_id: int, key: str, channel: discord.abc.Messageable | None = None):
+    async def _complete(self, user_id: int, key: str, channel=None):
         await complete(user_id, key, channel)
 
     async def _is_linked(self, user_id: int) -> bool:
@@ -192,7 +239,8 @@ class Mission(commands.Cog):
             await self._is_linked(interaction.user.id),
             adult_check.is_adult(interaction.user),
         )
-        await self._complete(interaction.user.id, key, interaction.channel)
+        # 본인만 보이게 interaction을 넘겨요 (명령어가 끝난 뒤라 followup이 가능해요).
+        await self._complete(interaction.user.id, key, interaction)
 
     # ------------------------------------------------------------------
     # 2. 통화방 체류 시간
@@ -239,17 +287,21 @@ class Mission(commands.Cog):
             balance = await coin_wallet.add(
                 member.id, reward, reason="미션:voice_together"
             )
+            bonus_line = await pay_full_clear(member.id)
+            if bonus_line:
+                balance += mission_store.FULL_CLEAR_BONUS
             if not await notify_prefs.is_enabled(member.id, "mission_channel"):
                 return
+            # 🔒 통화방은 상호작용이 없어서 "나만 보이는 메시지"를 못 써요 → **DM**으로 보내요.
+            #    (예전엔 통화방 채팅에 모두 보이게 올라가서 혼잡했어요. 2026-11-08)
             try:
-                await channel.send(
-                    f"🎯 {member.mention} {rarity['emoji']} "
+                await member.send(
+                    f"🎯 {rarity['emoji']} "
                     f"**{MISSIONS['voice_together']['title']}** 미션 완료! "
-                    f"악귀코인 **+{reward}개** (보유 {balance}개)",
-                    allowed_mentions=discord.AllowedMentions.none(),
+                    f"악귀코인 **+{reward}개** (보유 {balance}개){bonus_line}"
                 )
             except (discord.HTTPException, AttributeError):
-                log.warning("통화 미션 알림 실패 (user=%s)", member.id, exc_info=True)
+                log.info("통화 미션 DM 실패(DM 차단 등) (user=%s)", member.id)
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -548,7 +600,10 @@ class Mission(commands.Cog):
         done_after = set(after.get("done") or [])
         newly = [key for key in pending if key in done_after]
         if newly:
-            await self._notify_auto_complete(user_id, newly)
+            # 🏁 이번 묶음 직전엔 `newly`가 미완료였으니, 지금 전부 깼고 보너스 표시가 있으면
+            #    그 보너스는 이번 묶음에서 나간 거예요(`complete()`가 이미 지급했어요).
+            full_clear = bool(after.get("fullClear")) and set(after.get("picks") or []) <= done_after
+            await self._notify_auto_complete(user_id, newly, full_clear)
         return len(newly), fetched
 
     async def _notify_account_missing(self, user_id: int):
@@ -567,7 +622,7 @@ class Mission(commands.Cog):
         except discord.HTTPException:
             pass  # DM을 막아둔 사람이에요. 로그에는 위에서 이미 남겼어요.
 
-    async def _notify_auto_complete(self, user_id: int, keys: list[str]):
+    async def _notify_auto_complete(self, user_id: int, keys: list[str], full_clear: bool = False):
         """자동으로 깬 미션은 본인에게만 DM으로 알려줘요.
 
         채널에 뿌리면 30분마다 알림이 쌓여서 시끄러워요. DM을 막아둔 사람은 그냥 넘어가요
@@ -595,6 +650,8 @@ class Mission(commands.Cog):
             await user.send(
                 f"🎯 발로란트 미션이 자동으로 완료됐어요 — **{titles}**\n"
                 f"악귀코인 **+{reward}개** (보유 **{balance}개**) · 남은 미션은 `/미션`에서 볼 수 있어요"
+                + (f"\n🏁 오늘 미션 **완주!** 보너스 **+{mission_store.FULL_CLEAR_BONUS}개**"
+                   if full_clear else "")
             )
         except discord.HTTPException:
             log.info("자동 완료 DM을 못 보냈어요(차단/DM 비허용): %s", user_id)
@@ -634,7 +691,8 @@ class Mission(commands.Cog):
             reward = ONE_TIME_MISSIONS["link_riot"]["reward"]
             await coin_wallet.add(user_id, reward, reason="미션:link_riot")
             await interaction.followup.send(
-                f"🎉 **라이엇 계정 연동** 미션 완료! 악귀코인 **+{reward}개**"
+                f"🎉 **라이엇 계정 연동** 미션 완료! 악귀코인 **+{reward}개**",
+                ephemeral=True,  # 미션 완료는 본인만 보이게 (2026-11-08)
             )
 
         # 발로란트 미션이 배정돼 있으면 지금 전적을 조회해서 판정해요.
@@ -669,9 +727,10 @@ class Mission(commands.Cog):
         #    혹시 모르는 옛 키가 섞여 있으면 `reward_of`가 KeyError를 내니 걸러요.
         done_keys = [k for k in doc.get("done", []) if k in MISSIONS]
         done_count = len(done_keys)
-        earned = mission_store.total_reward(done_keys)
-        # 오늘 배정된 걸 전부 깼을 때 받을 수 있는 총액. 사람마다 달라요.
-        possible = mission_store.total_reward(doc["picks"])
+        bonus = mission_store.FULL_CLEAR_BONUS
+        earned = mission_store.total_reward(done_keys) + (bonus if doc.get("fullClear") else 0)
+        # 오늘 배정된 걸 전부 깼을 때 받을 수 있는 총액(🏁 완주 보너스 포함). 사람마다 달라요.
+        possible = mission_store.total_reward(doc["picks"]) + bonus
         embed = discord.Embed(
             title="🎯 오늘의 미션",
             description="\n".join(lines),
@@ -680,7 +739,7 @@ class Mission(commands.Cog):
         embed.add_field(
             name="오늘 획득",
             value=f"악귀코인 **{earned}개** / 전부 깨면 **{possible}개** "
-                  f"({done_count}/{len(doc['picks'])} 완료)",
+                  f"({done_count}/{len(doc['picks'])} 완료 · 🏁 완주 보너스 {bonus}코인 포함)",
             inline=False,
         )
         if not linked:

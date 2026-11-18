@@ -1,6 +1,7 @@
 """일일 미션 - 매일 3개씩 배정되고, 하나 깰 때마다 **희귀도에 따라** 악귀코인을 줘요.
 
-보상은 🟢흔함 1 · 🔵보통 3 · 🟣드묾 5코인이에요(2026-11-02부터. 전엔 전부 1코인 고정).
+보상은 🟢흔함 2 · 🔵보통 5 · 🟣드묾 8코인 + 🏁 3개 완주 보너스 5코인이에요
+(2026-11-15부터. 11-02~14엔 1/3/5, 그 전엔 전부 1코인 고정).
 희귀도는 느낌이 아니라 **14일 실측 완료율**로 정했어요 - 자세한 근거는 아래 `RARITY` 주석에.
 🚨 지급액을 상수로 들고 있지 말고 **반드시 `reward_of(key)`를 쓰세요.**
 
@@ -61,15 +62,26 @@ DAILY_MISSION_COUNT = 3  # 하루에 배정되는 미션 수
 #       아니라 **"미션을 몰라도 깨지는지"**예요. 일부러 하러 가야 하는 쪽이 비싸요.
 #
 # 🚨 **아무도 전보다 적게 받지 않아요.** 최저 티어가 기존 보상(1코인)이에요.
+#
+# 💰 **2026-11-15 단가 인상: 🟢1/🔵3/🟣5 → 🟢2/🔵5/🟣8 + 3개 완주 보너스 +5.**
+#    11/02~11/13 실측으로 미션은 깬 날 1인 평균 **4코인**, 🎣 낚시는 낚시꾼 1인 하루
+#    **~39코인**(전체 발행의 66%)이었어요. 미션 참여자는 35명으로 낚시(12명)의 3배라
+#    서버원 대부분이 "제일 적게 버는 쪽"에 있었어요 → 방장 결정으로 단가를 올렸어요.
+#    같은 날 재측정으로 티어도 다시 맞췄어요(아래 각 미션 주석의 11/14 수치).
+#    ⚠️ 분모가 "그날 미션을 1개 이상 깬 사람"이라 절대값은 부풀어 있어요 — 비교용이에요.
 # ------------------------------------------------------------------
 RARITY: dict[str, dict] = {
-    "common":   {"label": "흔함", "emoji": "🟢", "reward": 1},
-    "uncommon": {"label": "보통", "emoji": "🔵", "reward": 3},
-    "rare":     {"label": "드묾", "emoji": "🟣", "reward": 5},
+    "common":   {"label": "흔함", "emoji": "🟢", "reward": 2},
+    "uncommon": {"label": "보통", "emoji": "🔵", "reward": 5},
+    "rare":     {"label": "드묾", "emoji": "🟣", "reward": 8},
 }
 
-# 하루에 받을 수 있는 최대치(전부 '드묾'이 뽑혀서 전부 깬 경우). 안내문에 쓰여요.
-MAX_DAILY_REWARD = DAILY_MISSION_COUNT * max(r["reward"] for r in RARITY.values())
+# 🏁 그날 배정된 미션을 **전부** 깨면 한 번 더 줘요(2026-11-15). 하나만 깨고 멈추는 날이
+#    많아서 "마지막 하나"를 하러 가게 만드는 장치예요. 지급은 `claim_full_clear()`로 하루 1회.
+FULL_CLEAR_BONUS = 5
+
+# 하루에 받을 수 있는 최대치(전부 '드묾'이 뽑혀서 전부 깬 경우 + 완주 보너스). 안내문에 쓰여요.
+MAX_DAILY_REWARD = DAILY_MISSION_COUNT * max(r["reward"] for r in RARITY.values()) + FULL_CLEAR_BONUS
 
 # 🎲 미션 리롤권 (`/악귀상점`). 하루 1회만 — 안 그러면 쉬운 미션이 나올 때까지 돌릴 수 있어요.
 #
@@ -83,7 +95,9 @@ MAX_DAILY_REWARD = DAILY_MISSION_COUNT * max(r["reward"] for r in RARITY.values(
 #      조합을 돌려서 이걸 검사해요(상수를 손으로 맞추면 또 어긋나요).
 # ⚠️ 리롤은 2026-11-02까지 **사용 0건 · 채널 언급 0건**이에요. 가격을 올려도 잃을
 #    실사용이 없어서 이렇게 골랐어요. 수요가 생기면 값을 다시 볼 것.
-REROLL_PRICE = 4
+# 🚨 2026-11-15 단가 인상(🟢2/🔵5/🟣8)으로 최대 이득이 8-2=6이 돼서 4 → **6**으로 올렸어요.
+#    `test_akgui_shop.py`가 같은 불변식을 검사해요.
+REROLL_PRICE = 6
 REROLL_LIMIT_PER_DAY = 1
 
 # 통화방 미션에서 "함께 있었다"로 인정할 최소 인원(본인 포함). 혼자 접속해두는 걸 막아요.
@@ -99,35 +113,35 @@ VOICE_MIN_MEMBERS = 2
 MISSIONS: dict[str, dict] = {
     # --- 서버 활동 (전원 가능) ---
     "voice_together": {
-        "rarity": "common",   # 실측 완료율 83%
+        "rarity": "common",   # 실측 완료율 83% (11/14 재측정 76%)
         "kind": "server", "target": 30,
         "title": "같이 통화하기",
         "desc": f"다른 사람과 함께 통화방에 30분 있기 (혼자 있으면 인정 안 돼요)",
         "unit": "분",
     },
     "create_room": {
-        "rarity": "rare",   # 실측 완료율 25%
+        "rarity": "rare",   # 실측 완료율 25% (11/14 재측정 35%)
         "kind": "server", "target": 1,
         "title": "방 만들기",
         "desc": "`/방만들기`로 통화방 만들기",
         "unit": "회",
     },
     "use_myshop": {
-        "rarity": "uncommon",   # 실측 완료율 42%
+        "rarity": "uncommon",   # 실측 완료율 42% (11/14 재측정 43%)
         "kind": "server", "target": 1,
         "title": "오늘의 상점 확인",
         "desc": "`/오상`으로 내 상점 확인하기",
         "unit": "회",
     },
     "use_rank": {
-        "rarity": "uncommon",   # 실측 완료율 34%
+        "rarity": "uncommon",   # 실측 완료율 34% (11/14 재측정 46%)
         "kind": "server", "target": 1,
         "title": "전적 확인",
         "desc": "`/전적`으로 전적 조회하기",
         "unit": "회",
     },
     "use_map": {
-        "rarity": "rare",   # 실측 완료율 28%
+        "rarity": "rare",   # 실측 완료율 28% (11/14 재측정 42%)
         "kind": "server", "target": 1,
         "title": "맵 추천 받기",
         "desc": "`/맵추천` 써보기",
@@ -146,14 +160,16 @@ MISSIONS: dict[str, dict] = {
     #    ⚠️ 2026-10-23에 적었던 "보상 1코인 · 하루 상한 3코인 그대로"는 **이제 옛말**이에요
     #       — 2026-11-02에 희귀도 차등이 들어왔어요(위 `RARITY` 주석).
     "attend_check": {
-        "rarity": "uncommon",   # 실측 완료율 42%
+        "rarity": "uncommon",   # 실측 완료율 42% (11/14 재측정 53%)
         "kind": "server", "target": 1,
         "title": "출석하기",
         "desc": "`/출석`으로 오늘의 출석체크 하기",
         "unit": "회",
     },
     "catch_fish": {
-        "rarity": "rare",   # 실측 완료율 28%
+        # 🔄 11/15 드묾 → 보통: 재측정 49%로 전적(46%)·상점(43%)보다 쉬워져서 그대로 두면
+        #    "쉬운 미션이 더 많이 주는" 역전이에요. 보통이 5코인이 돼서 **받는 코인은 그대로**예요.
+        "rarity": "uncommon",   # 실측 완료율 28% (11/14 재측정 49%)
         "kind": "server", "target": 3,
         "title": "세 마리 낚기",
         "desc": "`/낚시`로 물고기 3마리 낚기 (놓친 판은 안 세요)",
@@ -161,7 +177,8 @@ MISSIONS: dict[str, dict] = {
     },
     # 🔞 성인 전용이에요. 아래 ADULT_ONLY_KEYS를 꼭 같이 보세요.
     "play_gamble": {
-        "rarity": "uncommon",   # 실측 완료율 ~34%
+        # 🔄 11/15 보통 → 드묾: 재측정 30%로 서버 미션 중 **가장 안 깨져요**(표본 9건).
+        "rarity": "rare",   # 실측 완료율 ~34% (11/14 재측정 30%)
         "kind": "server", "target": 1,
         "title": "한 판 걸어보기",
         "desc": "🔞 `/도박`에서 한 판 걸기 (성인 인증 필요)",
@@ -169,35 +186,38 @@ MISSIONS: dict[str, dict] = {
     },
     # --- 발로란트 (라이엇 계정 연동자만) ---
     "val_play": {
-        "rarity": "common",   # 실측 완료율 71%
+        "rarity": "common",   # 실측 완료율 71% (11/14 재측정 72%)
         "kind": "valorant", "target": 1,
         "title": "한 판 하고 오기",
         "desc": "오늘 발로란트 1판 이상 플레이",
         "unit": "판",
     },
     "val_win": {
-        "rarity": "common",   # 실측 완료율 79%
+        # ⚠️ 체감상 어려워 보여도 재측정 73%로 "한 판 하고 오기"(72%)와 같아요 → 흔함 유지.
+        "rarity": "common",   # 실측 완료율 79% (11/14 재측정 73%)
         "kind": "valorant", "target": 1,
         "title": "승리하기",
         "desc": "오늘 1승 이상",
         "unit": "승",
     },
     "val_kills15": {
-        "rarity": "common",   # 실측 완료율 68%
+        # 🔄 11/15 흔함 → 보통: 재측정 68%로 발로 중 두 번째로 안 깨지고, 노력도 제일 들어요.
+        "rarity": "uncommon",   # 실측 완료율 68% (11/14 재측정 68%)
         "kind": "valorant", "target": 1,
         "title": "학살자",
         "desc": "한 경기에서 15킬 이상",
         "unit": "회",
     },
     "val_kd1": {
-        "rarity": "common",   # 실측 완료율 87%
+        "rarity": "common",   # 실측 완료율 87% (11/14 재측정 74%)
         "kind": "valorant", "target": 1,
         "title": "본전은 하기",
         "desc": "한 경기에서 K/D 1.0 이상",
         "unit": "회",
     },
     "val_comp": {
-        "rarity": "common",   # 실측 완료율 65%
+        # 🔄 11/15 흔함 → 보통: 재측정 65%로 발로 중 **가장 안 깨져요**(언랭·일반만 하는 사람).
+        "rarity": "uncommon",   # 실측 완료율 65% (11/14 재측정 65%)
         "kind": "valorant", "target": 1,
         "title": "경쟁전 돌기",
         "desc": "오늘 경쟁전 1판 이상",
@@ -376,6 +396,25 @@ def _progress_sync(user_id, key: str, amount: int = 1) -> bool:
     return res.modified_count == 1
 
 
+def _claim_full_clear_sync(user_id) -> bool:
+    """오늘 배정된 미션을 **전부** 깼고 완주 보너스를 아직 안 받았으면 True(이번에 받음).
+
+    `fullClear`는 날짜가 바뀌면 새 문서(`_blank_doc`)에 없으니 자연히 리셋돼요.
+    필터의 `$ne: True`로 동시에 두 번 들어와도 한 번만 성공해요."""
+    uid, today = str(user_id), today_iso()
+    doc = _missions.find_one({"_id": uid}, {"date": 1, "picks": 1, "done": 1, "fullClear": 1})
+    if doc is None or doc.get("date") != today or doc.get("fullClear"):
+        return False
+    picks = set(doc.get("picks") or [])
+    if not picks or not picks <= set(doc.get("done") or []):
+        return False
+    res = _missions.update_one(
+        {"_id": uid, "date": today, "fullClear": {"$ne": True}},
+        {"$set": {"fullClear": True}},
+    )
+    return res.modified_count == 1
+
+
 def _reroll_sync(user_id, key: str, adult: bool = False) -> tuple[str | None, str]:
     """미션 하나를 **서버 미션**으로 바꿔요. (새 미션 키, 실패 사유) - 성공하면 사유는 "".
 
@@ -462,6 +501,11 @@ async def ensure_today(user_id, linked: bool, adult: bool = False) -> dict:
 async def progress(user_id, key: str, amount: int = 1) -> bool:
     """진행도를 올리고 이번에 새로 완료됐으면 True. 코인 지급은 호출한 쪽에서 해요."""
     return await asyncio.to_thread(_progress_sync, user_id, key, amount)
+
+
+async def claim_full_clear(user_id) -> bool:
+    """🏁 완주 보너스를 이번에 받을 차례면 True. 코인 지급은 부르는 쪽에서 해요."""
+    return await asyncio.to_thread(_claim_full_clear_sync, user_id)
 
 
 async def claim_one_time(user_id, key: str) -> bool:
