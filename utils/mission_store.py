@@ -80,8 +80,7 @@ RARITY: dict[str, dict] = {
 #    많아서 "마지막 하나"를 하러 가게 만드는 장치예요. 지급은 `claim_full_clear()`로 하루 1회.
 FULL_CLEAR_BONUS = 5
 
-# 하루에 받을 수 있는 최대치(전부 '드묾'이 뽑혀서 전부 깬 경우 + 완주 보너스). 안내문에 쓰여요.
-MAX_DAILY_REWARD = DAILY_MISSION_COUNT * max(r["reward"] for r in RARITY.values()) + FULL_CLEAR_BONUS
+# ⚠️ 하루 최대치(`MAX_DAILY_REWARD`)는 미션 표가 있어야 셀 수 있어서 아래(`reward_of` 뒤)에서 계산해요.
 
 # 🎲 미션 리롤권 (`/악귀상점`). 하루 1회만 — 안 그러면 쉬운 미션이 나올 때까지 돌릴 수 있어요.
 #
@@ -102,6 +101,23 @@ REROLL_LIMIT_PER_DAY = 1
 
 # 통화방 미션에서 "함께 있었다"로 인정할 최소 인원(본인 포함). 혼자 접속해두는 걸 막아요.
 VOICE_MIN_MEMBERS = 2
+
+# 🎯 '학살자'(`val_kills15`)가 요구하는 **한 경기 킬 수**. 판정(`cogs/mission.py`)과 안내문이
+#    같이 써요 — 숫자를 두 군데에 따로 적으면 한쪽만 바뀌어요.
+#
+# 🔄 2026-11-18: 15 → **20**. 11/15에 이 미션이 🔵(5코인)이 된 뒤 `#💡｜기능-추천방`에
+#    "15킬에 5코인은 많다 / 킬을 좀 늘리자"는 건의가 올라왔고(11/16) 방장이 받았어요.
+#    실측도 같은 말을 해요 — 🔔 전적 카드 1,687건(10/18~11/18 · 25명)을 (사람, 날)로 묶어
+#    "그날 최다 킬"을 보면:
+#        15+ 82% · 16+ 77% · 17+ 71% · 18+ 65% · 19+ 60% · **20+ 53%** · 22+ 42% · 25+ 26%
+#    완료율로 옮기면 68%(15킬) → **약 44%**(= 68 × 53/82)예요. 🔵 구간(오상 43% · 전적 46%)과
+#    같은 자리고, 15킬은 🟢(72~74%)과 붙어 있었어요.
+# ⚠️ 이 숫자엔 팀 데스매치(89건 · 20킬 이상 56%)가 섞여 있어요. 판정이 모드를 안 가리니
+#    잰 것도 안 가리고 쟀어요. 모드를 가리게 되면 다시 잴 것.
+KILLS_TARGET = 20
+
+# 연동자가 받는 발로란트 미션 수. 나머지 자리는 서버 미션이에요(`pick_missions`).
+LINKED_VALORANT_COUNT = 1
 
 # ------------------------------------------------------------------
 # 미션 정의
@@ -127,10 +143,12 @@ MISSIONS: dict[str, dict] = {
         "unit": "회",
     },
     "use_myshop": {
+        # 🔄 11/18: 명령어만 쳐도 깨지던 걸 **상점이 실제로 떴을 때**로 바꿨어요(아래
+        #    `COMMAND_MISSIONS` 주석). 문구도 거기에 맞췄어요.
         "rarity": "uncommon",   # 실측 완료율 42% (11/14 재측정 43%)
         "kind": "server", "target": 1,
         "title": "오늘의 상점 확인",
-        "desc": "`/오상`으로 내 상점 확인하기",
+        "desc": "`/오상`으로 내 상점 띄우기 (상점이 떠야 인정돼요)",
         "unit": "회",
     },
     "use_rank": {
@@ -141,7 +159,10 @@ MISSIONS: dict[str, dict] = {
         "unit": "회",
     },
     "use_map": {
-        "rarity": "rare",   # 실측 완료율 28% (11/14 재측정 42%)
+        # 🔄 11/18 드묾 → 보통: 재측정 42%가 오상(43%)·전적(46%)과 같은 구간이에요. 🟣인
+        #    방 만들기(35%)·도박(30%)과는 떨어져 있고요. 명령어 한 번에 8코인이라
+        #    `#💡｜기능-추천방`에 "너무 퍼준다"는 건의가 올라왔고(11/18) 방장이 받았어요.
+        "rarity": "uncommon",   # 실측 완료율 28% (11/14 재측정 42%)
         "kind": "server", "target": 1,
         "title": "맵 추천 받기",
         "desc": "`/맵추천` 써보기",
@@ -202,10 +223,14 @@ MISSIONS: dict[str, dict] = {
     },
     "val_kills15": {
         # 🔄 11/15 흔함 → 보통: 재측정 68%로 발로 중 두 번째로 안 깨지고, 노력도 제일 들어요.
-        "rarity": "uncommon",   # 실측 완료율 68% (11/14 재측정 68%)
+        # 🔄 11/18 15킬 → 20킬: 보상(🔵)은 그대로 두고 조건을 올렸어요(`KILLS_TARGET` 주석).
+        # 🚨 **키 이름은 그대로 둬요.** `val_kills15`는 오늘 배정 문서(`picks`·`done`)와 코인
+        #    장부(`미션:val_kills15`)에 박혀 있어요. 바꾸면 그날 배정이 깨지고 리포트가 둘로
+        #    갈려요. 킬 수는 이름이 아니라 `KILLS_TARGET`이 정해요.
+        "rarity": "uncommon",   # 실측 완료율 68%(15킬일 때) → 20킬 추정 44%
         "kind": "valorant", "target": 1,
         "title": "학살자",
-        "desc": "한 경기에서 15킬 이상",
+        "desc": f"한 경기에서 {KILLS_TARGET}킬 이상",
         "unit": "회",
     },
     "val_kd1": {
@@ -268,6 +293,27 @@ def total_reward(keys) -> int:
     """여러 미션을 한꺼번에 깼을 때의 합계. 발로 자동판정 DM과 `/미션` 요약이 써요."""
     return sum(reward_of(k) for k in keys)
 
+
+def _max_daily_reward() -> int:
+    """하루에 받을 수 있는 최대치 — **실제로 배정될 수 있는 조합** 중 가장 큰 합 + 완주 보너스.
+
+    🚨 전엔 `하루 개수 × 최고 희귀도 보상`이었어요. 그건 "3개가 전부 🟣인 날"이 있을 때만
+       맞아요. 2026-11-18에 맵 추천이 🔵로 내려가면서 🟣이 2종(방 만들기 · 🔞 도박)만 남아
+       **그런 날이 없어졌고**, 그대로 두면 안내문이 못 받는 숫자(29)를 말하게 돼요.
+    ⚠️ 🔞 미션까지 넣어서 세요(= 성인 인증자의 최대). 인증이 없으면 이보다 낮아요.
+    ⚠️ 배정 모양(연동자: 발로 `LINKED_VALORANT_COUNT`개 + 나머지 서버 / 비연동자: 전부 서버)은
+       `pick_missions`와 같아야 해요. `test_mission_actions.py`가 실제 배정을 돌려서 대조해요."""
+    server = sorted((reward_of(k) for k in SERVER_KEYS), reverse=True)
+    valorant = sorted((reward_of(k) for k in VALORANT_KEYS), reverse=True)
+    unlinked = sum(server[:DAILY_MISSION_COUNT])
+    linked = (sum(valorant[:LINKED_VALORANT_COUNT])
+              + sum(server[:DAILY_MISSION_COUNT - LINKED_VALORANT_COUNT]))
+    return max(unlinked, linked) + FULL_CLEAR_BONUS
+
+
+# 안내문(FAQ · `#🎯｜미션-내용` · `#🤖｜봇-사용법`)이 "하루 최대 N코인"으로 써요.
+MAX_DAILY_REWARD = _max_daily_reward()
+
 # 명령어 이름 -> 미션 키. on_app_command_completion에서 이 표를 보고 진행도를 올려요.
 # 이렇게 해두면 각 cog를 건드리지 않아도 돼요.
 # 🚨 **"방만들기"를 여기 다시 넣지 마세요** (2026-10-31에 뺐어요).
@@ -277,8 +323,13 @@ def total_reward(keys) -> int:
 #    → 이제 `utils/dynamic_room.create_room`이 **실제로 만든 뒤** 직접 올려요.
 #      여기 다시 넣으면 명령어 경로에서 **두 번** 올라가요.
 #    🎣 낚시도 같은 이유로 이 표를 안 써요(`cogs/fishing.py` 주석).
+# 🚨 **"오상"도 여기 다시 넣지 마세요** (2026-11-18에 뺐어요).
+#    쿠키를 등록 안 한 사람이 `/오상`을 치면 **로그인 안내만** 뜨고 명령어는 정상 종료돼요.
+#    그래서 로그인도 URL 붙여넣기도 안 했는데 5코인이 들어왔어요(`#💡｜기능-추천방` 11/16
+#    신고: "링크 붙여넣기 전에 보상 들어와요").
+#    → 이제 `cogs/myshop.py`가 **상점을 실제로 띄운 뒤** 직접 올려요(`_credit_shop_mission`).
+#      여기 다시 넣으면 로그인 안내만 봐도 깨지는 옛 버그가 돌아와요.
 COMMAND_MISSIONS = {
-    "오상": "use_myshop",
     "전적": "use_rank",
     "맵추천": "use_map",
 }
@@ -320,7 +371,9 @@ def pick_missions(user_id, date_iso: str, linked: bool, adult: bool = False) -> 
         #    배정이 둘 다 **발로 2 + 서버 1**이었어요(학살자 15킬 · 본전 K/D 1.0).
         # 🚨 발행 상한은 안 변해요. 하루 3개 · 개당 1코인 그대로예요. 바뀌는 건
         #    "못 깨서 안 나가던 코인"이 나가기 시작하는 것뿐이에요.
-        picks = rng.sample(VALORANT_KEYS, 1) + rng.sample(server_pool, 2)
+        # ⚠️ 개수를 상수로 뺐을 뿐 값은 그대로(1 + 2)예요 — 난수 소비가 같아서 배정도 안 변해요.
+        picks = (rng.sample(VALORANT_KEYS, LINKED_VALORANT_COUNT)
+                 + rng.sample(server_pool, DAILY_MISSION_COUNT - LINKED_VALORANT_COUNT))
     else:
         picks = rng.sample(server_pool, DAILY_MISSION_COUNT)
     rng.shuffle(picks)

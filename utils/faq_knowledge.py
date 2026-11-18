@@ -75,6 +75,7 @@ from utils.inventory_store import PROTECT_MAX, PROTECT_PRICE
 from utils.mission_store import (
     DAILY_MISSION_COUNT,
     MAX_DAILY_REWARD,
+    MISSIONS,
     RARITY,
     REROLL_LIMIT_PER_DAY,
     REROLL_PRICE,
@@ -230,12 +231,20 @@ def _rarity_line() -> str:
     return " · ".join(f"{r['emoji']}{r['label']} {r['reward']}코인" for r in RARITY.values())
 
 
+def _mission_titles(rarity: str) -> str:
+    """그 희귀도인 미션 이름들. 🚨 **손으로 적지 말 것** — 티어를 바꾸면 이 문장만 옛말로 남아요.
+    2026-11-18에 맵 추천이 🔵로 내려갔는데 여기엔 "🟣 맵 추천·방 만들기·세 마리 낚기"
+    (세 마리 낚기는 11/15부터 🔵), "🟢 … 1코인"(11/15부터 2코인)이 그대로 적혀 있었어요."""
+    return " · ".join(info["title"] for info in MISSIONS.values() if info["rarity"] == rarity)
+
+
 def _mission() -> str:
+    rare, common = RARITY["rare"], RARITY["common"]
     return f"""🎯 `/미션`은 하루 {DAILY_MISSION_COUNT}개가 배정되고, 깬 미션의 **희귀도만큼** 코인이 들어와요.
 
 · **희귀도별 보상** — {_rarity_line()}. 하루 최대 {MAX_DAILY_REWARD}코인이에요.
-  일부러 하러 가야 하는 미션(🟣 맵 추천·방 만들기·세 마리 낚기)이 제일 많이 줘요.
-  그냥 있어도 깨지는 미션(🟢 같이 통화하기·발로란트 미션)은 1코인이에요.
+  일부러 하러 가야 하는 미션({rare['emoji']} {_mission_titles('rare')})이 제일 많이 줘요.
+  그냥 있어도 깨지는 미션({common['emoji']} {_mission_titles('common')})은 {common['reward']}코인이에요.
 
 · **발로란트 미션은 자동 판정이에요.** 봇이 30분마다 전적을 확인해요
   (그래서 깬 직후 바로는 안 뜰 수 있어요. 조금 기다려 주세요).
@@ -397,6 +406,8 @@ def _record() -> str:
 · **미션 자동 판정도 이 등록을 써요.** 등록이 안 되어 있으면 발로 미션이 자동으로 안 깨져요.
 · 등록을 지우려면 `/계정삭제`예요.
 · 티어 역할은 자동으로 붙어요.
+· 기본은 **경쟁전 우선**(모자라면 일반전으로 채움)이에요. `모드`를 **일반전만**으로 고르면
+  일반전 기록만 모아서 봐요. 일반전만 본 기록은 주간 악귀력 · 상위 %에는 안 들어가요.
 · 🎯 맨 아래 **한 줄 평**은 봇이 KD·승률·헤드샷율·자주 쓴 요원을 읽고 써주는 조언이에요.
   최근 3경기 미만이면 표본이 적어서 안 나와요. 새 경기를 하면 새로 써줘요."""
 
@@ -545,7 +556,7 @@ def _coin_basic() -> str:
 · 내 잔액은 `/코인`
 · 남한테 주려면 `/코인보내기`
 · 버는 법은 출석 · 미션 · 낚시 · 업적 네 가지예요(자세히는 "코인 어떻게 모아?"라고 물어보세요).
-· 하루에 그냥 들어오는 건 출석 {COIN_PER_ATTENDANCE}코인 + 미션 최대 {DAILY_MISSION_COUNT}코인이에요."""
+· 하루에 그냥 들어오는 건 출석 {COIN_PER_ATTENDANCE}코인 + 미션 최대 {MAX_DAILY_REWARD}코인이에요."""
 
 
 TOPICS: tuple[Topic, ...] = (

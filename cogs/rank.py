@@ -25,6 +25,23 @@ REGION_CHOICES = ["kr", "ap", "na", "eu", "latam", "br"]
 DEFAULT_MATCH_COUNT = 10  # /전적 명령어에서 기본으로 채우려는 총 경기 수예요. (경쟁전 우선, 부족하면 일반전으로 채워요)
 LOW_ACTIVITY_TARGET = 5   # 경쟁전 자체가 이 숫자 미만인 "저활동 계정"은 목표치를 이만큼으로 낮춰요. (일반전 추가 조회량을 줄여서 느려지는 걸 완화해요)
 
+# `/전적`의 `모드` 선택지예요 (2026-11-18 `#💡｜기능-추천방` 건의: "전적검색 일반전 전용도").
+#   auto    — 경쟁전 우선, 부족하면 일반전으로 채워요. **기본값이고 예전 동작 그대로예요.**
+#   unrated — 일반전만 모아서 봐요.
+#
+# 🚨 **일반전만 본 기록은 "보여주기만" 해요.** 아래 셋에는 넣지 않아요(`send_rank_report`):
+#    ⒜ 상위 % 표본(`record_stats`) — 닉네임당 한 줄이라 일반전 K/D가 그 사람 기록을 덮어써요.
+#    ⒝ 주간 악귀력(`agwi_weekly_store`) — 같은 주에 **가장 높은 점수만** 남아서, 일반전으로
+#       점수를 끌어올려 주간 랭킹에 올리는 길이 생겨요.
+#    ⒞ 포지션 역할 — 모드를 바꿔 조회할 때마다 역할이 왔다 갔다 해요.
+#    티어 역할은 그대로 맞춰요(티어는 경기 목록이 아니라 MMR에서 나와서 모드와 무관해요).
+MODE_AUTO = "auto"
+MODE_UNRATED = "unrated"
+MODE_CHOICES = [
+    app_commands.Choice(name="경쟁전 우선 (기본)", value=MODE_AUTO),
+    app_commands.Choice(name="일반전만", value=MODE_UNRATED),
+]
+
 # API가 영문으로 주는 요원 이름을 한글로 보여주기 위한 매핑이에요.
 # 목록에 없는(최신 패치로 새로 추가된) 요원은 영문 이름 그대로 표시돼요.
 AGENT_KOREAN_NAMES = {
@@ -304,12 +321,15 @@ def aggregate_match_stats(
 
 def build_summary_embed(
     닉네임: str, 태그: str, tier_name: str, rr: Optional[int], stats: dict,
-    comp_count: int, used_fallback: bool, target: int,
+    comp_count: int, used_fallback: bool, target: int, mode: str = MODE_AUTO,
 ) -> discord.Embed:
     n = stats["matches_counted"]
+    unrated_only = mode == MODE_UNRATED
 
     kd_line = f"K/D 비율   : **{stats['kd']:.2f}**"
-    percentile = get_kd_percentile(stats["kd"])
+    # "상위 %"는 경쟁전 우선으로 조회한 기록끼리 비교하는 숫자예요. 일반전만 모은 K/D를
+    # 거기에 대면 서로 다른 걸 재는 셈이라, 일반전만 볼 땐 아예 안 붙여요.
+    percentile = None if unrated_only else get_kd_percentile(stats["kd"])
     if percentile is not None:
         kd_line += f" (봇 조회 유저 중 상위 {percentile:.0f}%)"
 
@@ -321,7 +341,9 @@ def build_summary_embed(
         pos_count = stats["position_counts"][stats["top_position"]]
         position_line = f"\n주 포지션: **{stats['top_position']}** ({pos_count}/{n}경기)"
 
-    if used_fallback:
+    if unrated_only:
+        match_summary_title = f"📊 최근 일반전 {n}경기 요약 통계"
+    elif used_fallback:
         normal_count = n - comp_count
         match_summary_title = f"📊 최근 {n}경기 요약 통계 (경쟁전 {comp_count} + 일반전 {normal_count})"
     else:
@@ -331,7 +353,8 @@ def build_summary_embed(
     description = (
         f"{divider}\n"
         f"🏆 현재 티어: **{tier_name}**" + (f" ({rr} RR)" if rr is not None else "") + "\n"
-        f"⚔️ 악귀 스코어: **{stats['agwi_score']:.0f}점 / {AGWI_MAX_SCORE:.0f}점** (**{stats['agwi_grade']}** 등급)\n"
+        f"⚔️ 악귀 스코어: **{stats['agwi_score']:.0f}점 / {AGWI_MAX_SCORE:.0f}점** (**{stats['agwi_grade']}** 등급)"
+        + (" · 일반전 기준" if unrated_only else "") + "\n"
         f"{divider}\n"
         f"{match_summary_title}\n"
         f"• {kd_line}\n"
@@ -344,13 +367,19 @@ def build_summary_embed(
         f"{position_line}"
     )
 
-    if used_fallback:
+    if unrated_only:
+        description += (
+            "\n\n🎮 **일반전만** 모아 본 기록이에요. "
+            "주간 악귀력 · 상위 % · 포지션 역할에는 반영되지 않아요."
+        )
+    elif used_fallback:
         description += "\n\n⚠️ 경쟁전 표본이 적어(" + str(comp_count) + "경기) 일반전 기록도 함께 반영했어요."
     if n < target:
-        description += f"\n⚠️ 목표 {target}경기 중 {n}경기만 찾았어요. (전체 플레이 기록 자체가 적을 수 있어요)"
+        scarce = "일반전 기록" if unrated_only else "전체 플레이 기록"
+        description += f"\n⚠️ 목표 {target}경기 중 {n}경기만 찾았어요. ({scarce} 자체가 적을 수 있어요)"
 
     embed = discord.Embed(
-        title=f"🎮 [{닉네임}#{태그}] 님의 발로란트 전적 리포트",
+        title=f"🎮 [{닉네임}#{태그}] 님의 발로란트 {'일반전 ' if unrated_only else ''}전적 리포트",
         description=description,
         color=stats["agwi_color"],
     )
@@ -358,14 +387,20 @@ def build_summary_embed(
     return embed
 
 
-def build_detail_embed(닉네임: str, 태그: str, stats: dict, comp_count: int, used_fallback: bool) -> discord.Embed:
+def build_detail_embed(
+    닉네임: str, 태그: str, stats: dict, comp_count: int, used_fallback: bool,
+    mode: str = MODE_AUTO,
+) -> discord.Embed:
     """'자세히 보기' 버튼을 눌렀을 때 계산에 쓰인 원본 수치를 보여줘요."""
     n = stats["matches_counted"]
+    unrated_only = mode == MODE_UNRATED
     embed = discord.Embed(
-        title=f"📎 {닉네임}#{태그} 상세 수치 (최근 {n}경기 합산)",
+        title=f"📎 {닉네임}#{태그} 상세 수치 (최근 {'일반전 ' if unrated_only else ''}{n}경기 합산)",
         color=stats["agwi_color"],
     )
-    if used_fallback:
+    if unrated_only:
+        embed.add_field(name="표본 구성", value=f"일반전 {n}경기 (일반전만 조회)", inline=False)
+    elif used_fallback:
         embed.add_field(
             name="표본 구성",
             value=f"경쟁전 {comp_count}경기 + 일반전 {n - comp_count}경기 (경쟁전 표본 부족으로 일반전 보충)",
@@ -439,25 +474,35 @@ def build_detail_embed(닉네임: str, 태그: str, stats: dict, comp_count: int
         ),
         inline=False,
     )
-    sample_size = get_sample_size()
-    embed.set_footer(text=f"상위 % 비교 표본: 이 봇에서 /전적을 조회한 {sample_size}명 기준")
+    if unrated_only:
+        # 요약 화면에서 상위 %를 안 보여줬으니, 그 표본 이야기를 여기서 꺼내면 헷갈려요.
+        embed.set_footer(text="일반전만 조회한 기록은 상위 % 표본과 주간 악귀력에 넣지 않아요")
+    else:
+        sample_size = get_sample_size()
+        embed.set_footer(text=f"상위 % 비교 표본: 이 봇에서 /전적을 조회한 {sample_size}명 기준")
     return embed
 
 
 class RankDetailView(discord.ui.View):
     """'자세히 보기' 버튼 하나를 가진 뷰예요. 누른 사람에게만(ephemeral) 상세 수치를 보여줘요."""
 
-    def __init__(self, 닉네임: str, 태그: str, stats: dict, comp_count: int, used_fallback: bool):
+    def __init__(
+        self, 닉네임: str, 태그: str, stats: dict, comp_count: int, used_fallback: bool,
+        mode: str = MODE_AUTO,
+    ):
         super().__init__(timeout=300)
         self.닉네임 = 닉네임
         self.태그 = 태그
         self.stats = stats
         self.comp_count = comp_count
         self.used_fallback = used_fallback
+        self.mode = mode
 
     @discord.ui.button(label="📊 자세히 보기", style=discord.ButtonStyle.secondary)
     async def show_detail(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = build_detail_embed(self.닉네임, self.태그, self.stats, self.comp_count, self.used_fallback)
+        embed = build_detail_embed(
+            self.닉네임, self.태그, self.stats, self.comp_count, self.used_fallback, mode=self.mode
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -487,8 +532,12 @@ class Rank(commands.Cog):
         태그="태그 (# 뒷부분). 비우면 등록된 내 계정을 사용해요.",
         지역="계정 지역 (기본값: kr)",
         경기수=f"통계에 반영할 총 경기 수 (기본값: {DEFAULT_MATCH_COUNT}, 경쟁전 우선하고 부족하면 일반전으로 채워요, 최대 20)",
+        모드="어떤 경기로 볼지 (기본: 경쟁전 우선). '일반전만'을 고르면 일반전 기록만 모아서 보여줘요.",
     )
-    @app_commands.choices(지역=[app_commands.Choice(name=r, value=r) for r in REGION_CHOICES])
+    @app_commands.choices(
+        지역=[app_commands.Choice(name=r, value=r) for r in REGION_CHOICES],
+        모드=MODE_CHOICES,
+    )
     @restrict_to_channel("tier_lookup")
     async def rank(
         self,
@@ -497,9 +546,13 @@ class Rank(commands.Cog):
         태그: Optional[str] = None,
         지역: Optional[app_commands.Choice[str]] = None,
         경기수: Optional[app_commands.Range[int, 1, 20]] = None,
+        모드: Optional[app_commands.Choice[str]] = None,
     ):
         await interaction.response.defer()
-        await self.send_rank_report(interaction, 닉네임, 태그, 지역, 경기수)
+        await self.send_rank_report(
+            interaction, 닉네임, 태그, 지역, 경기수,
+            mode=모드.value if 모드 else MODE_AUTO,
+        )
 
     async def send_rank_report(
         self,
@@ -510,6 +563,7 @@ class Rank(commands.Cog):
         경기수: Optional[app_commands.Range[int, 1, 20]] = None,
         *,
         ephemeral: bool = False,
+        mode: str = MODE_AUTO,
     ):
         """전적 리포트를 만들어 보내요. `/전적` 명령과 **`/프로필` 카드의 🎯 버튼**이 같이 써요.
 
@@ -521,7 +575,11 @@ class Rank(commands.Cog):
 
         ephemeral=True면 누른 사람에게만 보여요. 프로필 버튼이 이걸 써요 — `/전적`은 원래
         #전적검색에만 묶여 있는데, 카드는 아무 채널에서나 열리거든요. 본인에게만 보이면
-        그 채널이 전적 리포트로 도배되지 않아요."""
+        그 채널이 전적 리포트로 도배되지 않아요.
+
+        mode=MODE_UNRATED면 일반전만 모아서 보여줘요. 🚨 그 기록은 **보여주기만** 하고
+        상위 % 표본·주간 악귀력·포지션 역할에는 안 넣어요(이유는 `MODE_AUTO` 위 주석)."""
+        unrated_only = mode == MODE_UNRATED
         # 이 함수 안의 followup.send는 전부 이 헬퍼를 거쳐요(ephemeral을 빠뜨리지 않으려고요).
         async def reply(*args, **kwargs):
             kwargs.setdefault("ephemeral", ephemeral)
@@ -562,10 +620,17 @@ class Rank(commands.Cog):
         match_count = 경기수 or DEFAULT_MATCH_COUNT
         headers = {"Authorization": api_key}
 
+        async def no_matches():
+            return 200, {"data": []}
+
         async def fetch_all(region: str):
             return await asyncio.gather(
                 fetch_current_mmr(self.session, headers, region, 닉네임, 태그),
-                fetch_matches_by_mode(self.session, headers, region, 닉네임, 태그, match_count, mode="competitive"),
+                # 🎮 일반전만 볼 땐 경쟁전 목록을 **아예 안 불러요.** HenrikDev 분당 30회를 봇
+                #    전체가 나눠 쓰는데, 안 쓸 걸 받아오면 한도만 깎여요(3회 → 2회).
+                no_matches() if unrated_only else fetch_matches_by_mode(
+                    self.session, headers, region, 닉네임, 태그, match_count, mode="competitive"
+                ),
                 fetch_matches_by_mode(self.session, headers, region, 닉네임, 태그, match_count, mode="unrated"),
             )
 
@@ -580,7 +645,8 @@ class Rank(commands.Cog):
                 (comp_status, comp_payload),
                 (normal_status, normal_payload),
             ) = await fetch_all(region)
-            log.info(f"⏱️ [{닉네임}#{태그}] 티어+경쟁전+일반전 동시조회({region}): {time.monotonic() - _t0:.2f}초")
+            _what = "티어+일반전" if unrated_only else "티어+경쟁전+일반전"
+            log.info(f"⏱️ [{닉네임}#{태그}] {_what} 동시조회({region}): {time.monotonic() - _t0:.2f}초")
 
             # 🌏 404면 **지역이 틀린 것**일 수 있어요(계정이 없는 게 아니라).
             # 그때만 지역을 한 번 알아보고, 다르면 다시 조회해요. 정상 경로에서는
@@ -633,6 +699,20 @@ class Rank(commands.Cog):
             await reply(f"오류: {message}")
             return
 
+        # 🎮 일반전만 볼 땐 일반전 목록이 **유일한 재료**예요. 못 받아왔는데 그냥 넘어가면
+        #    아래에서 "기록을 찾지 못했어요"가 떠서, 조회 실패가 "일반전을 안 한 사람"으로 보여요.
+        #    (기본 모드는 한쪽을 못 받아도 다른 쪽으로 리포트가 나가서 이 검사가 없어요.)
+        if unrated_only and normal_status != 200:
+            if normal_status == 429:
+                wait = henrik_api.retry_after_of(normal_payload)
+                await reply(
+                    f"⏳ 지금 전적 조회 요청이 몰려서 잠시 막혔어요. **{wait}초쯤 뒤에** 다시 시도해주세요!\n"
+                    f"(발로란트 전적 API가 분당 조회 횟수를 제한하고 있어요)"
+                )
+            else:
+                await reply("일반전 기록을 불러오지 못했어요. 잠시 후 다시 시도해주세요.")
+            return
+
         mmr_data = mmr_payload["data"] or {}
         current = mmr_data.get("current") or {}
         tier = current.get("tier") or {}
@@ -679,32 +759,45 @@ class Rank(commands.Cog):
 
         comp_matches = (comp_payload.get("data") or []) if comp_status == 200 else []
         normal_matches = (normal_payload.get("data") or []) if normal_status == 200 else []
-        comp_stats = aggregate_match_stats(comp_matches, 닉네임, 태그, tier_id=tier_id, rr=rr)
-        comp_count = comp_stats["matches_counted"] if comp_stats else 0
 
-        stats = comp_stats
-        used_fallback = False
+        if unrated_only:
+            # 🎮 일반전만: 경쟁전을 한 판도 안 섞어요. 저활동 보정(`LOW_ACTIVITY_TARGET`)도
+            #    안 해요 — 그건 "경쟁전이 적을 때 일반전을 얼마나 섞을지"를 정하는 장치예요.
+            stats = aggregate_match_stats(
+                normal_matches[:match_count], 닉네임, 태그, tier_id=tier_id, rr=rr
+            )
+            comp_count, used_fallback, effective_target = 0, False, match_count
+        else:
+            comp_stats = aggregate_match_stats(comp_matches, 닉네임, 태그, tier_id=tier_id, rr=rr)
+            comp_count = comp_stats["matches_counted"] if comp_stats else 0
 
-        # 경쟁전 자체가 적은 "저활동 계정"이면, 목표치를 낮춰서(최소 LOW_ACTIVITY_TARGET) 일반전 반영량을 줄여요.
-        effective_target = match_count
-        if comp_count < LOW_ACTIVITY_TARGET:
-            effective_target = min(match_count, LOW_ACTIVITY_TARGET)
+            stats = comp_stats
+            used_fallback = False
 
-        # 경쟁전만으로 목표 경기 수를 못 채우면, 이미 받아둔 일반전 중 부족한 만큼만 합쳐요.
-        if comp_count < effective_target:
-            remaining = effective_target - comp_count
-            combined_matches = comp_matches + normal_matches[:remaining]
-            combined_stats = aggregate_match_stats(combined_matches, 닉네임, 태그, tier_id=tier_id, rr=rr)
-            if combined_stats is not None and combined_stats["matches_counted"] > comp_count:
-                stats = combined_stats
-                used_fallback = True
+            # 경쟁전 자체가 적은 "저활동 계정"이면, 목표치를 낮춰서(최소 LOW_ACTIVITY_TARGET) 일반전 반영량을 줄여요.
+            effective_target = match_count
+            if comp_count < LOW_ACTIVITY_TARGET:
+                effective_target = min(match_count, LOW_ACTIVITY_TARGET)
+
+            # 경쟁전만으로 목표 경기 수를 못 채우면, 이미 받아둔 일반전 중 부족한 만큼만 합쳐요.
+            if comp_count < effective_target:
+                remaining = effective_target - comp_count
+                combined_matches = comp_matches + normal_matches[:remaining]
+                combined_stats = aggregate_match_stats(combined_matches, 닉네임, 태그, tier_id=tier_id, rr=rr)
+                if combined_stats is not None and combined_stats["matches_counted"] > comp_count:
+                    stats = combined_stats
+                    used_fallback = True
 
         if stats is None:
             embed = discord.Embed(
-                title=f"🎮 [{닉네임}#{태그}] 님의 발로란트 전적 리포트",
+                title=f"🎮 [{닉네임}#{태그}] 님의 발로란트 {'일반전 ' if unrated_only else ''}전적 리포트",
                 description=(
                     f"🏆 현재 티어: **{tier_name}**" + (f" ({rr} RR)" if rr is not None else "") + "\n\n"
-                    "최근 경기 기록을 찾지 못했어요. (경기 기록이 없거나 비공개일 수 있어요)"
+                    + (
+                        "최근 **일반전** 기록을 찾지 못했어요. (일반전을 안 했거나 기록이 비공개일 수 있어요)"
+                        if unrated_only else
+                        "최근 경기 기록을 찾지 못했어요. (경기 기록이 없거나 비공개일 수 있어요)"
+                    )
                 ),
                 color=0xFF4655,
             )
@@ -717,14 +810,19 @@ class Rank(commands.Cog):
             return
 
         # "상위 %" 계산용으로 이번 조회 결과를 저장해둬요.
-        record_stats(f"{닉네임}#{태그}", stats["kd"], stats["agwi_score"])
+        # 🎮 일반전만 본 기록은 안 넣어요 — 표본은 닉네임당 한 줄이라, 넣으면 그 사람의
+        #    기록이 일반전 숫자로 덮어써지고 남들의 상위 %까지 틀어져요.
+        if not unrated_only:
+            record_stats(f"{닉네임}#{태그}", stats["kd"], stats["agwi_score"])
 
         # 주간 악귀력(프로필 카드 · 주간 랭킹용) 스냅샷이에요.
         #
         # **본인 계정을 조회했을 때만** 적어요. 남의 계정을 대신 조회한 걸 그 사람 기록으로
         # 넣으면 안 되고, 조회한 사람 기록으로 넣으면 더더욱 안 되니까요.
         # 같은 주에 여러 번 돌리면 가장 높은 점수만 남아요(agwi_weekly_store 설명 참고).
-        if is_self_query:
+        # 🎮 그래서 일반전만 본 기록은 안 넣어요. "가장 높은 점수만 남는다"와 겹치면
+        #    일반전으로 점수를 끌어올려 주간 랭킹에 올리는 길이 생겨요.
+        if is_self_query and not unrated_only:
             await agwi_weekly_store.record(
                 interaction.user.id,
                 stats["agwi_score"],
@@ -743,10 +841,12 @@ class Rank(commands.Cog):
 
         # ---- 포지션 역할 자동 동기화 ----
         # 티어 역할과 동일하게, 등록된 본인 계정을 조회한 경우에만 적용돼요.
+        # 🎮 일반전만 볼 땐 건드리지 않아요. 경쟁전과 일반전에서 고르는 요원이 다른 사람은
+        #    모드를 바꿔 조회할 때마다 역할이 왔다 갔다 하게 돼요.
         position_sync_note = None
         top_position = stats.get("top_position")
 
-        if is_self_query and member is not None and top_position is not None:
+        if is_self_query and member is not None and top_position is not None and not unrated_only:
             try:
                 pos_result = await sync_position_role(member, top_position)
                 if pos_result["status"] == "new":
@@ -758,7 +858,9 @@ class Rank(commands.Cog):
             except discord.Forbidden:
                 position_sync_note = "⚠️ 봇에게 역할 관리 권한이 없어서 포지션 역할을 갱신하지 못했어요."
 
-        embed = build_summary_embed(닉네임, 태그, tier_name, rr, stats, comp_count, used_fallback, effective_target)
+        embed = build_summary_embed(
+            닉네임, 태그, tier_name, rr, stats, comp_count, used_fallback, effective_target, mode=mode
+        )
         if tier_id is not None and tier_id in self.tier_icons:
             embed.set_thumbnail(url=self.tier_icons[tier_id])
 
@@ -775,7 +877,7 @@ class Rank(commands.Cog):
             embed.add_field(name="티어 역할", value=role_sync_note, inline=False)
         if position_sync_note:
             embed.add_field(name="포지션 역할", value=position_sync_note, inline=False)
-        view = RankDetailView(닉네임, 태그, stats, comp_count, used_fallback)
+        view = RankDetailView(닉네임, 태그, stats, comp_count, used_fallback, mode=mode)
         await reply(embed=embed, view=view)
 
 

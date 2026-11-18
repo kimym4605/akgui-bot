@@ -281,8 +281,17 @@ def _asserts() -> list:
             lambda: tuple(r["reward"] for r in ms.RARITY.values()))
         add("미션-내용", "하루 최대", r"하루 최대 \*{0,2}(\d+)코인",
             lambda: (ms.MAX_DAILY_REWARD,))
-        add("봇-사용법", "미션 하루 최대", r"하루 최대 (\d+)코인\)\. 발로란트",
+        # 🚨 2026-11-18까지 이 줄은 `하루 최대 (\d+)코인\)\. 발로란트`였어요 — 그건 **FAQ 문구**고
+        #    채널 글은 `하루 최대 15코인) → 전체 목록은`이라 **한 번도 안 걸렸어요.** 그 사이
+        #    11/15 보상 인상(1·3·5 → 2·5·8, 리롤권 4 → 6)이 사흘간 반영 안 된 채 있었고요.
+        #    검사 문구는 **채널에 실제로 적힌 글**을 보고 맞출 것. 고칠 땐 `sync_usage_mission.py`.
+        add("봇-사용법", "미션 하루 최대", r"하루 최대 (\d+)코인\)",
             lambda: (ms.MAX_DAILY_REWARD,))
+        add("봇-사용법", "미션 희귀도별 보상",
+            r"흔함 (\d+) · [^\n]{0,3}보통 (\d+) · [^\n]{0,3}드묾 (\d+)코인",
+            lambda: tuple(r["reward"] for r in ms.RARITY.values()))
+        add("봇-사용법", "리롤 가격", r"미션 리롤권\*{0,2}\((\d+)코인\)",
+            lambda: (ms.REROLL_PRICE,))
     except Exception:                                  # noqa: BLE001
         pass
     try:

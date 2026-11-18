@@ -553,8 +553,9 @@ check("🚨 방을 실제로 만든 **뒤**에 올린다",
 check("🚨 COMMAND_MISSIONS에 '방만들기'가 없다 (중복 호출 방지)",
       "방만들기" not in mission_store.COMMAND_MISSIONS,
       f"{sorted(mission_store.COMMAND_MISSIONS)}")
+# ⚠️ "오상"은 2026-11-18에 여기서 뺐어요(로그인 안내만 봐도 깨졌어요) — 맨 아래 🛒 섹션.
 check("   └ 명령어로만 쓰는 것들은 그대로 남아 있다",
-      {"오상", "전적", "맵추천"} <= set(mission_store.COMMAND_MISSIONS),
+      {"전적", "맵추천"} <= set(mission_store.COMMAND_MISSIONS),
       f"{sorted(mission_store.COMMAND_MISSIONS)}")
 
 
@@ -633,10 +634,16 @@ check(f"최저 보상이 옛 고정값(1코인) 이상 — {_min_reward}코인",
 # 🚨 풀을 섞어서 비교하면 안 돼요(발로 5종 vs 서버 8종은 분모가 달라요).
 # 🔄 2026-11-15: 11/02~11/13 재측정값으로 바꿨어요(배정을 pick_missions로 복원, 분모 = 그날
 #    1개 이상 깬 사람). 이름은 옛 그대로 둬요 — 아래 검사들이 이 이름을 써요.
+# 🔄 2026-11-18: `val_kills15`를 68 → **44**로 바꿨어요. 조건이 15킬 → 20킬로 올라서
+#    옛 수치(68%)는 더 이상 이 미션의 난이도가 아니에요. 44는 **추정치**예요 —
+#    🔔 전적 카드 1,687건(10/18~11/18 · 25명)에서 "그날 최다 킬"이 15 이상인 날 82%,
+#    20 이상인 날 53% → 68 × 53/82. 2주쯤 지나면 `coin_log`로 다시 재서 바꿀 것.
+#    (맵 추천은 🟣 → 🔵로 내렸지만 **수치는 그대로** 42예요. 오상 43·전적 46과 같은 구간이라
+#     🔵가 맞는 자리고, 그래서 아래 역전 검사도 그대로 통과해요.)
 RATE_2026_11_02 = {
     "voice_together": 76, "attend_check": 53, "catch_fish": 49, "use_rank": 46,
     "use_myshop": 43, "use_map": 42, "create_room": 35, "play_gamble": 30,
-    "val_kd1": 74, "val_win": 73, "val_play": 72, "val_kills15": 68, "val_comp": 65,
+    "val_kd1": 74, "val_win": 73, "val_play": 72, "val_kills15": 44, "val_comp": 65,
 }
 check("실측 표가 미션 13종을 전부 덮는다",
       set(RATE_2026_11_02) == set(MISSIONS),
@@ -724,6 +731,229 @@ check("🚨 완주 보너스는 하루 1회", asyncio.run(mission_cog.pay_full_c
 # 리포트가 `미션:<키>`를 MISSIONS 키로 해석해요 — 보너스는 그 형식이면 안 돼요.
 check("완주 보너스 reason이 '미션:'으로 시작하지 않는다",
       not mission_cog.FULL_CLEAR_REASON.startswith("미션:"), mission_cog.FULL_CLEAR_REASON)
+
+
+# ==================================================================
+# 💰 "하루 최대 N코인"이 **실제로 받을 수 있는** 숫자인지 (2026-11-18)
+#
+# 🚨 전엔 `개수 × 최고 희귀도 보상 + 보너스`였어요. 맵 추천이 🟣 → 🔵로 내려가면서 🟣이
+#    2종만 남아 "3개 전부 🟣"인 날이 없어졌는데, 식은 그대로 29를 말하고 있었어요.
+#    안내문 세 곳(FAQ · `#🎯｜미션-내용` · `#🤖｜봇-사용법`)이 이 상수를 그대로 써요.
+# ==================================================================
+print("\n💰 하루 최대치")
+import itertools                                      # noqa: E402
+
+_LV = mission_store.LINKED_VALORANT_COUNT
+_shapes = (
+    [list(c) for c in itertools.combinations(SERVER_KEYS, DAILY_MISSION_COUNT)]
+    + [list(v) + list(s)
+       for v in itertools.combinations(VALORANT_KEYS, _LV)
+       for s in itertools.combinations(SERVER_KEYS, DAILY_MISSION_COUNT - _LV)]
+)
+_true_max = max(mission_store.total_reward(p) for p in _shapes) + mission_store.FULL_CLEAR_BONUS
+check(f"MAX_DAILY_REWARD({mission_store.MAX_DAILY_REWARD})가 가능한 배정 전부의 최대({_true_max})와 같다",
+      mission_store.MAX_DAILY_REWARD == _true_max,
+      f"{mission_store.MAX_DAILY_REWARD} vs {_true_max}")
+
+# 위 '가능한 배정'이 `pick_missions`가 실제로 내는 모양과 같은지도 봐요. 모양이 어긋나면
+# 위 검사는 엉뚱한 집합의 최대를 재게 돼요.
+_seen_max, _over, _odd = 0, [], []
+for _u in range(600):
+    for _d in ("2026-11-18", "2026-11-19", "2026-12-01"):
+        for _lk in (True, False):
+            _p = pick_missions(_u, _d, _lk, adult=True)
+            _t = mission_store.total_reward(_p) + mission_store.FULL_CLEAR_BONUS
+            _seen_max = max(_seen_max, _t)
+            if _t > mission_store.MAX_DAILY_REWARD:
+                _over.append((_u, _d, _lk, _p))
+            _nv = sum(1 for k in _p if MISSIONS[k]["kind"] == "valorant")
+            if _nv != (_LV if _lk else 0):
+                _odd.append((_u, _d, _lk, _p))
+check("🚨 실제 배정 3,600건 중 MAX_DAILY_REWARD를 넘는 날이 없다", not _over, str(_over[:2]))
+check("실제 배정의 발로 미션 수가 LINKED_VALORANT_COUNT와 같다", not _odd, str(_odd[:2]))
+check(f"🚨 그 최대치가 실제 배정에서 나온다 (도달 못 하는 숫자를 안내하지 않는다) — 관측 최대 {_seen_max}",
+      _seen_max == mission_store.MAX_DAILY_REWARD,
+      f"관측 {_seen_max} vs 상수 {mission_store.MAX_DAILY_REWARD}")
+
+
+# ==================================================================
+# 🎯 학살자 킬 수 (2026-11-18: 15킬 → `KILLS_TARGET`)
+#
+# 🚨 숫자가 **두 군데**(안내문 `desc` · 판정 `cogs/mission.py`)에 있었어요. 한쪽만 바꾸면
+#    "20킬이라고 써놓고 15킬에 깨지는" 상태가 돼요. 그래서 판정을 **실제로 돌려서** 봐요.
+# ==================================================================
+print("\n🎯 학살자 킬 수")
+import time as _time                                   # noqa: E402
+
+_KT = mission_store.KILLS_TARGET
+check(f"안내문에 {_KT}킬이 적혀 있다", f"{_KT}킬" in MISSIONS["val_kills15"]["desc"],
+      MISSIONS["val_kills15"]["desc"])
+check("🚨 판정 코드에 킬 수가 숫자로 박혀 있지 않다 (상수를 본다)",
+      re.search(r'\["kills"\]\s*>=\s*\d', read("cogs/mission.py")) is None
+      and "mission_store.KILLS_TARGET" in read("cogs/mission.py"))
+check("🚨 키 이름은 그대로다 (오늘 배정 문서 · 코인 장부가 이 이름을 써요)",
+      "val_kills15" in MISSIONS and MISSIONS["val_kills15"]["kind"] == "valorant")
+
+
+def _val_match(kills, mid):
+    """`_extract_player_match_stats`가 읽는 모양 그대로의 경기 하나(오늘 시작)."""
+    return {
+        "metadata": {"game_start": int(_time.time()), "mode": "Competitive", "matchid": mid},
+        "players": {"all_players": [{
+            "name": "Tester", "tag": "KR1", "team": "Red", "character": "Jett",
+            "stats": {"kills": kills, "deaths": 30, "assists": 2, "headshots": 5,
+                      "bodyshots": 20, "legshots": 1, "score": 4000},
+            "damage_made": 3000,
+        }]},
+        "teams": {"red": {"has_won": False, "rounds_won": 7, "rounds_lost": 13},
+                  "blue": {"has_won": True, "rounds_won": 13, "rounds_lost": 7}},
+    }
+
+
+_mcog = mission_cog.Mission.__new__(mission_cog.Mission)   # __init__은 루프를 켜서 건너뛰어요
+_mcog.bot = None
+mission_cog.match_feed.post_new_matches = _mk_async(lambda *a, **k: 0)
+riot_account_store.get_account = lambda uid: ("Tester", "KR1")
+try:
+    for _kills, _uid, _want in ((15, 9950, False), (_KT - 1, 9951, False), (_KT, 9952, True)):
+        install_doc(_uid, ["val_kills15", "use_map", "use_rank"])
+        _mcog._fetch_recent_matches = _mk_async(
+            lambda name, tag, user_id=None, _k=_kills: ([_val_match(_k, f"m{_k}")], 200))
+        _note = asyncio.run(_mcog._check_valorant(_uid, ["val_kills15"], FakeChannel()))
+        _got = "val_kills15" in done_of(_uid)
+        check(f"   한 경기 {_kills}킬 → {'완료' if _want else '미완료'}", _got is _want and _note is None,
+              f"done={done_of(_uid)} note={_note!r}")
+finally:
+    riot_account_store.get_account = lambda uid: None    # 위 스텁(비연동자)으로 되돌려요
+
+
+# ==================================================================
+# 🛒 "오늘의 상점 확인"은 **상점이 실제로 떠야** 올라간다 (2026-11-18)
+#
+# 🚨 `#💡｜기능-추천방` 11/16 신고: "오상 미션 열기 전에 보상 지급됩니다 / 링크 붙여넣기 전에
+#    보상 들어와요". 쿠키를 등록 안 한 사람이 `/오상`을 치면 **로그인 안내만** 뜨고 명령어가
+#    정상 종료돼서, `COMMAND_MISSIONS`(명령어 완료 감지)가 그걸 완료로 잡았어요.
+# → `cogs/myshop.py`가 상점을 **보낸 뒤** 직접 올려요. 여기선 `/오상`의 세 길을 실제로 돌려봐요.
+# ==================================================================
+print("\n🛒 오상 미션 배선")
+# 🚨 윈도우엔 시간대 데이터베이스가 없어요(`tzdata` 패키지가 따로 있어야 해요). `cogs/myshop.py`는
+#    import하는 순간 `ZoneInfo("Asia/Seoul")`을 만들어서, 그대로면 이 PC에선 import조차 안 돼요
+#    (운영 리눅스 이미지엔 시스템 tzdata가 있어서 멀쩡해요). 없을 때만 고정 +9시간으로 갈아끼워요 —
+#    한국은 서머타임이 없어서 이 검사 범위에선 같은 시각이에요.
+import zoneinfo as _zi                                 # noqa: E402
+
+try:
+    _zi.ZoneInfo("Asia/Seoul")
+except _zi.ZoneInfoNotFoundError:
+    from datetime import timedelta as _td, timezone as _tz   # noqa: E402
+    _RealZoneInfo = _zi.ZoneInfo
+    _zi.ZoneInfo = lambda key: (_tz(_td(hours=9), "KST") if key == "Asia/Seoul"
+                                else _RealZoneInfo(key))
+    print("  (이 PC엔 tzdata가 없어서 KST를 고정 +9시간으로 대신했어요)")
+
+from cogs import myshop as myshop_cog                  # noqa: E402
+
+check("🚨 COMMAND_MISSIONS에 '오상'이 없다 (명령어만 쳐도 깨지는 버그 방지)",
+      "오상" not in mission_store.COMMAND_MISSIONS and
+      "use_myshop" not in mission_store.COMMAND_MISSIONS.values(),
+      f"{mission_store.COMMAND_MISSIONS}")
+
+_BLOCK = myshop_cog.riot_auth.CLOUDFLARE_BLOCK_MESSAGE
+_shop_handler = myshop_cog.MyShop.my_shop.callback
+_shop_cog = myshop_cog.MyShop.__new__(myshop_cog.MyShop)   # __init__은 루프를 켜서 건너뛰어요
+
+
+class _FakeShopView:
+    message = None
+
+
+# 상점 화면 그리기(임베드 조립)는 이 검사의 관심사가 아니라 가짜로 둬요. 그 **뒤**의 미션 배선은 진짜예요.
+myshop_cog._shop_screen = lambda user, payload, **kw: ([], _FakeShopView())
+myshop_cog._remember_owned = lambda *a, **k: None
+myshop_cog.riot_auth.riot_id_from_id_token = lambda token: "Tester#KR1"
+_PICKS = ["use_myshop", "use_map", "use_rank"]
+
+
+def _shop_done(uid):
+    return "use_myshop" in done_of(uid)
+
+
+# ⒜ 쿠키 미등록: `/오상` → 로그인 안내만. 신고된 바로 그 경우예요.
+install_doc(9901, _PICKS)
+granted.clear()
+myshop_cog.riot_session_store.default_account_key = lambda uid: ""
+_inter = FakeInter(9901)
+asyncio.run(_shop_handler(_shop_cog, _inter, True))
+# 명령어가 "정상 종료"됐을 때 도는 훅까지 실제로 태워요(옛 버그는 여기서 완료됐어요).
+asyncio.run(mission_cog.Mission.on_app_command_completion(
+    _mcog, _inter, type("Cmd", (), {"name": "오상"})()))
+check("🚨 로그인 안내만 뜬 `/오상`은 미션을 안 올린다 (신고된 버그)",
+      not _shop_done(9901) and not granted, f"done={done_of(9901)} granted={granted}")
+
+# ⒝ 쿠키 등록자: 상점이 떴다 → 완료 + 코인
+install_doc(9902, _PICKS)
+granted.clear(); private_sent.clear()
+myshop_cog.riot_session_store.default_account_key = lambda uid: "acc1"
+myshop_cog._load_shop_for_account = _mk_async(
+    lambda uid, key, use_cache=True: ({"storefront": {}, "wallet": None, "owned": None,
+                                       "riot_id": "Tester#KR1"}, ""))
+asyncio.run(_shop_handler(_shop_cog, FakeInter(9902), True))
+check("🛒 등록 계정으로 상점이 뜨면 미션이 완료된다", _shop_done(9902), str(done_of(9902)))
+check("🛒 코인이 희귀도만큼 한 번 지급됐다",
+      [(a, r) for u, a, r in granted if u == "9902"]
+      == [(mission_store.reward_of("use_myshop"), "미션:use_myshop")], str(granted))
+# ⚠️ 상점 화면은 본문 없이(embeds만) 가서 기록의 첫 칸이 문자열이 아니에요 → 문자열만 봐요.
+check("🔒 완료 알림은 본인만 보이게 갔다",
+      any(isinstance(c, str) and "오늘의 상점 확인" in c and eph is True
+          for c, eph in private_sent),
+      str([(c, e) for c, e in private_sent if isinstance(c, str)]))
+
+# 같은 날 한 번 더 열어도 코인이 또 가면 안 돼요
+granted.clear()
+asyncio.run(_shop_handler(_shop_cog, FakeInter(9902), True))
+check("🚨 하루에 두 번 열어도 코인은 한 번만", not granted, str(granted))
+
+# ⒞ 등록 계정인데 로그인이 만료됨 → 다시 로그인하면 되는 실패라 인정 안 해요
+install_doc(9903, _PICKS)
+granted.clear()
+myshop_cog._load_shop_for_account = _mk_async(
+    lambda uid, key, use_cache=True: (None, "등록해둔 로그인이 만료됐어요."))
+asyncio.run(_shop_handler(_shop_cog, FakeInter(9903), True))
+check("🚨 로그인 만료로 못 띄우면 미션이 안 올라간다", not _shop_done(9903) and not granted,
+      f"done={done_of(9903)} granted={granted}")
+
+# ⒟ 🚧 라이엇이 봇을 막아서 못 띄움 → 유저가 더 할 수 있는 게 없으니 인정해요
+install_doc(9904, _PICKS)
+granted.clear()
+myshop_cog._load_shop_for_account = _mk_async(lambda uid, key, use_cache=True: (None, _BLOCK))
+asyncio.run(_shop_handler(_shop_cog, FakeInter(9904), True))
+check("🚧 라이엇 차단으로 못 띄운 건 인정한다 (아무도 못 깨는 슬롯 방지)",
+      _shop_done(9904), str(done_of(9904)))
+
+# ⒠ URL 붙여넣기 · 쿠키 등록 길(`_send_shop`)도 같은 규칙이어야 해요.
+#    (결과, 상점이 떴나, 미션이 올라가나) — 🚧 차단은 **상점은 안 떴는데 미션은 인정**이라 둘이 달라요.
+for _uid, _result, _shown, _want, _label in (
+    (9905, ({"x": 1}, None, None, ""), True, True, "URL 붙여넣기로 상점이 뜨면 완료된다"),
+    (9906, (None, None, None, _BLOCK), False, True, "URL 붙여넣기 뒤 라이엇 차단이면 인정한다"),
+    (9907, (None, None, None, "상점 정보를 못 받아왔어요. 잠시 후 다시 시도해주세요."), False, False,
+     "🚨 URL 붙여넣기 뒤 일시 오류면 안 올라간다"),
+    (9908, (None, None, None, "로그인 정보를 읽지 못했어요. 다시 시도해주세요."), False, False,
+     "🚨 엉뚱한 URL을 붙여넣으면 안 올라간다 (아무 글자나 넣고 5코인 방지)"),
+):
+    install_doc(_uid, _PICKS)
+    myshop_cog._fetch_storefront = _mk_async(lambda s, a, i, who="", _r=_result: _r)
+    _ok = asyncio.run(myshop_cog._send_shop(FakeInter(_uid), None, "access", "id"))
+    check(f"   {_label}", _shop_done(_uid) is _want and _ok is _shown,
+          f"done={done_of(_uid)} 상점표시={_ok}")
+
+# ⒡ 순서: 상점을 **보낸 뒤**에 올려요. 앞에 두면 전송이 실패해도 미션이 깨져요.
+_ms_tree = _ast.parse(read("cogs/myshop.py"))
+_render = next((n for n in _ast.walk(_ms_tree)
+                if isinstance(n, _ast.AsyncFunctionDef) and n.name == "_render_shop"), None)
+_rbody = _ast.unparse(_render) if _render else ""
+check("🚨 `_render_shop`이 상점을 보낸 뒤에 미션을 올린다",
+      0 <= _rbody.find("followup.send") < _rbody.find("_credit_shop_mission"),
+      f"send={_rbody.find('followup.send')} credit={_rbody.find('_credit_shop_mission')}")
 
 
 # ==================================================================

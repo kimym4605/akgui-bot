@@ -46,7 +46,7 @@ MATCH_FETCH_SIZE = 10
 DEFAULT_REGION = "kr"
 
 # ── 발로란트 미션 자동 판정 ────────────────────────────────────────────────
-# 발로란트 미션(오늘 1판·1승·15킬·KD 1.0·경쟁전)은 원래 유저가 `/미션`을 직접 쳐야만
+# 발로란트 미션(오늘 1판·1승·한 경기 N킬·KD 1.0·경쟁전)은 원래 유저가 `/미션`을 직접 쳐야만
 # 판정됐어요. 게임 끝나고 굳이 디스코드에 와서 `/미션`을 칠 이유가 없다 보니 실제로는
 # 거의 안 깨졌고(2026-09-22 실측: 하루 3개 중 평균 0.35개, 3개를 다 깬 날은 0일),
 # 코인이 설계대로 안 돌았어요. 그래서 봇이 주기적으로 대신 확인해줘요.
@@ -491,7 +491,9 @@ class Mission(commands.Cog):
             elif key == "val_win":
                 achieved = any(s["won"] for s in stats)
             elif key == "val_kills15":
-                achieved = any(s["kills"] >= 15 for s in stats)
+                # 🚨 킬 수를 여기에 숫자로 적지 않아요. 안내문(`MISSIONS[...]["desc"]`)과 같은
+                #    상수를 봐야 "20킬이라고 써놓고 15킬에 깨지는" 일이 없어요.
+                achieved = any(s["kills"] >= mission_store.KILLS_TARGET for s in stats)
             elif key == "val_kd1":
                 achieved = any(s["kills"] / max(s["deaths"], 1) >= 1.0 for s in stats)
             elif key == "val_comp":

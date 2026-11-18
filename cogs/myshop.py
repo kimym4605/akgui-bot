@@ -42,6 +42,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from cogs import mission
 from utils.channel_check import restrict_to_channel
 from utils.interaction_ack import ack
 from utils import (
@@ -1221,6 +1222,31 @@ def _offered_skin_names(storefront: dict) -> list[str]:
     return names
 
 
+async def _credit_shop_mission(interaction: discord.Interaction) -> None:
+    """🎯 '오늘의 상점 확인' 미션을 올려요. **상점이 실제로 뜬 자리**에서만 불러요.
+
+    🚨 전엔 `COMMAND_MISSIONS["오상"]`(= 명령어가 에러 없이 끝나면 완료)이었어요. 그런데
+       쿠키를 등록 안 한 사람은 `/오상`을 쳐도 **로그인 안내만** 뜨고 명령어가 끝나요 —
+       로그인도 URL 붙여넣기도 안 했는데 5코인이 들어왔어요(2026-11-16 `#💡｜기능-추천방`
+       신고: "링크 붙여넣기 전에 보상 들어와요").
+    ⚠️ 새로고침·계정 전환에는 안 달았어요. 그 화면은 상점이 이미 한 번 뜬 뒤라서요.
+    ⚠️ 예외는 `on_action`이 안에서 삼켜요. 미션 때문에 상점 화면이 깨지면 안 되니까요."""
+    await mission.on_action(interaction.user.id, "use_myshop", interaction, interaction.user)
+
+
+async def _credit_if_riot_blocked(interaction: discord.Interaction, error: str) -> None:
+    """🚧 상점을 못 보여준 이유가 **라이엇의 봇 차단**이면 미션은 인정해요.
+
+    유저는 로그인까지 다 했고 더 할 수 있는 게 없어요. 안 그러면 차단이 풀릴 때까지 이
+    미션이 **아무도 못 깨는 슬롯**이 되고, 배정받은 사람은 그날 완주 보너스까지 같이 막혀요.
+    🚨 그 밖의 실패(로그인 만료 · 일시 오류 · URL 오타)는 인정하지 않아요. 다시 하면 되는
+       실패고, 여기까지 인정하면 "아무 글자나 붙여넣고 5코인"이 돼요.
+    ⚠️ 안내문(`followup.send`)은 부르는 쪽에 그대로 둬요. 여기로 같이 옮기면
+       `scan_interaction_latency.py`가 그 함수를 "아직 응답 안 받아둔 핸들러"로 봐요."""
+    if error == riot_auth.CLOUDFLARE_BLOCK_MESSAGE:
+        await _credit_shop_mission(interaction)
+
+
 async def _render_shop(
     interaction: discord.Interaction,
     payload: dict,
@@ -1236,6 +1262,9 @@ async def _render_shop(
     )
     message = await interaction.followup.send(embeds=embeds, view=view, ephemeral=not public, wait=True)
     view.message = message
+    # 🎯 미션은 **상점을 보낸 뒤**에 올려요. `/오상`(등록 계정) · URL 붙여넣기 · 쿠키 등록,
+    #    세 길이 전부 이 함수로 모이니 여기 한 곳이면 돼요.
+    await _credit_shop_mission(interaction)
     return True
 
 
@@ -1256,6 +1285,7 @@ async def _send_shop(
     )
     if storefront is None:
         await interaction.followup.send(error, ephemeral=True)
+        await _credit_if_riot_blocked(interaction, error)
         return False
 
     # 위시리스트 자동완성에서도 "이미 보유"를 알려주려고 결과를 기억해둬요.
@@ -1889,10 +1919,13 @@ class MyShop(commands.Cog):
             payload, error = await _load_shop_for_account(interaction.user.id, account_key)
             if payload is None:
                 await interaction.followup.send(error, ephemeral=True)
+                await _credit_if_riot_blocked(interaction, error)
                 return
             await _render_shop(interaction, payload, public=공개, account_key=account_key)
             return
 
+        # 🚨 여기서부터는 **로그인 안내만** 띄우고 끝나요. 미션(오늘의 상점 확인)은 이 화면으로는
+        #    안 올라가요 — 로그인해서 상점이 실제로 떴을 때 `_render_shop`이 올려요.
         embed = discord.Embed(
             title="🔫 오상 · 오늘의 상점 확인하기",
             description=(
