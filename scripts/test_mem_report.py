@@ -46,7 +46,11 @@ def _load(names):
     잘라내서 돌려요."""
     start = SRC.index("MEM_REPORT_INTERVAL")
     end = SRC.index("class MainBot")
-    ns = {"os": os, "time": __import__("time")}
+    # ⚠️ 잘라낸 구간에 `async def _beat_loop(bot: commands.Bot)`가 있어요. 타입 표기는
+    #    **def를 실행하는 순간** 평가돼서, `commands`가 없으면 여기서 NameError로 죽어요
+    #    (2026-11-18에 발견 — 그동안 이 테스트가 통째로 안 돌고 있었어요).
+    from discord.ext import commands
+    ns = {"os": os, "time": __import__("time"), "commands": commands}
     exec(SRC[start:end], ns)
     return {n: ns[n] for n in names}
 
