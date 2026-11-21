@@ -19,7 +19,18 @@
 
 ⚠️ 코인은 **베팅 시점에 바로 차감**하고, 결과가 나오면 돌려받을 몫만 다시 넣어요.
    반대로 하면(이기면 주고 지면 빼기) 중간에 봇이 죽었을 때 공짜 판이 돼요.
+
+## 🎨 그림 (2026-11-22)
+
+슬롯은 **릴이 도는 GIF**, 하이로우는 눈금 그림, 블랙잭은 **카드가 놓인 테이블**이 같이 떠요
+(`utils/casino_art.py`). 지켜야 할 순서가 하나 있어요:
+
+🚨 **정산이 먼저, 그림은 나중.** 코인을 넣고(`pay_out`) 난 뒤에 그림을 그려요. 그림은 덤이라
+   못 그리거나 못 보내면 **예전처럼 글만** 보내요(`send_with_art`·`BlackjackView.show`).
+   그림 때문에 결과를 못 보는 일도, 그림이 결과보다 먼저 나가는 일도 없어야 해요.
 """
+import asyncio
+import io
 import logging
 
 import discord
@@ -28,6 +39,7 @@ from discord.ext import commands
 
 from cogs import mission
 from utils import adult_check
+from utils import casino_art
 from utils import casino_games as games
 from utils import casino_store, coin_wallet
 from utils.casino_store import DAILY_LIMIT, EXTEND_BONUS, MAX_BET, MIN_BET
@@ -46,6 +58,16 @@ BJ_TIMEOUT = 120
 
 # 🔓 한도 연장권 버튼이 살아있는 시간. 막힌 자리에서 바로 누르는 거라 짧아도 돼요.
 EXTEND_VIEW_TIMEOUT = 120
+
+# 🎨 그림 파일 이름. 임베드가 `attachment://이름`으로 가리켜요. -> utils/casino_art.py
+SLOT_SPIN_FILE = "slot_spin.gif"
+SLOT_FILE = "slot.jpg"
+HIGHLOW_FILE = "highlow.jpg"
+BJ_FILE = "blackjack.jpg"
+LOBBY_FILE = "casino.jpg"
+# 🎰 릴이 다 멈춘 뒤 결과 글을 띄우기까지 **더** 기다리는 시간(초). GIF는 유저 화면에 다 내려받아진
+#    뒤에야 돌기 시작해요. 딱 맞춰 바꾸면 릴이 멈추기도 전에 결과가 먼저 떠요.
+SLOT_REVEAL_PAD = 0.9
 
 # 🚨 `coin_log`에 남는 이름. **"도박"으로 시작하면 안 돼요.**
 #    `scripts/report_economy.py`가 `도박`으로 시작하는 spend를 **베팅액**으로 세서,
@@ -269,6 +291,34 @@ def result_line(bet: int, payout: int, balance: int) -> str:
     return f"{head}  (건 돈 {bet} · 받은 돈 {payout} · 남은 코인 **{balance}개**)"
 
 
+def art_files(embed: discord.Embed, card: bytes | None, name: str) -> list[discord.File]:
+    """그림이 있으면 임베드에 걸고 첨부 목록을 돌려줘요. 없으면 그림 자리를 비우고 **빈 목록**.
+
+    🚨 돌려받은 목록은 메시지를 **고칠 때도 항상** `attachments=`로 넘겨요 - 빈 목록이어도요.
+       안 넘기면 지난 그림이 그대로 남아요(블랙잭이면 **한 장 전의 패**가 보이는 채로요)."""
+    if not card:
+        embed.set_image(url=None)
+        return []
+    embed.set_image(url=f"attachment://{name}")
+    return [discord.File(io.BytesIO(card), name)]
+
+
+async def send_with_art(interaction: discord.Interaction, embed: discord.Embed,
+                        card: bytes | None, name: str, **kwargs) -> discord.WebhookMessage:
+    """화면을 보내요. 그림을 붙였다가 실패하면 **글만으로 한 번 더** 보내요.
+
+    코인은 이미 움직인 뒤라, 그림 한 장 때문에 결과를 못 보면 안 돼요. 글만으로도 실패하면
+    그건 예전과 같은 실패라 그대로 올려 보내요(부른 쪽이 정해요 - 블랙잭은 환불해요)."""
+    files = art_files(embed, card, name)
+    if files:
+        try:
+            return await interaction.followup.send(embed=embed, files=files, wait=True, **kwargs)
+        except discord.HTTPException:
+            log.warning("🎨 그림을 붙인 화면을 못 보냈어요(%s) - 글만 다시 보내요", name, exc_info=True)
+            art_files(embed, None, name)
+    return await interaction.followup.send(embed=embed, wait=True, **kwargs)
+
+
 class BlackjackView(discord.ui.View):
     def __init__(self, cog: "Casino", user_id: int, bet: int, deck: list[int],
                  player: list[int], dealer: list[int]):
@@ -281,6 +331,15 @@ class BlackjackView(discord.ui.View):
         self.dealer = dealer
         self.message: discord.Message | None = None
         self.done = False
+        # 🎨 카드 무늬(♠♥◆♣)는 **그림용 꾸밈**이에요 - 덱에는 숫자만 있어요. 한 번 정한 무늬가
+        #    히트할 때마다 바뀌면 안 되니 판이 끝날 때까지 여기 적어 둬요.
+        self.suit_book = casino_art.SuitBook()
+        self.player_suits: list[str] = []
+        self.dealer_suits: list[str] = []
+        # 🚨 버튼을 연달아 누르면 "카드 뽑기 → 그림 그리기 → 화면 고치기"가 **겹쳐 돌아요**.
+        #    늦게 끝난 쪽이 화면을 덮으면 한 장 전의 판이 남아요. 한 번에 하나씩만 돌게 줄을 세워요.
+        #    (`ack`는 줄 **밖**에서 먼저 해요 - 줄에서 기다리다 3초를 넘기면 안 되니까요.)
+        self.turn = asyncio.Lock()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -306,8 +365,49 @@ class BlackjackView(discord.ui.View):
         embed.set_footer(text=f"베팅 {self.bet}코인 · 딜러는 {games.BJ_DEALER_STANDS_AT} 이상이면 멈춰요")
         return embed
 
+    async def table_art(self, *, reveal: bool, note: str = "", outcome: int | None = None) -> bytes | None:
+        """🎨 지금 판의 테이블 그림(실패하면 None). `reveal=False`면 딜러 둘째 장은 뒷면이에요.
+
+        🚨 **절대 예외를 올리지 않아요.** 판을 처음 띄우는 자리에서 여기가 터지면 코인만 빠지고
+           판이 안 열려요(환불은 디스코드 전송 실패만 잡아요)."""
+        try:
+            self.suit_book.extend(self.player_suits, self.player)
+            self.suit_book.extend(self.dealer_suits, self.dealer)
+            return await casino_art.blackjack_card(
+                self.dealer, self.player, dealer_suits=list(self.dealer_suits),
+                player_suits=list(self.player_suits), reveal=reveal, note=note,
+                outcome=outcome, bet=self.bet)
+        except Exception:                                    # noqa: BLE001
+            log.exception("🎨 블랙잭 그림 준비에 실패했어요 - 글만 보내요 (user=%s)", self.user_id)
+            return None
+
+    async def show(self, interaction: discord.Interaction | None, embed: discord.Embed,
+                   card: bytes | None) -> None:
+        """판 화면을 고쳐요. interaction이 None이면(타임아웃) 처음 띄운 메시지를 직접 고쳐요.
+
+        🚨 `edit_original_response`예요. 부르는 쪽(`hit`·`stand`)이 **이미 `ack`로 받아둔**
+           상호작용이라 `response.*`를 다시 쓸 수 없어요.
+        🚨 `attachments=`를 **항상** 넘겨요(`art_files` 주석). 그림 때문에 실패하면 글만으로
+           한 번 더 해요 - 정산은 끝났는데 화면이 안 바뀌면 이겼는지 졌는지 못 봐요."""
+        if interaction is not None:
+            edit = interaction.edit_original_response
+        elif self.message is not None:
+            edit = self.message.edit
+        else:
+            return
+        files = art_files(embed, card, BJ_FILE)
+        try:
+            await edit(embed=embed, view=self, attachments=files)
+        except discord.HTTPException:
+            if not files:
+                raise
+            log.warning("🎨 블랙잭 그림을 붙인 화면을 못 고쳤어요 - 글만 다시 보내요", exc_info=True)
+            await edit(embed=embed, view=self, attachments=art_files(embed, None, BJ_FILE))
+
     async def finish(self, interaction: discord.Interaction | None):
-        """딜러를 돌리고 정산해요. interaction이 None이면 타임아웃 자동 정산이에요."""
+        """딜러를 돌리고 정산해요. interaction이 None이면 타임아웃 자동 정산이에요.
+
+        ⚠️ 부르는 쪽이 `self.turn`을 **잡은 채로** 불러요(여기서 또 잡으면 영영 안 풀려요)."""
         if self.done:
             return
         self.done = True
@@ -316,7 +416,11 @@ class BlackjackView(discord.ui.View):
         if games.hand_value(self.player) <= 21:
             games.dealer_play(self.dealer, self.deck)
         multiplier, note = games.settle_blackjack(self.player, self.dealer)
+        # 왜 `ack`로 미리 받아두나: 이 `pay_out()`이 Atlas를 다녀와요. 3초를 넘기면
+        # 배당은 들어갔는데 **화면이 안 바뀌고**, `self.done`이 True라 다시 눌러도
+        # 아무 일이 없어서 **이겼는지 졌는지 영구히 못 봐요.**
         payout, balance = await pay_out(self.user_id, self.bet, multiplier)
+        log.info("🃏 블랙잭: %s %d코인 → %d코인", self.user_id, self.bet, payout)
 
         color = WIN_COLOR if payout > self.bet else (HOUSE_COLOR if payout == self.bet else LOSE_COLOR)
         embed = self.table_embed(reveal=True, note=note, color=color)
@@ -325,24 +429,19 @@ class BlackjackView(discord.ui.View):
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
 
-        log.info("🃏 블랙잭: %s %d코인 → %d코인", self.user_id, self.bet, payout)
+        card = await self.table_art(reveal=True, note=note, outcome=multiplier)
         if interaction is not None:
-            # 🚨 `edit_original_response`예요. 부르는 쪽(`hit`·`stand`)이 **이미 `ack`로
-            #    받아둔** 상호작용이라 `response.*`를 다시 쓸 수 없어요.
-            #
-            #    왜 받아두나: 바로 위 `pay_out()`이 Atlas를 다녀와요. 3초를 넘기면
-            #    배당은 들어갔는데 **화면이 안 바뀌고**, `self.done`이 True라 다시
-            #    눌러도 아무 일이 없어서 **이겼는지 졌는지 영구히 못 봐요.**
-            await interaction.edit_original_response(embed=embed, view=self)
-        elif self.message is not None:
-            try:
-                await self.message.edit(embed=embed, view=self)
-            except discord.HTTPException:
-                pass
+            await self.show(interaction, embed, card)
+            return
+        try:
+            await self.show(None, embed, card)
+        except discord.HTTPException:
+            pass          # 메시지가 사라졌어도 정산은 끝난 상태예요
 
     async def on_timeout(self):
         # 버튼만 꺼버리면 차감된 코인이 허공에 떠요. 자동으로 스탠드 처리해서 정산해요.
-        await self.finish(None)
+        async with self.turn:
+            await self.finish(None)
 
     # ⚠️ 여기 이모지로 `🂠`(U+1F0A0 카드 뒷면)을 썼다가 **블랙잭이 통째로 터졌어요**
     # (2026-10-05). 유니코드 '카드' 블록 문자는 생긴 건 이모지 같아도 디스코드가
@@ -356,11 +455,17 @@ class BlackjackView(discord.ui.View):
         if not await ack(interaction):
             return
 
-        self.player.append(self.deck.pop())
-        if games.hand_value(self.player) >= 21:
-            await self.finish(interaction)
-            return
-        await interaction.edit_original_response(embed=self.table_embed(reveal=False), view=self)
+        async with self.turn:
+            # 줄에서 기다리는 사이에 판이 끝났을 수 있어요(연타 · 타임아웃). 끝난 판에 카드를
+            # 더 얹으면 정산된 패와 화면이 달라져요.
+            if self.done:
+                return
+            self.player.append(self.deck.pop())
+            if games.hand_value(self.player) >= 21:
+                await self.finish(interaction)
+                return
+            await self.show(interaction, self.table_embed(reveal=False),
+                            await self.table_art(reveal=False))
 
     @discord.ui.button(label="스탠드", emoji="✋", style=discord.ButtonStyle.secondary)
     async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -369,7 +474,8 @@ class BlackjackView(discord.ui.View):
         #    코인이 허공에 뜨지 않아요.
         if not await ack(interaction):
             return
-        await self.finish(interaction)
+        async with self.turn:
+            await self.finish(interaction)
 
 
 class Casino(commands.Cog):
@@ -392,6 +498,7 @@ class Casino(commands.Cog):
 
         symbols, multiplier, note = games.spin_slot()
         payout, balance = await pay_out(interaction.user.id, 금액, multiplier)
+        log.info("🎰 슬롯: %s %d코인 → %d코인", interaction.user.id, 금액, payout)
 
         embed = discord.Embed(
             title="🎰 슬롯",
@@ -399,8 +506,41 @@ class Casino(commands.Cog):
             color=WIN_COLOR if payout > 금액 else (HOUSE_COLOR if payout == 금액 else LOSE_COLOR),
         )
         embed.add_field(name="결과", value=result_line(금액, payout, balance), inline=False)
-        await interaction.followup.send(embed=embed)
-        log.info("🎰 슬롯: %s %d코인 → %d코인", interaction.user.id, 금액, payout)
+
+        # 🎨 릴이 도는 GIF를 먼저 띄우고, 다 멈춘 뒤에 결과로 바꿔요. **정산은 위에서 이미 끝났어요**
+        #    - 여기서부터는 보여주는 일뿐이라, 어디서 실패해도 결과 글은 꼭 나가게 해요.
+        art = await casino_art.slot_card(symbols, multiplier)
+        if art is None:
+            await interaction.followup.send(embed=embed)      # 그림을 못 그렸어요 → 예전 화면
+            return
+        spin_gif, still = art
+        spinning = discord.Embed(title="🎰 슬롯", color=HOUSE_COLOR,
+                                 description=f"**{금액}코인**을 걸었어요 · 릴이 돌아가요…")
+        spinning.set_image(url=f"attachment://{SLOT_SPIN_FILE}")
+        try:
+            await interaction.followup.send(
+                embed=spinning, file=discord.File(io.BytesIO(spin_gif), SLOT_SPIN_FILE))
+        except discord.HTTPException:
+            log.warning("🎰 슬롯 GIF를 못 보냈어요 - 글만 보내요", exc_info=True)
+            await interaction.followup.send(embed=embed)
+            return
+
+        await asyncio.sleep(casino_art.slot_seconds(multiplier) + SLOT_REVEAL_PAD)
+        # 그림에 릴이 다 보이니 글의 큰 이모지 줄은 한 줄로 줄여요.
+        embed.description = f"{' '.join(symbols)} · {note}"
+        try:
+            # 움직이는 GIF를 **멈춘 그림**으로 바꿔요. 그대로 두면 화면에 다시 들어올 때마다
+            # 릴이 처음부터 다시 돌아요.
+            await interaction.edit_original_response(
+                embed=embed, attachments=art_files(embed, still, SLOT_FILE))
+        except discord.HTTPException:
+            log.warning("🎰 슬롯 결과 그림으로 못 바꿨어요 - 글만 고쳐요", exc_info=True)
+            try:
+                await interaction.edit_original_response(
+                    embed=embed, attachments=art_files(embed, None, SLOT_FILE))
+            except discord.HTTPException:
+                log.exception("🎰 슬롯 결과를 화면에 못 띄웠어요 (user=%s · %d코인 → %d코인)",
+                              interaction.user.id, 금액, payout)
 
     # ------------------------------------------------------------------
     @group.command(name="하이로우", description="1~100 중 하나를 굴려요. 높다(56↑) / 낮다(45↓) 맞히면 2배")
@@ -420,19 +560,22 @@ class Casino(commands.Cog):
 
         number, multiplier, note = games.roll_highlow(선택)
         payout, balance = await pay_out(interaction.user.id, 금액, multiplier)
+        log.info("🎲 하이로우: %s %d코인 → %d코인", interaction.user.id, 금액, payout)
 
         picked = "⬆️ 높다" if 선택 == "high" else "⬇️ 낮다"
+        # 🎨 그림에 숫자가 크게 나오니, 그림이 있을 땐 글의 큰 숫자 줄(`# 83`)을 빼요.
+        card = await casino_art.highlow_card(number, 선택, multiplier)
         embed = discord.Embed(
             title="🎲 하이로우",
-            description=f"고른 쪽: {picked}\n# {number}\n{note}",
+            description=(f"고른 쪽: {picked}\n{note}" if card
+                         else f"고른 쪽: {picked}\n# {number}\n{note}"),
             color=WIN_COLOR if payout > 금액 else LOSE_COLOR,
         )
         embed.add_field(name="결과", value=result_line(금액, payout, balance), inline=False)
         embed.set_footer(
             text=f"{games.HIGHLOW_LOW_MAX + 1}~{games.HIGHLOW_HIGH_MIN - 1}은 하우스 몫이에요"
         )
-        await interaction.followup.send(embed=embed)
-        log.info("🎲 하이로우: %s %d코인 → %d코인", interaction.user.id, 금액, payout)
+        await send_with_art(interaction, embed, card, HIGHLOW_FILE)
 
     # ------------------------------------------------------------------
     @group.command(name="블랙잭", description="딜러와 21 승부. 무승부는 돌려드려요")
@@ -457,21 +600,24 @@ class Casino(commands.Cog):
             games.dealer_play(dealer, deck)
             multiplier, note = games.settle_blackjack(player, dealer)
             payout, balance = await pay_out(interaction.user.id, 금액, multiplier)
+            log.info("🃏 블랙잭(즉시): %s %d코인 → %d코인", interaction.user.id, 금액, payout)
             embed = view.table_embed(reveal=True, note=note,
                                      color=WIN_COLOR if payout > 금액 else HOUSE_COLOR)
             embed.add_field(name="결과", value=result_line(금액, payout, balance), inline=False)
-            await interaction.followup.send(embed=embed)
-            log.info("🃏 블랙잭(즉시): %s %d코인 → %d코인", interaction.user.id, 금액, payout)
+            await send_with_art(
+                interaction, embed,
+                await view.table_art(reveal=True, note=note, outcome=multiplier), BJ_FILE)
             return
 
         # 🚨 판을 띄우지 못하면 **코인과 한도를 반드시 돌려줘야** 해요. 코인은 이미 빠진
         # 뒤라, 여기서 터지면 유저는 하지도 않은 판에 돈을 낸 셈이 돼요.
         # 2026-10-05에 실제로 그랬어요 — 버튼 이모지가 잘못돼서 디스코드가 400을 냈고,
         # 한 사람이 5코인과 하루 한도 5를 날렸어요(그걸로 이 버그를 발견했어요).
+        # 🎨 그림 때문에 못 띄운 거면 `send_with_art`가 글만으로 한 번 더 해봐요. 그것도 안 되면 환불.
         try:
-            view.message = await interaction.followup.send(
-                embed=view.table_embed(reveal=False), view=view, wait=True
-            )
+            view.message = await send_with_art(
+                interaction, view.table_embed(reveal=False),
+                await view.table_art(reveal=False), BJ_FILE, view=view)
         except discord.HTTPException:
             view.done = True
             view.stop()
@@ -603,14 +749,16 @@ class Casino(commands.Cog):
                  "🔓로 늘린 한도는 다음 날에도 유지돼요."
         )
 
+        # 🎨 도박장 그림. 못 그리면 글만 나가요.
+        card = await casino_art.lobby_card()
+
         # 한도를 다 썼으면 여기서도 바로 늘릴 수 있게 해요.
         if wagered >= limit:
             view = ExtendLimitView(interaction.user.id, times)
-            view.message = await interaction.followup.send(
-                embed=embed, view=view, ephemeral=True, wait=True
-            )
+            view.message = await send_with_art(interaction, embed, card, LOBBY_FILE,
+                                               view=view, ephemeral=True)
             return
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await send_with_art(interaction, embed, card, LOBBY_FILE, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
