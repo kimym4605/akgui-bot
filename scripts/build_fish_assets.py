@@ -20,7 +20,7 @@
 4. 먼지 같은 아주 작은 조각(`MIN_BLOB`)은 지워요. 금화·불티 같은 이펙트는 남겨요.
 5. 물고기에 딱 맞게 잘라 정사각형 가운데에 다시 앉혀요.
 
-📁 원본(1024px PNG)은 저장소에 없어요(24장 ≈ 25MB). 상위 폴더 `악귀봇프로젝트\물고기그림\`에
+📁 원본(1024px PNG)은 저장소에 없어요(24장 ≈ 25MB). 상위 폴더 `악귀봇프로젝트/물고기그림/`에
    `<등급>_<이름>.png`로 보관해요 — 다시 뽑을 땐 `<key>.png`로 이름을 바꿔 한 폴더에 모아 돌려요.
    화풍: Higgsfield Nano Banana 2, "애니 몬스터" 프롬프트 + 첫 악귀어 그림을 스타일 참고로.
 ⚠️ numpy·scipy 없이 Pillow만 써요 — 로컬 윈도우에 둘 다 없고, 한 번 돌리는 빌드라 느려도 돼요.
@@ -149,8 +149,34 @@ def cutout(src: str, ratio: float = POCKET_BG_RATIO) -> Image.Image:
     return out
 
 
+TANK_BG_SIZE = (1000, 630)      # `utils/fish_art.TANK_W/H`와 같아야 해요 (test_fish_art가 봐요)
+
+
+def build_tank_bg(src: str) -> None:
+    """🪣 어항 카드 배경(가로로 긴 원본 PNG) → `assets/tank/bg.webp` 1000×630.
+
+        python scripts/build_fish_assets.py --tank-bg <원본 png>
+
+    원본은 `악귀봇프로젝트/물고기그림/어항배경.png` — Higgsfield(Nano Banana 2, 3:2)로 뽑은
+    **물고기 없는 수조** 그림이에요(가운데·위쪽을 비워 달라고 시켰어요. 물고기는 코드가 얹어요).
+    ⚠️ 넘치는 높이는 **위쪽을 더 많이**(70%) 잘라요. 위는 어차피 머리띠가 덮고, 바닥 자갈은 살려야 해요."""
+    w, h = TANK_BG_SIZE
+    im = Image.open(src).convert("RGB")
+    im = im.resize((w, max(h, round(im.height * w / im.width))), Image.LANCZOS)
+    top = round((im.height - h) * 0.7)
+    im = im.crop((0, top, w, top + h))
+    out_dir = os.path.join(BOT_DIR, "assets", "tank")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "bg.webp")
+    im.save(path, "WEBP", quality=90, method=6)
+    print(f"✅ 어항 배경 → {path} ({os.path.getsize(path) // 1024}KB)")
+
+
 def main():
     """`python build_fish_assets.py <폴더> [키 ...]` — 키를 주면 그 종만 다시 만들어요."""
+    if sys.argv[1] == "--tank-bg":
+        build_tank_bg(sys.argv[2])
+        return
     src_dir = sys.argv[1]
     only = set(sys.argv[2:])
     os.makedirs(OUT_DIR, exist_ok=True)

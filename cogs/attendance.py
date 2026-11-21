@@ -267,8 +267,10 @@ class ProfileMoreSelect(
             await send(embed=await build_voice_embed(user), ephemeral=True)
 
         elif kind == "fish":
-            from cogs.fishing import build_tank_embed
-            await send(embed=await build_tank_embed(user.id), ephemeral=True)
+            # 🪣 글 + 어항 그림(2026-11-22). 그림이 실패하면 files가 비어서 글만 나가요.
+            from cogs.fishing import build_tank_reply
+            embed, files = await build_tank_reply(user)
+            await send(embed=embed, files=files, ephemeral=True)
 
         elif kind == "attend":
             await send(embed=await build_attend_embed(user), ephemeral=True)

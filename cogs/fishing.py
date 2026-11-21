@@ -113,7 +113,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs import mission
-from utils import coin_wallet, fish_art, fish_data, fishing_store
+from utils import coin_wallet, fish_art, fish_data, fishing_store, profile_service
 from utils.channel_check import restrict_to_channel
 from utils.fish_data import (
     BY_KEY, COIN_PIECES, DAILY_CAST_CAP, FISH, GRADE_ORDER, GRADES,
@@ -1031,7 +1031,7 @@ async def act_dex(interaction: discord.Interaction, *, public: bool = False) -> 
     data = await fishing_store.get(interaction.user.id)
     dex = data.get("dex") or {}
     name = getattr(interaction.user, "display_name", None) or interaction.user.name
-    png = await asyncio.to_thread(fish_art.render_dex, dex, f"{name}의 낚시 도감")
+    png = await fish_art.dex_card(dex, f"{name}의 낚시 도감")
     seen = sum(1 for k in BY_KEY if dex.get(k))
     embed = discord.Embed(
         title=f"📖 낚시 도감 — {seen}/{len(BY_KEY)}종",
@@ -1046,13 +1046,40 @@ async def act_dex(interaction: discord.Interaction, *, public: bool = False) -> 
 
 async def act_tank(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
-    embed = await build_tank_embed(interaction.user.id)
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    embed, files = await build_tank_reply(interaction.user)
+    await interaction.followup.send(embed=embed, files=files, ephemeral=True)
 
 
-async def build_tank_embed(user_id: int) -> discord.Embed:
-    """`/어항` 화면. `/프로필`의 📋 자세히 보기 → 🎣 낚시도 이걸 써요."""
-    data = await fishing_store.get(user_id)
+TANK_CARD_NAME = "fish_tank.jpg"
+
+
+async def build_tank_reply(user: discord.abc.User) -> tuple[discord.Embed, list[discord.File]]:
+    """`/어항` 화면 = 글(임베드) + 🪣 **어항 그림**(2026-11-22). `(embed, files)`를 돌려줘요.
+    `/프로필`의 📋 자세히 보기 → 🎣 낚시도 이걸 써요.
+
+    🚨 그림은 **덤**이에요. 못 그려도(Pillow 오류·아바타 실패) 글은 그대로 나가요 — 어항은
+       "팔면 얼마"를 보러 오는 화면이라 그림 때문에 죽으면 안 돼요. 그땐 `files`가 비어요.
+    ⚠️ 반드시 `defer()` **뒤에** 부르세요. 아바타 받기 + 그리기에 0.3~1초가 걸려요."""
+    data = await fishing_store.get(user.id)
+    embed = await build_tank_embed(user.id, data=data)
+    name = getattr(user, "display_name", None) or user.name
+    card = await fish_art.tank_card(
+        data["tank"], name=name, seed=user.id,
+        sell_coins=(data["pieces"] + data["dust"]) // COIN_PIECES,
+        dex_seen=sum(1 for k in BY_KEY if (data.get("dex") or {}).get(k)),
+        avatar=await profile_service.avatar_for(user),
+    )
+    if not card:
+        return embed, []
+    embed.set_image(url=f"attachment://{TANK_CARD_NAME}")
+    return embed, [discord.File(io.BytesIO(card), TANK_CARD_NAME)]
+
+
+async def build_tank_embed(user_id: int, *, data: dict | None = None) -> discord.Embed:
+    """`/어항`의 **글** 부분. 그림까지 붙이려면 `build_tank_reply`를 쓰세요.
+    `data`는 이미 읽어둔 `fishing_store.get()` 결과예요(같은 걸 두 번 읽지 않게)."""
+    if data is None:
+        data = await fishing_store.get(user_id)
     tank = data["tank"]
 
     embed = discord.Embed(title="🪣 내 어항", color=0x3B82F6)
