@@ -689,6 +689,8 @@ _tree = _ast.parse(_src)
 #    반드시 ephemeral이어야 해요. 아래 둘은 판과 무관한 **고정 안내**예요.
 PUBLIC_OK = {
     "leaderboard",   # 🏆 순위표 — 같이 보는 게 맞아요
+    "act_dex",       # 📖 /낚시도감 — 진행 중인 판이 없는 정지 화면이고, **기본은 나만 보기**예요.
+                     #    `공개:True`를 직접 골랐을 때만 자랑용으로 채널에 올라가요(2026-11-22).
     "rates",         # 🎣 /낚시확률 — 확률·값 공개. 뒤섞일 내 판이 없고, 공개여야
                      #    옆사람이 보고 알게 돼요(`/카드확률`도 공개예요).
                      #    발견 경로가 좁은 게 지금 낚시의 실제 문제예요.
@@ -1344,7 +1346,7 @@ check("낚시대 값·내구도가 코드값과 같다",
 check("평균 벌이를 헬퍼값으로 보여준다",
       f"{_fd.expected_coin_per_day():.0f}코인" in _blob,
       f"{_fd.expected_coin_per_day():.0f}코인")
-check("어종 14종을 전부 적는다",
+check(f"어종 {len(_fd.BY_KEY)}종을 전부 적는다",
       all(f["name"] in _blob for rows in _fd.FISH.values() for f in rows))
 check("⚠️ 내림을 숨기지 않는다 (기대를 부풀리지 않게)", "내림" in _blob)
 check("🚨 '하루 1개' 같은 옛 제한을 다시 쓰지 않는다", "하루 1개" not in _blob)

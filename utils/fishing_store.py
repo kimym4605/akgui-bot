@@ -289,6 +289,8 @@ def _record_casts_sync(user_id, casts: int,
         push: dict = {}
         for key, size in catches:
             push.setdefault(f"tank.{key}", {"$each": []})["$each"].append(size)
+            # 📖 도감: 종별 **누적** 마리 수 (팔아도 안 줄어요 — `_record_cast_sync` 주석)
+            update["$inc"][f"dex.{key}"] = update["$inc"].get(f"dex.{key}", 0) + 1
         update["$push"] = push
 
         bkey, bsize = max(catches, key=lambda kv: (_rank(kv[0]), kv[1] or 0))
@@ -381,6 +383,7 @@ def _get_sync(user_id) -> dict:
         "caught": int(doc.get("caught", 0) or 0),
         "sold": int(doc.get("sold", 0) or 0),
         "best": doc.get("best"),
+        "dex": {k: int(v or 0) for k, v in (doc.get("dex") or {}).items()},
     }
 
 
@@ -389,6 +392,10 @@ def _record_cast_sync(user_id, key: str | None, size: int | None = None) -> None
     update: dict = {"$inc": {"casts": 1}}
     if key:
         update["$inc"]["caught"] = 1
+        # 📖 도감(2026-11-22): 종별 **누적** 마리 수. 어항(`tank`)은 팔면 비워지니
+        #    "잡아본 적 있나"를 거기서 볼 수 없어요. 그래서 따로 세요.
+        #    ⚠️ 도입 전 기록은 없어요 — `scripts/backfill_fish_dex.py`가 그때 어항·최고기록만 채웠어요.
+        update["$inc"][f"dex.{key}"] = 1
         # ⚠️ `$push`라 같은 어종을 여러 마리 담아도 각자의 치수가 남아요.
         update["$push"] = {f"tank.{key}": size}
 

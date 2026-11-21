@@ -103,6 +103,7 @@
 (deferred_message_update). 거기엔 ephemeral이 필요 없어요.
 """
 import asyncio
+import io
 import logging
 import random
 import time
@@ -112,7 +113,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs import mission
-from utils import coin_wallet, fish_data, fishing_store
+from utils import coin_wallet, fish_art, fish_data, fishing_store
 from utils.channel_check import restrict_to_channel
 from utils.fish_data import (
     BY_KEY, COIN_PIECES, DAILY_CAST_CAP, FISH, GRADE_ORDER, GRADES,
@@ -321,6 +322,27 @@ class BuyRodView(discord.ui.View):
             await interaction.followup.send(msg, ephemeral=True)
 
 
+BIG_ART_GRADES = ("대물", "전설")   # 이 등급은 그림을 **크게**(set_image), 나머지는 썸네일
+
+
+def attach_fish_art(embed: discord.Embed, key: str | None) -> list[discord.File]:
+    """🐟 잡은 물고기 그림을 임베드에 붙여요(2026-11-22). 붙일 파일 목록을 돌려줘요.
+
+    🚨 결과 화면은 **같은 메시지를 계속 고쳐 써요**(다시 던지기). 그래서 호출부는
+       돌려받은 목록을 **항상** `attachments=`로 넘겨야 해요 — 빈 목록이어도요.
+       안 넘기면 놓친 판에 **지난 판 물고기 그림이 그대로 남아요.**
+    ⚠️ 그림이 없는 종이면 빈 목록이에요(새 종을 넣고 그림을 깜빡해도 낚시는 돌아요)."""
+    path = fish_art.art_path(key) if key else None
+    if path is None:
+        return []
+    name = f"fish_{key}.webp"
+    if BY_KEY[key][0] in BIG_ART_GRADES:
+        embed.set_image(url=f"attachment://{name}")
+    else:
+        embed.set_thumbnail(url=f"attachment://{name}")
+    return [discord.File(path, filename=name)]
+
+
 async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> None:
     """낚시 한 판의 결과를 보여줘요. `run_cast`가 불러요.
 
@@ -433,10 +455,12 @@ async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> 
         next_view = CastAgainView(interaction.user.id, view.rod_left, today_left)
     else:
         next_view = BuyRodView(interaction.user.id)
+    files = attach_fish_art(embed, key)
     try:
-        await interaction.edit_original_response(embed=embed, view=next_view)
+        await interaction.edit_original_response(embed=embed, view=next_view, attachments=files)
     except discord.HTTPException:
-        await interaction.followup.send(embed=embed, view=next_view, ephemeral=True)
+        await interaction.followup.send(embed=embed, view=next_view, ephemeral=True,
+                                        files=attach_fish_art(embed, key))
 
 
 async def finish_batch(interaction: discord.Interaction, view: "FishingView") -> None:
@@ -480,7 +504,8 @@ async def finish_batch(interaction: discord.Interaction, view: "FishingView") ->
         next_view = (CastAgainView(uid, view.rod_left, today_left)
                      if view.rod_left else BuyRodView(uid))
         try:
-            await interaction.edit_original_response(embed=embed, view=next_view)
+            # ⚠️ `attachments=[]` — 지난 판 물고기 그림을 지워요(`attach_fish_art` 주석)
+            await interaction.edit_original_response(embed=embed, view=next_view, attachments=[])
         except discord.HTTPException:
             await interaction.followup.send(embed=embed, view=next_view, ephemeral=True)
         return
@@ -568,10 +593,12 @@ async def finish_batch(interaction: discord.Interaction, view: "FishingView") ->
 
     next_view = (CastAgainView(uid, view.rod_left, today_left)
                  if view.rod_left else BuyRodView(uid))
+    files = attach_fish_art(embed, bkey)        # 묶음에선 "가장 좋은 놈" 그림
     try:
-        await interaction.edit_original_response(embed=embed, view=next_view)
+        await interaction.edit_original_response(embed=embed, view=next_view, attachments=files)
     except discord.HTTPException:
-        await interaction.followup.send(embed=embed, view=next_view, ephemeral=True)
+        await interaction.followup.send(embed=embed, view=next_view, ephemeral=True,
+                                        files=attach_fish_art(embed, bkey))
 
     log.info("🎣 몰아 던지기: %s / %d판 %d마리 %.1f코인",
              uid, n, len(catches), total_pieces / COIN_PIECES)
@@ -740,7 +767,11 @@ async def _run_cast(interaction: discord.Interaction, *, edit: bool,
         return False
 
     async def show(**kw):
-        """첫 화면을 띄워요. `defer()`로 받아둔 응답을 고쳐 쓰니 경로가 하나예요."""
+        """첫 화면을 띄워요. `defer()`로 받아둔 응답을 고쳐 쓰니 경로가 하나예요.
+
+        ⚠️ `attachments=[]`가 기본이에요 — 다시 던지기는 **지난 결과 메시지를 고쳐 쓰니**
+           안 지우면 기다리는 화면에 지난 판 물고기 그림이 남아요(`attach_fish_art` 주석)."""
+        kw.setdefault("attachments", [])
         await interaction.edit_original_response(**kw)
 
     # 🚨 **내구도를 먼저 깎고** 시작해요. 던지고 나서 깎으면, 미니게임 도중에
@@ -990,6 +1021,29 @@ class FishingView(discord.ui.View):
             self.done.set()
 
 
+async def act_dex(interaction: discord.Interaction, *, public: bool = False) -> None:
+    """📖 `/낚시도감` (2026-11-22). 잡아본 종은 그림, 못 잡은 종은 실루엣이에요.
+
+    ⚠️ 그림 합성(Pillow)은 CPU 일이라 `to_thread`로 돌려요 — 루프에서 돌리면 워치독이 깨요.
+    ⚠️ 도입 전 기록은 `scripts/backfill_fish_dex.py`가 어항·최고기록으로만 채웠어요.
+       그래서 옛날에 잡고 팔아버린 종은 비어 있을 수 있어요(안내문에 적어둬요)."""
+    await interaction.response.defer(ephemeral=not public)
+    data = await fishing_store.get(interaction.user.id)
+    dex = data.get("dex") or {}
+    name = getattr(interaction.user, "display_name", None) or interaction.user.name
+    png = await asyncio.to_thread(fish_art.render_dex, dex, f"{name}의 낚시 도감")
+    seen = sum(1 for k in BY_KEY if dex.get(k))
+    embed = discord.Embed(
+        title=f"📖 낚시 도감 — {seen}/{len(BY_KEY)}종",
+        description=("잡아본 물고기는 그림으로, 아직 못 만난 물고기는 그림자로 보여요.\n"
+                     "-# 도감은 11/22부터 기록해요. 그 전 기록은 어항·최고 기록에 남은 것만 채웠어요."),
+        color=0x8B5CF6,
+    )
+    embed.set_image(url="attachment://fish_dex.png")
+    await interaction.followup.send(embed=embed, file=discord.File(io.BytesIO(png), "fish_dex.png"),
+                                    ephemeral=not public)
+
+
 async def act_tank(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     embed = await build_tank_embed(interaction.user.id)
@@ -1069,6 +1123,8 @@ async def build_tank_embed(user_id: int) -> discord.Embed:
                         value=f"{GRADES.get(bg, {}).get('emoji', '')} {bn}", inline=True)
     if data["sold"]:
         embed.add_field(name="누적 판매", value=f"**{data['sold']}코인**", inline=True)
+    _seen = sum(1 for k in BY_KEY if (data.get("dex") or {}).get(k))
+    embed.set_footer(text=f"📖 도감 {_seen}/{len(BY_KEY)}종 · /낚시도감 으로 그림 보기")
     return embed
 
 
@@ -1319,6 +1375,12 @@ class Fishing(commands.Cog):
     @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
     async def tank(self, interaction: discord.Interaction):
         await act_tank(interaction)
+
+    @app_commands.command(name="낚시도감", description="지금까지 낚아본 물고기를 그림으로 모아 봐요.")
+    @app_commands.describe(공개="채널에 모두 보이게 올릴까요? (기본: 나만 보기)")
+    @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
+    async def dex(self, interaction: discord.Interaction, 공개: bool = False):
+        await act_dex(interaction, public=공개)
 
     @app_commands.command(name="물고기판매", description="어항에 든 물고기를 전부 팔아요.")
     @restrict_to_channel(CHANNEL_GROUP, CHANNEL_ENV)
