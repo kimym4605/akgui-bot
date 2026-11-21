@@ -155,7 +155,8 @@ MISSIONS: dict[str, dict] = {
         "rarity": "uncommon",   # 실측 완료율 34% (11/14 재측정 46%)
         "kind": "server", "target": 1,
         "title": "전적 확인",
-        "desc": "`/전적`으로 전적 조회하기",
+        # 🔄 11/22: 명령어만 쳐도 깨지던 걸 **리포트가 실제로 떴을 때**로 바꿨어요.
+        "desc": "`/전적`으로 전적 조회하기 (리포트가 떠야 인정돼요)",
         "unit": "회",
     },
     "use_map": {
@@ -165,7 +166,8 @@ MISSIONS: dict[str, dict] = {
         "rarity": "uncommon",   # 실측 완료율 28% (11/14 재측정 42%)
         "kind": "server", "target": 1,
         "title": "맵 추천 받기",
-        "desc": "`/맵추천` 써보기",
+        # 🔄 11/22: 명령어만 쳐도 깨지던 걸 **🎲 뽑기를 눌렀을 때**로 바꿨어요.
+        "desc": "`/맵추천`에서 🎲 뽑기까지 누르기",
         "unit": "회",
     },
     # --- 이미 하는 활동에 얹는 쪽 (2026-10-23) ---
@@ -329,10 +331,12 @@ MAX_DAILY_REWARD = _max_daily_reward()
 #    신고: "링크 붙여넣기 전에 보상 들어와요").
 #    → 이제 `cogs/myshop.py`가 **상점을 실제로 띄운 뒤** 직접 올려요(`_credit_shop_mission`).
 #      여기 다시 넣으면 로그인 안내만 봐도 깨지는 옛 버그가 돌아와요.
-COMMAND_MISSIONS = {
-    "전적": "use_rank",
-    "맵추천": "use_map",
-}
+# 🚨 **"전적"·"맵추천"도 뺐어요** (2026-11-22). 같은 구멍이에요.
+#    `/전적`은 계정 미등록·조회 실패 안내만 떠도, `/맵추천`은 🎲 뽑기를 안 눌러도 깨졌어요.
+#    → `cogs/rank.py`는 **리포트가 실제로 나간 뒤**, `cogs/map.py`는 **맵을 뽑은 뒤** 올려요.
+#    표는 지금 비어 있어요. 리스너(`Mission.on_app_command_completion`)는 남겨뒀지만
+#    새 미션도 이 표 대신 `mission.on_action`을 성립 지점에서 부르세요.
+COMMAND_MISSIONS: dict[str, str] = {}
 
 # 1회성 미션 (하루 상한과 별개로, 평생 한 번만)
 ONE_TIME_MISSIONS = {

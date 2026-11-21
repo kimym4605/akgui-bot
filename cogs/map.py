@@ -57,6 +57,13 @@ class RollButton(discord.ui.Button):
         # 결과는 다들 볼 수 있게 채널에도 공개로 알려줘요. (제외 고르는 과정만 나만 보여요)
         await interaction.followup.send(f"🗺️ {interaction.user.mention}님이 뽑은 맵: **{picked}**")
 
+        # 🎯 '맵 추천 받기' 미션은 **실제로 뽑은 뒤**에만 올려요(2026-11-22).
+        #    전엔 `/맵추천` 명령어만 쳐도 깨졌어요(`mission_store.COMMAND_MISSIONS` 주석).
+        # ⚠️ 함수 안에서 import해요 — `cogs.mission`이 다른 cog를 끌어와서 순환 import를 피하려고요.
+        #    예외는 `on_action`이 안에서 삼켜요.
+        from cogs import mission
+        await mission.on_action(interaction.user.id, "use_map", interaction, interaction.user)
+
 
 class MapRecommendView(discord.ui.View):
     def __init__(self, excluded: set[str] | None = None):

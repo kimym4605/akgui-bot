@@ -554,9 +554,26 @@ check("🚨 COMMAND_MISSIONS에 '방만들기'가 없다 (중복 호출 방지)"
       "방만들기" not in mission_store.COMMAND_MISSIONS,
       f"{sorted(mission_store.COMMAND_MISSIONS)}")
 # ⚠️ "오상"은 2026-11-18에 여기서 뺐어요(로그인 안내만 봐도 깨졌어요) — 맨 아래 🛒 섹션.
-check("   └ 명령어로만 쓰는 것들은 그대로 남아 있다",
-      {"전적", "맵추천"} <= set(mission_store.COMMAND_MISSIONS),
+# 🔄 "전적"·"맵추천"도 2026-11-22에 뺐어요 — 안내만 봐도 깨졌어요. 표는 이제 비어 있어요.
+check("🚨 COMMAND_MISSIONS가 비어 있다 (명령어만 쳐도 깨지는 구멍 방지)",
+      not mission_store.COMMAND_MISSIONS,
       f"{sorted(mission_store.COMMAND_MISSIONS)}")
+
+# 성립 지점 순서: /전적은 리포트를 보낸 **뒤**, /맵추천은 뽑은 결과를 보낸 **뒤**에 올려야 해요.
+_rank_src = open(os.path.join(BOT_DIR, "cogs", "rank.py"), encoding="utf-8").read()
+_i_shown = _rank_src.find("shown = await self.send_rank_report(")
+_i_rank_hook = _rank_src.find('on_action(interaction.user.id, "use_rank"')
+check("🎯 /전적: 리포트 결과(shown)를 받은 뒤에 use_rank를 올린다",
+      0 <= _i_shown < _rank_src.find("if shown:") < _i_rank_hook,
+      f"shown={_i_shown} hook={_i_rank_hook}")
+check("   └ send_rank_report가 성공 경로 2곳에서 True를 돌려준다",
+      _rank_src.count("return True") >= 2, str(_rank_src.count("return True")))
+_map_src = open(os.path.join(BOT_DIR, "cogs", "map.py"), encoding="utf-8").read()
+_i_pick = _map_src.find("picked = random.choice(pool)")
+_i_map_hook = _map_src.find('on_action(interaction.user.id, "use_map"')
+_i_empty = _map_src.find("최소 1개는 남겨주세요")
+check("🎯 /맵추천: 🎲 뽑기로 맵을 뽑은 뒤에 use_map을 올린다 (전부 제외 안내 뒤 return보다 아래)",
+      0 <= _i_empty < _i_pick < _i_map_hook, f"empty={_i_empty} pick={_i_pick} hook={_i_map_hook}")
 
 
 # ==================================================================

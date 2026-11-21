@@ -549,10 +549,17 @@ class Rank(commands.Cog):
         모드: Optional[app_commands.Choice[str]] = None,
     ):
         await interaction.response.defer()
-        await self.send_rank_report(
+        shown = await self.send_rank_report(
             interaction, 닉네임, 태그, 지역, 경기수,
             mode=모드.value if 모드 else MODE_AUTO,
         )
+        # 🎯 '전적 확인' 미션은 **리포트가 실제로 나간 뒤**에만 올려요(2026-11-22).
+        #    전엔 명령어만 끝나면 깨져서, 계정 미등록·조회 실패 안내만 봐도 코인이 들어왔어요.
+        # ⚠️ `/프로필`의 🎯 버튼은 안 올려요 — 미션 문구가 "`/전적`으로"라서요.
+        # ⚠️ 함수 안에서 import해요 — `cogs.mission`이 이 모듈을 import해서 순환이 생겨요.
+        if shown:
+            from cogs import mission
+            await mission.on_action(interaction.user.id, "use_rank", interaction, interaction.user)
 
     async def send_rank_report(
         self,
@@ -564,8 +571,9 @@ class Rank(commands.Cog):
         *,
         ephemeral: bool = False,
         mode: str = MODE_AUTO,
-    ):
-        """전적 리포트를 만들어 보내요. `/전적` 명령과 **`/프로필` 카드의 🎯 버튼**이 같이 써요.
+    ) -> bool:
+        """전적 리포트를 만들어 보내요. **리포트(임베드)가 나갔으면 True**, 안내·오류로 끝나면 None이에요
+        (`/전적`이 미션을 올릴지 이걸로 정해요). `/전적` 명령과 **`/프로필` 카드의 🎯 버튼**이 같이 써요.
 
         원래 이 내용은 `/전적` 명령 본문에 통째로 들어 있었는데, 프로필에서도 같은 리포트를
         보여주게 되면서 갈라냈어요. 조회·집계·역할 동기화가 전부 여기 있고 명령은 호출만 해요.
@@ -807,7 +815,8 @@ class Rank(commands.Cog):
                 embed.add_field(name="티어 역할", value=role_sync_note, inline=False)
             embed.set_footer(text="출처: HenrikDev API (비공식)")
             await reply(embed=embed)
-            return
+            # 경기 기록이 없어도 티어는 조회됐어요 — 조회 자체는 성공이라 미션은 인정해요.
+            return True
 
         # "상위 %" 계산용으로 이번 조회 결과를 저장해둬요.
         # 🎮 일반전만 본 기록은 안 넣어요 — 표본은 닉네임당 한 줄이라, 넣으면 그 사람의
@@ -879,6 +888,7 @@ class Rank(commands.Cog):
             embed.add_field(name="포지션 역할", value=position_sync_note, inline=False)
         view = RankDetailView(닉네임, 태그, stats, comp_count, used_fallback, mode=mode)
         await reply(embed=embed, view=view)
+        return True
 
 
 async def setup(bot: commands.Bot):
