@@ -67,6 +67,7 @@ CHANNEL_ID`)·노래방(`KARAOKE_VOICE_CHANNEL_ID`)과 같은 방식이에요. �
 ⚠️ env 값은 `.env`가 아니라 **`flyctl secrets set CARD_CHANNEL_ID=...`**로 넣어요
 ([[project_pokemon_bot_flyio_secrets_not_env]]).
 """
+import asyncio
 import io
 import logging
 
@@ -74,7 +75,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils import card_render, card_store, coin_wallet
+from utils import card_anim, card_render, card_store, coin_wallet
 from utils.card_data import BY_KEY, CARDS
 from utils.card_market import MAX_PRICE as MARKET_MAX_PRICE
 from utils.card_market import MIN_PRICE as MARKET_MIN_PRICE
@@ -294,6 +295,61 @@ async def announce_legend(interaction: discord.Interaction, drawn: list[dict], *
              [d["key"] for d in legends])
 
 
+# ============================================================
+# 🎬 뽑기 연출 (2026-11-23) — 엎어진 카드가 뒤집히는 GIF를 먼저 띄우고, 끝나면 결과로 바꿔요.
+#
+# 그림은 `utils/card_anim.py`. 여기는 **보내고 바꾸는 순서**만 맡아요(슬롯·블랙잭과 같은 방식).
+#
+# 🚨 연출 중에는 **결과 글을 숨겨요.** 임베드에 "🟡 레전드 · 수호악귀"가 먼저 보이면
+#    카드가 뒤집히기도 전에 답을 알게 돼요. 색도 중립(보라)으로 둬요 - 임베드 띠 색이
+#    등급 색이면 그것만으로 레전드인 걸 알아요.
+# 🚨 연출이 끝나면 GIF를 **멈춘 결과 그림(PNG)으로 바꿔 끼워요.** 그대로 두면 화면에 다시
+#    들어올 때마다 처음부터 다시 뒤집혀요(블랙잭에서 확인한 디스코드 동작).
+# 🚨 레전드 홍보는 **바꿔 끼운 뒤에** 올려요. 먼저 올리면 뒤집히는 중에 홍보가 떠서 스포일러예요.
+# ⚠️ 어느 단계가 실패해도 결과는 꼭 보여요: 연출 실패 → 예전처럼 결과 그림만,
+#    바꿔 끼우기 실패 → 결과 글을 새 메시지로.
+# ============================================================
+PULL_ANIM_FILE = "gacha_pull.gif"
+PULL_ANIM_PAD = 0.6       # 연출 길이 + 이만큼 기다렸다가 바꿔요(디스코드가 GIF를 늦게 틀기 시작해요)
+PULL_ANIM_COLOR = 0x6D3FA8
+
+
+def _png_file(embed: discord.Embed, png: bytes, user_id: int) -> discord.File:
+    name = f"gacha_{user_id}.png"
+    embed.set_image(url=f"attachment://{name}")
+    return discord.File(io.BytesIO(png), filename=name)
+
+
+async def _play_pull_anim(interaction: discord.Interaction, anim: tuple[bytes, float],
+                          result: discord.Embed, png: bytes, view: discord.ui.View, *,
+                          pulls: int, n: int, ephemeral: bool) -> bool:
+    """연출을 보내고, 끝나면 결과로 바꿔요. **연출을 보내지도 못했으면 False**(부른 쪽이 결과를 보내요)."""
+    gif, seconds = anim
+    title = "🎴 카드를 뽑는 중…" if pulls == 1 else f"🎴 {pulls}연속 · 카드 {n}장을 뽑는 중…"
+    rolling = discord.Embed(title=title, description="카드가 뒤집히고 있어요…", color=PULL_ANIM_COLOR)
+    rolling.set_image(url=f"attachment://{PULL_ANIM_FILE}")
+    try:
+        msg = await interaction.followup.send(
+            embed=rolling, file=discord.File(io.BytesIO(gif), filename=PULL_ANIM_FILE),
+            view=view, ephemeral=ephemeral, wait=True)
+    except discord.HTTPException:
+        log.warning("🎴 뽑기 연출을 못 보냈어요 - 결과만 보내요 (user=%s)", interaction.user.id, exc_info=True)
+        return False
+
+    await asyncio.sleep(seconds + PULL_ANIM_PAD)
+    try:
+        await msg.edit(embed=result, attachments=[_png_file(result, png, interaction.user.id)], view=view)
+    except discord.HTTPException:
+        log.warning("🎴 뽑기 결과로 못 바꿨어요 - 결과 글을 따로 보내요 (user=%s)",
+                    interaction.user.id, exc_info=True)
+        result.set_image(url=None)
+        try:
+            await interaction.followup.send(embed=result, view=view, ephemeral=ephemeral)
+        except discord.HTTPException:
+            log.exception("🎴 뽑기 결과를 화면에 못 띄웠어요 (user=%s)", interaction.user.id)
+    return True
+
+
 async def do_pull(interaction: discord.Interaction, *, pulls: int = 1,
                   ephemeral: bool = False):
     """뽑기 `pulls`회(= `pulls * CARDS_PER_PULL`장). `/카드뽑기`와 🎴 버튼이 같이 써요.
@@ -357,13 +413,13 @@ async def do_pull(interaction: discord.Interaction, *, pulls: int = 1,
     view = GachaView(user_id)
 
     png = await card_render.render_pull(drawn)
+    anim = await card_anim.pull_anim(drawn, png)
     if png is None:
         # 이미지가 실패해도 뽑은 건 이미 들어갔어요. 글자로라도 보여줘요.
         await interaction.followup.send(embed=embed, view=view, ephemeral=ephemeral)
-    else:
-        file = discord.File(io.BytesIO(png), filename=f"gacha_{user_id}.png")
-        embed.set_image(url=f"attachment://gacha_{user_id}.png")
-        await interaction.followup.send(embed=embed, file=file, view=view,
+    elif anim is None or not await _play_pull_anim(interaction, anim, embed, png, view,
+                                                   pulls=pulls, n=len(drawn), ephemeral=ephemeral):
+        await interaction.followup.send(embed=embed, file=_png_file(embed, png, user_id), view=view,
                                         ephemeral=ephemeral)
 
     # 4) 🟡 레전드면 뽑기방에 홍보해요. 결과는 이미 보냈으니 여기서 터져도 조용히 넘겨요.
