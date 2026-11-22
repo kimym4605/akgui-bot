@@ -788,6 +788,26 @@ if profile_card.PILLOW_AVAILABLE and profile_card.CHARACTER_THEMES:
 for _k, _v in profile_card.CHARACTER_THEMES.items():
     _panel, _edge = profile_card._panel_colors(_v)
     check(f"   {_k} 패널색이 어둡다 {_panel}", max(_panel) <= 60, str(_panel))
+
+# 🐰 테마별 스크림(밝은 그림용, 2026-11-22): 적힌 값만 쓰고, 이상한 값은 무시해요.
+from utils import card_theme_assets as _cta  # noqa: E402
+_saved_manifest = _cta._load_manifest
+_img = next(iter(profile_card.CHARACTER_THEMES.values()))["image"]
+_cta._load_manifest = lambda: [
+    {"key": "좋음", "image": os.path.basename(_img), "scrim": [0.2, 0.04]},
+    {"key": "범위밖", "image": os.path.basename(_img), "scrim": [1.5, 0]},
+    {"key": "글자", "image": os.path.basename(_img), "scrim": "진하게"},
+]
+try:
+    _t = _cta.load()
+    check("scrim: 바른 값은 테마에 실린다", _t["좋음"].get("scrim") == (0.2, 0.04))
+    check("scrim: 🚨 이상한 값은 버리고 테마는 살린다(기본 막으로)",
+          "범위밖" in _t and "글자" in _t and "scrim" not in _t["범위밖"] and "scrim" not in _t["글자"])
+finally:
+    _cta._load_manifest = _saved_manifest
+check("scrim: 적힌 값으로 덮으면 기본보다 밝다",
+      sum(profile_card._art_background(_img, scrim=(0.2, 0.04)).convert("L").getdata())
+      > sum(profile_card._art_background(_img).convert("L").getdata()))
 check("_cap이 밝은 색을 눌러준다",
       max(_cta._cap((250, 248, 246), 30)) <= 30, str(_cta._cap((250, 248, 246), 30)))
 check("_cap이 색조를 유지한다 (붉은 그림이 회색이 되지 않는다)",

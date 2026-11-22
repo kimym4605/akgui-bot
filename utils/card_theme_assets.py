@@ -166,6 +166,15 @@ def load() -> dict[str, dict]:
             "top": tuple(entry["top"]) if entry.get("top") else top,
             "bottom": tuple(entry["bottom"]) if entry.get("bottom") else bottom,
         }
+        # 🐰 밝은 그림용 (2026-11-22): `"scrim": [왼쪽, 오른쪽]` = 그림 위에 덮는 막의 진하기(0~1).
+        #    없으면 기본값(profile_card.SCRIM_LEFT/RIGHT). 크림색 그림에 기본 0.55를 덮었더니
+        #    회색 진흙처럼 칙칙해져서 생겼어요. 이상한 값이면 무시해요(카드는 나와야 해요).
+        scrim = entry.get("scrim")
+        if (isinstance(scrim, (list, tuple)) and len(scrim) == 2
+                and all(isinstance(v, (int, float)) and 0 <= v <= 1 for v in scrim)):
+            out[key]["scrim"] = (float(scrim[0]), float(scrim[1]))
+        elif scrim is not None:
+            log.error("🎴 '%s' 테마의 scrim은 [0~1, 0~1] 두 숫자여야 해요: %r - 기본값으로", key, scrim)
     if out:
         log.info("🎴 캐릭터 카드 테마 %d종 불러왔어요: %s", len(out), ", ".join(out))
     return out

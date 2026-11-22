@@ -252,7 +252,8 @@ def _cover_resize(art: "Image.Image") -> "Image.Image":
     return art.crop((off_x, off_y, off_x + target_w, off_y + target_h))
 
 
-def _art_background(image_path: str, top=BG_TOP, bottom=BG_BOTTOM) -> "Image.Image":
+def _art_background(image_path: str, top=BG_TOP, bottom=BG_BOTTOM,
+                    scrim: tuple[float, float] | None = None) -> "Image.Image":
     """🎴 캐릭터 그림을 배경으로 깔아요. 실패하면 **그라데이션으로 물러나요.**
 
     🚨 그림이 깨져 있어도 카드는 나와야 해요. 2026-10에 유니티에서 *"파괴된 스프라이트도
@@ -269,15 +270,17 @@ def _art_background(image_path: str, top=BG_TOP, bottom=BG_BOTTOM) -> "Image.Ima
         return _gradient_background(top, bottom)
 
     # 가로 스크림: 왼쪽 SCRIM_LEFT → 오른쪽 SCRIM_RIGHT 만큼 검정을 덮어요.
+    # 🐰 테마가 `scrim`을 적어두면(밝은 그림) 그 값으로 덮어요 → card_theme_assets.load
+    left, right = scrim if scrim else (SCRIM_LEFT, SCRIM_RIGHT)
     mask = Image.new("L", (CARD_WIDTH, 1))
     mdraw = ImageDraw.Draw(mask)
     hold_px = CARD_WIDTH * SCRIM_HOLD
     for x in range(CARD_WIDTH):
         if x <= hold_px:
-            alpha = SCRIM_LEFT                       # 글씨 영역 — 진하게 유지
+            alpha = left                             # 글씨 영역 — 진하게 유지
         else:
             ratio = (x - hold_px) / max(1.0, CARD_WIDTH - 1 - hold_px)
-            alpha = SCRIM_LEFT + (SCRIM_RIGHT - SCRIM_LEFT) * ratio
+            alpha = left + (right - left) * ratio
         mdraw.point((x, 0), fill=int(alpha * 255))
     mask = mask.resize((CARD_WIDTH, CARD_HEIGHT))
     # 덮는 색은 테마에서 뽑은 어두운 색이에요(순검정보다 그림과 어울려요).
@@ -363,7 +366,7 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
         theme = {**CUSTOM_THEME, "image": io.BytesIO(custom["image"]),
                  "top": custom["top"], "bottom": custom["bottom"]}
     if theme.get("image"):
-        image = _art_background(theme["image"], theme["top"], theme["bottom"])
+        image = _art_background(theme["image"], theme["top"], theme["bottom"], theme.get("scrim"))
     else:
         image = _gradient_background(theme["top"], theme["bottom"])
 
