@@ -314,37 +314,39 @@ PULL_ANIM_PAD = 0.6       # 연출 길이 + 이만큼 기다렸다가 바꿔요(
 PULL_ANIM_COLOR = 0x6D3FA8
 
 
-def _png_file(embed: discord.Embed, png: bytes, user_id: int) -> discord.File:
-    name = f"gacha_{user_id}.png"
+def _png_file(embed: discord.Embed, png: bytes, user_id: int, name: str | None = None) -> discord.File:
+    name = name or f"gacha_{user_id}.png"
     embed.set_image(url=f"attachment://{name}")
     return discord.File(io.BytesIO(png), filename=name)
 
 
 async def _play_pull_anim(interaction: discord.Interaction, anim: tuple[bytes, float],
-                          result: discord.Embed, png: bytes, view: discord.ui.View, *,
-                          pulls: int, n: int, ephemeral: bool) -> bool:
-    """연출을 보내고, 끝나면 결과로 바꿔요. **연출을 보내지도 못했으면 False**(부른 쪽이 결과를 보내요)."""
+                          result: discord.Embed, png: bytes, view: discord.ui.View | None, *,
+                          ephemeral: bool, title: str, file_name: str | None = None) -> bool:
+    """연출을 보내고, 끝나면 결과로 바꿔요. **연출을 보내지도 못했으면 False**(부른 쪽이 결과를 보내요).
+    뽑기와 ⚒️ 합성이 같이 써요(합성은 버튼이 없어서 `view=None`)."""
     gif, seconds = anim
-    title = "🎴 카드를 뽑는 중…" if pulls == 1 else f"🎴 {pulls}연속 · 카드 {n}장을 뽑는 중…"
     rolling = discord.Embed(title=title, description="카드가 뒤집히고 있어요…", color=PULL_ANIM_COLOR)
     rolling.set_image(url=f"attachment://{PULL_ANIM_FILE}")
+    extra = {"view": view} if view is not None else {}
     try:
         msg = await interaction.followup.send(
             embed=rolling, file=discord.File(io.BytesIO(gif), filename=PULL_ANIM_FILE),
-            view=view, ephemeral=ephemeral, wait=True)
+            ephemeral=ephemeral, wait=True, **extra)
     except discord.HTTPException:
         log.warning("🎴 뽑기 연출을 못 보냈어요 - 결과만 보내요 (user=%s)", interaction.user.id, exc_info=True)
         return False
 
     await asyncio.sleep(seconds + PULL_ANIM_PAD)
     try:
-        await msg.edit(embed=result, attachments=[_png_file(result, png, interaction.user.id)], view=view)
+        await msg.edit(embed=result, attachments=[_png_file(result, png, interaction.user.id, file_name)],
+                       **extra)
     except discord.HTTPException:
         log.warning("🎴 뽑기 결과로 못 바꿨어요 - 결과 글을 따로 보내요 (user=%s)",
                     interaction.user.id, exc_info=True)
         result.set_image(url=None)
         try:
-            await interaction.followup.send(embed=result, view=view, ephemeral=ephemeral)
+            await interaction.followup.send(embed=result, ephemeral=ephemeral, **extra)
         except discord.HTTPException:
             log.exception("🎴 뽑기 결과를 화면에 못 띄웠어요 (user=%s)", interaction.user.id)
     return True
@@ -417,8 +419,9 @@ async def do_pull(interaction: discord.Interaction, *, pulls: int = 1,
     if png is None:
         # 이미지가 실패해도 뽑은 건 이미 들어갔어요. 글자로라도 보여줘요.
         await interaction.followup.send(embed=embed, view=view, ephemeral=ephemeral)
-    elif anim is None or not await _play_pull_anim(interaction, anim, embed, png, view,
-                                                   pulls=pulls, n=len(drawn), ephemeral=ephemeral):
+    elif anim is None or not await _play_pull_anim(
+            interaction, anim, embed, png, view, ephemeral=ephemeral,
+            title=("🎴 카드를 뽑는 중…" if pulls == 1 else f"🎴 {pulls}연속 · 카드 {len(drawn)}장을 뽑는 중…")):
         await interaction.followup.send(embed=embed, file=_png_file(embed, png, user_id), view=view,
                                         ephemeral=ephemeral)
 
@@ -539,14 +542,21 @@ async def do_fuse(interaction: discord.Interaction, *, times: int = 1,
     embed = _fuse_embed(results, used, summary=summary, dup_left=dup_left)
 
     # 그림엔 성과만 — 레어 이상과 신규. (위 FUSE_ART_MAX 주석 참고)
+    # ⚒️ 단 **몇 장 안 되는 합성**(3장 이하)은 다 그려요(2026-11-23). 성과만 그리면 1회 합성의
+    #    대부분(또 중복인 일반)이 그림도 연출도 없이 글 한 줄로 끝나서, 뭘 받았는지 안 보여요.
     art = [d for d in results if d["grade"] != "일반" or d["is_new"]][:FUSE_ART_MAX]
+    if not art and len(results) <= CARDS_PER_PULL:
+        art = list(results)
     png = await card_render.render_pull(art) if art else None
+    anim = await card_anim.pull_anim(art, png, fuse=True) if png else None
+    file_name = f"fuse_{user_id}.png"
     if png is None:
         await interaction.followup.send(embed=embed, ephemeral=ephemeral)
-    else:
-        file = discord.File(io.BytesIO(png), filename=f"fuse_{user_id}.png")
-        embed.set_image(url=f"attachment://fuse_{user_id}.png")
-        await interaction.followup.send(embed=embed, file=file, ephemeral=ephemeral)
+    elif anim is None or not await _play_pull_anim(
+            interaction, anim, embed, png, None, ephemeral=ephemeral, file_name=file_name,
+            title=f"⚒️ 합성 {len(results)}회 · 재료를 녹이는 중…"):
+        await interaction.followup.send(embed=embed, file=_png_file(embed, png, user_id, file_name),
+                                        ephemeral=ephemeral)
 
     # 🟡 레전드면 뽑기방에 홍보해요. 뽑기와 **같은 함수**를 써요 — 합성으로 나온 레전드도
     # 서버에서 가장 귀한 순간이고, 따로 짜면 문구가 갈려요.

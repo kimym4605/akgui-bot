@@ -237,5 +237,78 @@ asyncio.run(gacha.do_pull(it))
 check("연출을 못 그리면 바로 결과 그림 (예전 그대로)", len(it.followup.sent) == 1
       and it.followup.sent[0]["file"].filename.endswith(".png") and "wait" not in it.followup.sent[0])
 
+# ==================================================================
+print("[5] ⚒️ 합성 연출")
+import importlib  # noqa: E402
+real_anim = importlib.reload(card_anim)      # 위에서 가짜로 바꿔 끼운 pull_anim을 되돌려요(같은 모듈 객체예요)
+fz = [card("에픽", 3, True)]
+fz_png = card_render._render(fz)
+fgif, fsec = real_anim.render_pull_anim(fz, fz_png, fuse=True)
+fim, fdurs = gif_info(fgif)
+fim.seek(fim.n_frames - 1)
+flast = fim.convert("RGB")
+fstill = Image.open(io.BytesIO(fz_png)).convert("RGB").resize(flast.size)
+check("합성 GIF도 마지막 장 = 결과 그림",
+      sum(ImageStat.Stat(ImageChops.difference(flast, fstill)).mean) / 3 < 6)
+check("합성 GIF도 한 번만 재생", "loop" not in Image.open(io.BytesIO(fgif)).info)
+pgif, _ = real_anim.render_pull_anim(fz, fz_png)
+check("합성 첫 장면은 뽑기와 다르다 (재료 3장이 모여요)", pgif != fgif)
+back = real_anim._card_back(100, 150)
+check("🚨 카드 뒷면에 비치는 구멍이 없다 (무늬가 투명 구멍이면 뒤 빛이 줄무늬로 비쳐요)",
+      back.getchannel("A").crop((10, 10, 90, 140)).getextrema() == (255, 255))
+
+FUSE_RESULTS = {"v": []}
+
+
+async def _fuse(uid, times):
+    return [dict(d) for d in FUSE_RESULTS["v"]], {"n01": 3 * max(1, len(FUSE_RESULTS["v"]))}
+
+
+async def _get2(uid):
+    return {"counts": {"n01": 2}, "draws": 3, "since_legend": 0}
+
+
+anim_calls = []
+
+
+async def _anim2(drawn, png, *, fuse=False):
+    anim_calls.append((len(drawn), fuse))
+    return (b"GIF89a fake", 0.0)
+
+rendered = []
+
+
+async def _render2(drawn):
+    rendered.append(len(drawn))
+    return b"\x89PNG still"
+
+gacha.card_store.fuse, gacha.card_store.get_collection = _fuse, _get2
+gacha.card_render.render_pull = _render2
+gacha.card_anim.pull_anim = _anim2
+
+events.clear()
+FUSE_RESULTS["v"] = [card("일반", 4)]            # 또 중복인 일반 1장
+msg = FakeMsg()
+it = inter_with(msg)
+asyncio.run(gacha.do_fuse(it, times=1))
+s0 = it.followup.sent[0]
+check("1회 합성(중복 일반)도 그림·연출이 나온다", anim_calls[-1:] == [(1, True)]
+      and s0["file"].filename == gacha.PULL_ANIM_FILE)
+check("합성 연출 제목에 결과가 없다", "일반" not in (s0["embed"].title or "") and card("일반", 4)["name"]
+      not in (s0["embed"].title or ""))
+check("합성은 버튼 없이 보낸다 (view 인자 없음)", "view" not in s0)
+check("끝나면 합성 결과 + PNG로 바꾼다", len(msg.edits) == 1
+      and msg.edits[0]["attachments"][0].filename.startswith("fuse_")
+      and (msg.edits[0]["embed"].title or "").startswith("⚒️ 합성"))
+check("합성 결과는 기본으로 나만 보인다", s0["ephemeral"] is True)
+
+anim_calls.clear()
+rendered.clear()
+FUSE_RESULTS["v"] = [card("일반", i % 5) for i in range(12)]   # '전부' 합성, 전부 또 중복
+it = inter_with(FakeMsg())
+asyncio.run(gacha.do_fuse(it, times=0))
+check("많은 합성인데 성과가 없으면 그림·연출 없이 글만 (예전 그대로)",
+      not anim_calls and not rendered and it.followup.sent[0].get("file") is None)
+
 print("\n" + ("✅ 전부 통과" if not fails else f"❌ 실패 {fails}건"))
 sys.exit(1 if fails else 0)

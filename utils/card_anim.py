@@ -46,7 +46,7 @@ from utils.profile_card import _RENDER_LOCK, _font
 log = logging.getLogger(__name__)
 
 if PILLOW_AVAILABLE:
-    from PIL import Image, ImageDraw, ImageFilter
+    from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 FRAME_MS = 40
 HOLD_MS = 30_000          # 마지막 장(그 전에 결과 PNG로 바꿔요)
@@ -87,10 +87,16 @@ def _card_back(w: int, h: int) -> "Image.Image":
     inset = max(6, w // 14)
     d.rounded_rectangle((inset, inset, w - 1 - inset, h - 1 - inset), radius=max(4, r - 4),
                         outline=(180, 140, 70), width=max(1, edge // 2))
-    # 비스듬한 무늬
+    # 비스듬한 무늬. 🚨 따로 그려서 **섞어** 얹어요 — RGBA 그림에 반투명 색으로 바로 선을 그으면
+    #    섞이지 않고 그 픽셀이 반투명으로 **바뀌어서**, 뒤에 깐 빛이 선 모양으로 비쳐 보였어요.
     step = max(10, w // 10)
+    lines = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(lines)
     for k in range(-h, w + h, step):
-        d.line([(k, inset), (k + h // 3, h - inset)], fill=(255, 255, 255, 14), width=1)
+        ld.line([(k, inset), (k + h // 3, h - inset)], fill=(255, 255, 255, 14), width=1)
+    lines.putalpha(ImageChops.multiply(lines.getchannel("A"), mask))
+    back.alpha_composite(lines)
+    d = ImageDraw.Draw(back)
     # 가운데 문양: 겹친 마름모 + 글자
     cx, cy = w / 2, h / 2
     s = w * 0.26
@@ -175,11 +181,14 @@ AFTER = {"일반": 3, "레어": 3, "에픽": 7, "레전드": 12}    # 뒤집힌 
 SPARKLE_F = 12
 
 
-def _timeline(drawn, cols, big):
+FUSE_F = 12        # ⚒️ 합성: 재료 3장이 모여 한 장이 되는 장 수 (RISE_F 대신)
+
+
+def _timeline(drawn, cols, big, intro=RISE_F):
     """카드마다 (등장 시작, 뒤집기 시작, 뒤집기 길이) 프레임 번호. 그리고 전체 길이."""
     n = len(drawn)
     rise = [(i // cols) * 2 + (i % cols) * (2 if big else 0) for i in range(n)]
-    rise_end = max(rise) + RISE_F
+    rise_end = max(rise) + intro
     charge_end = rise_end + (12 if big else 9)
     flip_at, flip_len = [0] * n, [0] * n
     t = charge_end
@@ -215,9 +224,12 @@ def _ease_out(t):
 
 
 # ── 그리기 ───────────────────────────────────────────────────────────
-def _build(drawn: list[dict], still_png: bytes):
+def _build(drawn: list[dict], still_png: bytes, fuse: bool = False):
     """프레임(P 모드)과 시간 목록. 🚨 **처음부터 줄인 크기로** 그려요 — 원래 크기로 그린 뒤
-    줄였더니 30장 격자에서 36초가 걸렸어요(프레임마다 1076×1547을 합성)."""
+    줄였더니 30장 격자에서 36초가 걸렸어요(프레임마다 1076×1547을 합성).
+
+    `fuse=True`(⚒️ 합성)면 첫 장면만 달라요: 아래에서 올라오는 대신 **작은 재료 카드 3장이
+    사방에서 모여들어 번쩍하고 한 장이 돼요.** 그 뒤(등급 빛·뒤집기)는 뽑기와 같아요."""
     full = Image.open(io.BytesIO(still_png)).convert("RGB")
     W, H = full.size
     n = len(drawn)
@@ -255,7 +267,13 @@ def _build(drawn: list[dict], still_png: bytes):
         _paste(sample, back, gx, 4 + spread)
     palette = _palette([still, sample.convert("RGB")])
 
-    rise, rise_end, charge_end, flip_at, flip_len, total = _timeline(drawn, cols, big)
+    intro = FUSE_F if fuse else RISE_F
+    rise, rise_end, charge_end, flip_at, flip_len, total = _timeline(drawn, cols, big, intro)
+    mini = back.resize((max(1, int(cw * 0.5)), max(1, int(ch * 0.5))), Image.BILINEAR) if fuse else None
+    merge_spread = spread * 2
+    merge_glow = _glow(cw, ch, GOLD, merge_spread) if fuse else None
+    # 재료 3장이 출발하는 곳 (카드 가운데 기준, 왼쪽 위 · 오른쪽 위 · 아래)
+    starts = [(-0.75, -0.35), (0.75, -0.35), (0.0, 0.7)]
     frames, durations = [], []
 
     def push(img, ms=FRAME_MS):
@@ -270,9 +288,30 @@ def _build(drawn: list[dict], still_png: bytes):
             rank = RANK[g]
             if f < rise[i]:
                 continue
-            k = min(1.0, (f - rise[i]) / RISE_F)
-            dy = (1 - _ease_out(k)) * (h * 0.35)
-            fade = min(1.0, 0.25 + k)
+            if fuse:
+                t_ = f - rise[i]
+                gather = FUSE_F - 3
+                if t_ < gather:
+                    # ⚒️ 재료 3장이 가운데로 모여요 (가까워질수록 작아지며 겹쳐요)
+                    e = _ease_out((t_ + 1) / gather)
+                    cx, cy = x + w / 2, y + h / 2
+                    for sxr, syr in starts:
+                        px = cx + sxr * w * (1 - e) - mini.width / 2
+                        py = cy + syr * h * (1 - e) - mini.height / 2
+                        _paste(img, _with_alpha(mini, 0.55 + 0.45 * e), px, py)
+                    continue
+                if t_ < FUSE_F:
+                    # 번쩍 → 한 장의 뒷면. 🚨 빛은 카드 **뒤에서** 터뜨려요 — 위에 덮었더니 팔레트가
+                    #    중간 색을 못 내서 카드가 갈색 줄무늬로 얼룩졌어요.
+                    strength = (1.0, 0.7, 0.4)[min(2, t_ - gather)]
+                    _paste(img, _with_alpha(merge_glow, strength), x - merge_spread, y - merge_spread)
+                    _paste(img, back, x, y)
+                    continue
+                k, dy, fade = 1.0, 0.0, 1.0
+            else:
+                k = min(1.0, (f - rise[i]) / RISE_F)
+                dy = (1 - _ease_out(k)) * (h * 0.35)
+                fade = min(1.0, 0.25 + k)
             fa, fl = flip_at[i], flip_len[i]
             if f >= fa + fl:
                 # 뒤집힌 뒤
@@ -339,9 +378,9 @@ def _palette(picks):
     return sheet.quantize(colors=COLORS, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
 
 
-def render_pull_anim(drawn: list[dict], still_png: bytes) -> tuple[bytes, float]:
+def render_pull_anim(drawn: list[dict], still_png: bytes, fuse: bool = False) -> tuple[bytes, float]:
     """(GIF, 연출 초). 마지막 장은 결과 PNG와 같은 그림이에요."""
-    pal, durations = _build(drawn, still_png)
+    pal, durations = _build(drawn, still_png, fuse)
     buf = io.BytesIO()
     # loop 키 없음 = 한 번만 재생
     pal[0].save(buf, "GIF", save_all=True, append_images=pal[1:], duration=durations,
@@ -349,13 +388,15 @@ def render_pull_anim(drawn: list[dict], still_png: bytes) -> tuple[bytes, float]
     return buf.getvalue(), sum(durations[:-1]) / 1000
 
 
-async def pull_anim(drawn: list[dict], still_png: bytes | None) -> tuple[bytes, float] | None:
-    """밖에서 부르는 문. 실패하면 None — 부른 쪽은 예전처럼 결과 그림만 보내요."""
+async def pull_anim(drawn: list[dict], still_png: bytes | None, *,
+                    fuse: bool = False) -> tuple[bytes, float] | None:
+    """밖에서 부르는 문. 실패하면 None — 부른 쪽은 예전처럼 결과 그림만 보내요.
+    `fuse=True`면 ⚒️ 합성용 첫 장면(재료 3장이 모여요)."""
     if not PILLOW_AVAILABLE or not drawn or not still_png:
         return None
     async with _RENDER_LOCK:
         try:
-            out = await asyncio.to_thread(render_pull_anim, drawn, still_png)
+            out = await asyncio.to_thread(render_pull_anim, drawn, still_png, fuse)
         except Exception:                                # noqa: BLE001
             log.exception("🎴 뽑기 연출을 못 그렸어요 - 결과 그림만 보내요 (%s)",
                           [d.get("key") for d in drawn])
