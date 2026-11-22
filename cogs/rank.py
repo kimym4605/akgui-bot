@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import io
 import os
 import time
 from typing import Optional
@@ -9,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 import aiohttp
 
-from utils import agwi_weekly_store, henrik_api, riot_account_store, valorant_coach
+from utils import agwi_weekly_store, henrik_api, riot_account_store, stat_art, valorant_coach
 from utils.channel_check import restrict_to_channel
 from utils.rank_stats_store import get_kd_percentile, get_sample_size, record_stats
 from utils.riot_account_store import get_account, is_matching_account
@@ -242,6 +243,7 @@ def _extract_player_match_stats(match: dict, name: str, tag: str) -> Optional[di
         "total_rounds": rounds_won + rounds_lost,
         "won": bool(my_team_info.get("has_won", False)),
         "agent": me.get("character") or "알 수 없음",
+        "tier": me.get("currenttier"),        # 📊 경기 알림 카드에 그 판 티어 엠블럼 (없으면 None)
     }
 
 
@@ -257,6 +259,7 @@ def aggregate_match_stats(
     }
     agent_counts: dict[str, int] = {}
     position_counts: dict[str, int] = {}
+    recent: list[tuple[float, bool, str]] = []
 
     for match in matches:
         if not match:
@@ -279,6 +282,9 @@ def aggregate_match_stats(
         totals["matches_counted"] += 1
 
         agent_counts[stat["agent"]] = agent_counts.get(stat["agent"], 0) + 1
+        # 📊 전적 카드의 "최근 경기" 줄(승/패 + 요원). 경쟁전에 일반전을 이어 붙이면 순서가 섞여서
+        #    시작 시각으로 다시 정렬해요(아래 return 직전).
+        recent.append((float((match.get("metadata") or {}).get("game_start") or 0), stat["won"], stat["agent"]))
 
         position = AGENT_ROLE_MAP.get(stat["agent"])
         if position is not None:
@@ -316,13 +322,19 @@ def aggregate_match_stats(
         "top_agents": top_agents,
         "position_counts": position_counts,
         "top_position": top_position,
+        # 📊 전적 카드용(2026-11-23): 많이 한 요원 3명, 최신순 (승리?, 요원)
+        "agents_ranked": sorted(agent_counts.items(), key=lambda item: item[1], reverse=True)[:3],
+        "recent": [(won, agent) for _, won, agent in sorted(recent, key=lambda r: -r[0])],
     }
 
 
 def build_summary_embed(
     닉네임: str, 태그: str, tier_name: str, rr: Optional[int], stats: dict,
     comp_count: int, used_fallback: bool, target: int, mode: str = MODE_AUTO,
+    compact: bool = False,
 ) -> discord.Embed:
+    """`compact=True`면 숫자 덩어리를 빼고 **안내 문구만** 남겨요 — 숫자는 📊 전적 카드 그림에 다 있어요
+    (그림을 못 그렸을 땐 `compact=False`로 예전 글 리포트를 그대로 보내요)."""
     n = stats["matches_counted"]
     unrated_only = mode == MODE_UNRATED
 
@@ -367,6 +379,8 @@ def build_summary_embed(
         f"{position_line}"
     )
 
+    if compact:
+        description = ""
     if unrated_only:
         description += (
             "\n\n🎮 **일반전만** 모아 본 기록이에요. "
@@ -380,11 +394,36 @@ def build_summary_embed(
 
     embed = discord.Embed(
         title=f"🎮 [{닉네임}#{태그}] 님의 발로란트 {'일반전 ' if unrated_only else ''}전적 리포트",
-        description=description,
+        description=description.strip() or None,
         color=stats["agwi_color"],
     )
     embed.set_footer(text="출처: HenrikDev API (비공식) · 악귀 스코어는 자체 산출 지표예요")
     return embed
+
+
+REPORT_CARD_FILE = "valorant_report.png"
+
+
+def report_card_data(닉네임: str, 태그: str, tier_name: str, rr: Optional[int], tier_id: Optional[int],
+                     stats: dict, comp_count: int, used_fallback: bool, mode: str = MODE_AUTO) -> dict:
+    """📊 `/전적` 카드(`utils/stat_art.report_card`)에 넘길 값. 새로 계산하는 건 없어요 — 글 리포트와 같은 숫자예요."""
+    n = stats["matches_counted"]
+    if mode == MODE_UNRATED:
+        sample = f"최근 일반전 {n}경기"
+    elif used_fallback:
+        sample = f"최근 {n}경기 (경쟁전 {comp_count} + 일반전 {n - comp_count})"
+    else:
+        sample = f"최근 경쟁전 {n}경기"
+    return {
+        "riot": f"{닉네임}#{태그}", "tier_name": tier_name, "rr": rr, "tier_id": tier_id,
+        "score": stats["agwi_score"], "max_score": AGWI_MAX_SCORE, "grade": stats["agwi_grade"],
+        "grade_color": stats["agwi_color"], "kd": stats["kd"], "win_rate": stats["win_rate"],
+        "wins": stats["wins"], "losses": n - stats["wins"], "hs": stats["hs_percent"],
+        "adr": stats["adr"], "acs": stats["acs"], "sample": sample,
+        "agents": [(a, AGENT_KOREAN_NAMES.get(a, a), c) for a, c in stats.get("agents_ranked") or []],
+        "position": stats.get("top_position"),
+        "recent": stats.get("recent") or [],
+    }
 
 
 def build_detail_embed(
@@ -867,10 +906,18 @@ class Rank(commands.Cog):
             except discord.Forbidden:
                 position_sync_note = "⚠️ 봇에게 역할 관리 권한이 없어서 포지션 역할을 갱신하지 못했어요."
 
+        # 📊 전적 카드 그림(2026-11-23). 그리면 글은 안내만 남기고, 못 그리면 예전 글 리포트 그대로.
+        card = await stat_art.report_card(
+            report_card_data(닉네임, 태그, tier_name, rr, tier_id, stats, comp_count, used_fallback, mode))
         embed = build_summary_embed(
-            닉네임, 태그, tier_name, rr, stats, comp_count, used_fallback, effective_target, mode=mode
+            닉네임, 태그, tier_name, rr, stats, comp_count, used_fallback, effective_target, mode=mode,
+            compact=card is not None,
         )
-        if tier_id is not None and tier_id in self.tier_icons:
+        card_kw = {}
+        if card is not None:
+            card_kw["file"] = discord.File(io.BytesIO(card), filename=REPORT_CARD_FILE)
+            embed.set_image(url=f"attachment://{REPORT_CARD_FILE}")
+        elif tier_id is not None and tier_id in self.tier_icons:
             embed.set_thumbnail(url=self.tier_icons[tier_id])
 
         # 🎯 AI 한 줄 평 (2026-10-18). 숫자를 "뭘 고치면 되는지"로 바꿔줘요.
@@ -887,7 +934,7 @@ class Rank(commands.Cog):
         if position_sync_note:
             embed.add_field(name="포지션 역할", value=position_sync_note, inline=False)
         view = RankDetailView(닉네임, 태그, stats, comp_count, used_fallback, mode=mode)
-        await reply(embed=embed, view=view)
+        await reply(embed=embed, view=view, **card_kw)
         return True
 
 

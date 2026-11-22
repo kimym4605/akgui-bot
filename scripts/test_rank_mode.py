@@ -110,6 +110,13 @@ def install(rec, unrated_result=None):
     rank_cog.sync_position_role = _mk_async(
         lambda member, position: rec.position.append(position) or {"status": "unchanged"})
     rank_cog.valorant_coach.coach = _mk_async(lambda stats, tier_name: None)
+    # 📊 1~7번은 **글 리포트**의 숫자를 봐요 → 그림 카드는 "못 그렸다"로 두고 예전 글 길을 타요.
+    #    그림 길은 맨 아래 8번이 따로 봐요(2026-11-23).
+    rank_cog.stat_art.report_card = CARD["fn"]
+
+
+REAL_REPORT_CARD = rank_cog.stat_art.report_card
+CARD = {"fn": _mk_async(lambda d: None)}
 
 
 class FakeMember(discord.Member):
@@ -257,6 +264,33 @@ check("일반전만: 꼬리말이 상위 % 표본 인원을 말하지 않는다"
       du.footer.text)
 da = rank_cog.build_detail_embed(NAME, TAG, stats, 10, False)
 check("기본: 꼬리말이 예전 그대로다", "7명 기준" in (da.footer.text or ""), da.footer.text)
+
+
+print("\n9) 📊 전적 카드 그림 (2026-11-23)")
+CARD["fn"] = REAL_REPORT_CARD
+c = run(rank_cog.MODE_UNRATED)
+ce = embed_of(c)
+sent = [k for _a, k in c.replies if k.get("embed") is not None]
+check("그림이 붙어서 나간다", bool(sent) and getattr(sent[0].get("file"), "filename", "") == rank_cog.REPORT_CARD_FILE)
+check("임베드가 그 그림을 가리킨다", ce is not None and (ce.image.url or "").endswith(rank_cog.REPORT_CARD_FILE))
+cdesc = (ce.description or "") if ce else ""
+check("숫자 덩어리는 글에서 빠진다 (그림과 두 벌이 안 되게)", "K/D 비율" not in cdesc and "헤드샷율" not in cdesc, cdesc[:200])
+check("🚨 '일반전만' 안내는 그대로 남는다", "일반전만" in cdesc, cdesc[:200])
+data = rank_cog.report_card_data(NAME, TAG, "Gold 1", 40, 12, stats, 0, False, rank_cog.MODE_UNRATED)
+check("카드 표본 줄이 '최근 일반전 10경기'", data["sample"] == "최근 일반전 10경기", data["sample"])
+check("카드 K/D가 일반전 값(3.0)", abs(data["kd"] - 3.0) < 0.01, str(data["kd"]))
+check("카드 최근 경기 10개 · 전부 세이지", len(data["recent"]) == 10 and {a for _w, a in data["recent"]} == {"Sage"},
+      str(data["recent"][:3]))
+check("카드 선호 요원이 한글 이름도 갖는다", data["agents"][0][:2] == ("Sage", "세이지"), str(data["agents"]))
+mixed = COMP[:3] + UNRATED[:2]
+for i, m in enumerate(mixed):        # 일반전이 더 최근에 시작한 경기
+    m = dict(m)
+    m["metadata"] = {**m["metadata"], "game_start": 1000 + (100 if i >= 3 else 0) + i}
+    mixed[i] = m
+ms = rank_cog.aggregate_match_stats(mixed, NAME, TAG, tier_id=12, rr=40)
+check("🚨 경쟁전+일반전을 이어 붙여도 '최근 경기'는 시작 시각 최신순",
+      [a for _w, a in ms["recent"]][:2] == ["Sage", "Sage"], str(ms["recent"]))
+CARD["fn"] = _mk_async(lambda d: None)
 
 
 # 🚨 요약은 맨 마지막이어야 해요(뒤에 섹션을 붙이면 그 FAIL이 집계에서 빠져요).

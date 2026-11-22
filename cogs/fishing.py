@@ -113,7 +113,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs import mission
-from utils import coin_wallet, fish_anim, fish_art, fish_data, fishing_store, profile_service
+from utils import coin_wallet, fish_anim, fish_art, fish_data, fishing_store, profile_service, stat_art
 from utils.channel_check import restrict_to_channel
 from utils.fish_data import (
     BY_KEY, COIN_PIECES, DAILY_CAST_CAP, FISH, GRADE_ORDER, GRADES,
@@ -1464,8 +1464,17 @@ class Fishing(commands.Cog):
             for i, (uid, coins) in enumerate(rows)
         )
         embed = discord.Embed(title="🎣 낚시왕", description=body, color=0xFFC850)
+        # 🏆 순위표 그림(2026-11-23). 못 그리면 위 글 목록 그대로.
+        board_file = await stat_art.board_attach(
+            embed, interaction.guild, "낚시왕", "물고기를 팔아 번 코인",
+            [{"title": "누적 판매", "rows": [{"rank": i + 1, "uid": uid, "value": f"{coins:,}코인"}
+                                          for i, (uid, coins) in enumerate(rows)]}], 0xFFC850)
+        extra = {}
+        if board_file is not None:
+            embed.description = None
+            extra["file"] = board_file
         await interaction.followup.send(
-            embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            embed=embed, allowed_mentions=discord.AllowedMentions.none(), **extra)
 
     @app_commands.command(name="낚시확률",
                           description="등급별 확률과 물고기 값을 공개해요.")

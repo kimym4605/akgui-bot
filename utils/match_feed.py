@@ -40,12 +40,13 @@ HenrikDev는 분당 30회를 키 하나로 나눠 써요(`utils/henrik_api.py`).
 """
 from __future__ import annotations
 
+import io
 import logging
 import time
 
 import discord
 
-from utils import match_feed_store, notify_prefs, valorant_maps
+from utils import match_feed_store, notify_prefs, stat_art, valorant_maps
 from utils.channel_check import get_allowed_channel_id
 
 log = logging.getLogger(__name__)
@@ -84,6 +85,49 @@ def _mode_label(mode: str | None) -> str:
         "custom": "사용자 설정",
     }
     return table.get((mode or "").lower(), mode or "기타")
+
+
+def _outcome(match: dict, stat: dict) -> tuple[str, int, str]:
+    """(결과 '승리'/'패배'/'무승부', 임베드 색, '13 : 9'). 글 임베드와 📊 카드 그림이 같이 써요."""
+    teams = match.get("teams") or {}
+    my_team = None
+    for side in ("red", "blue"):
+        info = teams.get(side) or {}
+        if info.get("has_won") == stat["won"] and info.get("rounds_won") is not None:
+            my_team = side
+            break
+    mine = (teams.get(my_team) or {}) if my_team else {}
+    won_rounds, lost_rounds = mine.get("rounds_won"), mine.get("rounds_lost")
+    if won_rounds is not None and lost_rounds is not None:
+        score = f"{won_rounds} : {lost_rounds}"
+        if won_rounds == lost_rounds:
+            return "무승부", DRAW_COLOR, score
+        return ("승리", WIN_COLOR, score) if stat["won"] else ("패배", LOSE_COLOR, score)
+    return ("승리", WIN_COLOR, "?") if stat["won"] else ("패배", LOSE_COLOR, "?")
+
+
+CARD_FILE = "match_result.png"
+
+
+def card_data(display_name: str, match: dict, stat: dict) -> dict:
+    """📊 경기 결과 카드(`utils/stat_art.match_card`)에 넘길 값 (2026-11-23)."""
+    from cogs.rank import AGENT_KOREAN_NAMES          # cogs.rank가 이 모듈 쪽을 부르므로 함수 안에서
+    meta = match.get("metadata") or {}
+    result, _, score = _outcome(match, stat)
+    kills, deaths, assists = stat["kills"], stat["deaths"], stat["assists"]
+    rounds = stat["total_rounds"] or 1
+    shots = stat["headshots"] + stat["bodyshots"] + stat["legshots"]
+    mode = (meta.get("mode") or "").lower()
+    return {
+        "name": display_name, "agent": stat["agent"], "agent_ko": AGENT_KOREAN_NAMES.get(stat["agent"], stat["agent"]),
+        "result": result, "score": score, "map_en": meta.get("map"),
+        "map_ko": valorant_maps.to_korean(meta.get("map")) or meta.get("map"), "mode": _mode_label(meta.get("mode")),
+        "kills": kills, "deaths": deaths, "assists": assists, "kd": kills / max(deaths, 1),
+        "acs": stat["score"] / rounds, "adr": stat["damage_made"] / rounds,
+        "hs": (stat["headshots"] / shots * 100) if shots else 0.0,
+        # 티어 엠블럼은 경쟁전에서만 (일반전 티어 값은 의미가 없어요)
+        "tier_id": stat.get("tier") if mode == "competitive" else None,
+    }
 
 
 def build_embed(
@@ -211,8 +255,22 @@ async def post_new_matches(
         stat = stats_of(match)
         if stat is None:
             continue
+        embed = build_embed(display, riot_id, match, stat)
+        # 📊 그림 카드(2026-11-23). 맵·요원·승패·KDA가 다 그림에 있어서 글 칸은 걷어내요.
+        #    그림을 못 그리면 예전 글 임베드 그대로 — 알림 자체는 꼭 나가요.
+        kw = {}
         try:
-            await channel.send(embed=build_embed(display, riot_id, match, stat))
+            png = await stat_art.match_card(card_data(display, match, stat))
+        except Exception:                                # noqa: BLE001
+            log.warning("🔔 경기 카드 데이터 실패 - 글로 보내요", exc_info=True)
+            png = None
+        if png is not None:
+            embed.description = None
+            embed.clear_fields()
+            embed.set_image(url=f"attachment://{CARD_FILE}")
+            kw["file"] = discord.File(io.BytesIO(png), filename=CARD_FILE)
+        try:
+            await channel.send(embed=embed, **kw)
         except discord.HTTPException:
             log.warning("🔔 경기 알림 전송 실패 (user=%s)", user_id, exc_info=True)
             break

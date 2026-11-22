@@ -12,6 +12,7 @@
 그래서 **"이번 주에 `/전적`을 한 번이라도 돌린 사람"만 순위에 올라와요.** 이건 버그가 아니라
 의도예요. 안 그러면 순위표를 위해 전원 조회를 돌려야 하거든요.
 """
+import io
 import logging
 
 import discord
@@ -25,6 +26,7 @@ from utils import (
     birthday_store,
     riot_account_store,
     scrim_record_store,
+    stat_art,
     tier_roles,
     valorant_maps,
     weekly_recap,
@@ -294,6 +296,49 @@ async def build_scrim_embed(target: discord.abc.User) -> discord.Embed | None:
     return embed
 
 
+SCRIM_CARD_FILE = "scrim_record.png"
+
+
+async def attach_scrim_card(target: discord.abc.User, embed: discord.Embed) -> discord.File | None:
+    """⚔️ `/내전전적` 그림 카드(2026-11-23)를 그려 `embed`에 붙여요. 붙였으면 글 칸은 걷어내요
+    (숫자가 그림에 다 있어요). 못 그리면 None — 부른 쪽은 글 임베드를 그대로 보내요.
+
+    ⚠️ `build_scrim_embed`와 같은 저장소 값을 다시 읽어요(작은 조회 5번). 임베드를 만드는 함수를
+    건드리지 않으려고 따로 뒀어요 — `/프로필`의 ⚔️ 내전 전적도 그 함수를 같이 써요."""
+    overall = await scrim_record_store.get_record(target.id)
+    season = await scrim_record_store.get_season_record(target.id)
+    recent = await scrim_record_store.recent_matches(target.id, limit=5)
+    kda = await scrim_record_store.kda_summary(target.id)
+    map_rows = await scrim_record_store.map_stats(target.id)
+    uid = str(target.id)
+    kda_line = ""
+    if kda.get("matches"):
+        n = kda["matches"]
+        kda_line = (f"평균 {kda['kills'] / n:.1f} / {kda['deaths'] / n:.1f} / {kda['assists'] / n:.1f}"
+                    f" · K/D {kda['kills'] / max(kda['deaths'], 1):.2f} · {n}판 기준")
+    maps = sorted(((r["map"], r["wins"], r["losses"]) for r in map_rows if r["wins"] + r["losses"]),
+                  key=lambda m: (-(m[1] + m[2]), m[0]))
+    data = {
+        "name": target.display_name, "wins": overall["wins"], "losses": overall["losses"],
+        "rate": scrim_record_store.win_rate(overall) or 0, "best": overall.get("bestStreak", 0),
+        "worst": abs(overall.get("worstStreak", 0)), "season": scrim_record_store.current_season(),
+        "s_wins": season["wins"], "s_losses": season["losses"],
+        "streak": scrim_record_store.streak_text(overall),
+        "recent": [(uid in m.get("winners", []), m.get("map")) for m in recent],
+        "kda": kda_line, "maps": maps,
+    }
+    from utils import profile_service
+    png = await stat_art.scrim_card(data, await profile_service.avatar_for(target))
+    if png is None:
+        return None
+    embed.clear_fields()
+    embed.set_image(url=f"attachment://{SCRIM_CARD_FILE}")
+    if not map_rows:
+        embed.description = ("-# 🗺️ 맵별 성적은 `/팀짜기`의 **🗺️ 맵** 버튼이나 승리 보고 뒤 "
+                             "맵 드롭다운으로 맵을 정하면 쌓여요.")
+    return discord.File(io.BytesIO(png), filename=SCRIM_CARD_FILE)
+
+
 def _bar(percent: float, length: int = 12) -> str:
     filled = int(length * percent / 100)
     return "🟨" * filled + "⬜" * (length - filled)
@@ -350,7 +395,11 @@ class Achievement(commands.Cog):
         if embed is None:
             await interaction.followup.send(scrim_empty_text(target))
             return
-        await interaction.followup.send(embed=embed)
+        card = await attach_scrim_card(target, embed)
+        if card is not None:
+            await interaction.followup.send(embed=embed, file=card)
+        else:
+            await interaction.followup.send(embed=embed)
 
     # ------------------------------------------------------------------
     @app_commands.command(name="주간랭킹", description="이번 주 악귀력 순위와 내전 승수 순위를 봐요.")
@@ -401,6 +450,22 @@ class Achievement(commands.Cog):
                 inline=False,
             )
 
+        # 🏆 순위표 그림(2026-11-23). 그리면 위의 글 목록 두 칸은 걷어내요(그림에 다 있어요).
+        sections = [
+            {"title": "악귀력", "empty": "아직 아무도 /전적 을 돌리지 않았어요",
+             "rows": [{"rank": i + 1, "uid": r["userId"], "value": f"{r['score']:,.0f}",
+                       "sub": r.get("grade") or ""} for i, r in enumerate(rows)]},
+            {"title": f"내전 (시즌 {season})", "empty": "아직 기록된 경기가 없어요",
+             "rows": [{"rank": i + 1, "uid": r["userId"], "value": f"{r['wins']}승 {r['losses']}패",
+                       "sub": f"승률 {scrim_record_store.win_rate(r) or 0:.0f}%"}
+                      for i, r in enumerate(scrim_rows)]},
+        ]
+        board_file = await stat_art.board_attach(
+            embed, interaction.guild, f"{'지난주' if 지난주 else '이번 주'} 랭킹",
+            f"{week} · 악귀력은 /전적 을 돌린 사람만 · 내전은 시즌 누적", sections, 0x9B59B6)
+        if board_file is not None:
+            embed.clear_fields()
+
         # 🏆 AI 해설 (2026-10-18). 순위표를 이야기로 만들어줘요.
         #
         # 🚨 **모델에게 디스코드 ID를 넘기지 않아요.** 표시 이름만 넘기고 답변에도 이름만
@@ -429,7 +494,10 @@ class Achievement(commands.Cog):
                 embed.add_field(name="📝 이번 주 이야기", value=note, inline=False)
 
         embed.set_footer(text="악귀력은 /전적 을 돌린 사람만 집계돼요 · 내전은 /팀짜기 결과 보고 기준")
-        await interaction.followup.send(embed=embed)
+        if board_file is not None:
+            await interaction.followup.send(embed=embed, file=board_file)
+        else:
+            await interaction.followup.send(embed=embed)
 
     # ------------------------------------------------------------------
     @app_commands.command(name="내전시즌", description="[서버 소유자 전용] 내전 시즌 이름을 바꿔요. (통산 기록은 그대로)")

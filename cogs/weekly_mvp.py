@@ -24,13 +24,14 @@
 from __future__ import annotations
 
 import datetime
+import io
 import logging
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from utils import agwi_weekly_store
+from utils import agwi_weekly_store, profile_service, stat_art
 from utils.channel_check import get_allowed_channel_id
 
 log = logging.getLogger(__name__)
@@ -94,6 +95,17 @@ def build_embed(row: dict, week: str, display_name: str, total: int) -> discord.
     )
     embed.set_footer(text="역할은 다음 주 MVP가 나올 때까지 유지돼요")
     return embed
+
+
+MVP_CARD_FILE = "weekly_mvp.png"
+
+
+def mvp_card_data(row: dict, week: str, display_name: str, total: int) -> dict:
+    """🏅 MVP 카드(`utils/stat_art.mvp_card`)에 넘길 값. 글 임베드와 같은 숫자예요."""
+    stats = row.get("stats") or {}
+    return {"name": display_name, "week": week, "score": row.get("score", 0), "grade": row.get("grade"),
+            "kd": stats.get("kd"), "win_rate": stats.get("winRate"), "hs": stats.get("hs"),
+            "matches": stats.get("matches"), "total": total}
 
 
 async def ensure_role(guild: discord.Guild) -> discord.Role | None:
@@ -172,7 +184,18 @@ class WeeklyMVP(commands.Cog):
                     "`/채널설정`으로 🏆 주간결산 채널을 정해주세요.")
 
         embed = build_embed(winner_row, week, member.display_name, len(rows))
-        await channel.send(content=f"🎉 {member.mention}", embed=embed)
+        # 🏅 축하 카드 그림(2026-11-23). 성적 칸은 그림에 있으니 글에서는 빼요. 못 그리면 글 그대로.
+        extra = {}
+        png = await stat_art.mvp_card(mvp_card_data(winner_row, week, member.display_name, len(rows)),
+                                      await profile_service.avatar_for(member))
+        if png is not None:
+            for i, field in enumerate(embed.fields):
+                if field.name == "지난주 성적":
+                    embed.remove_field(i)
+                    break
+            embed.set_image(url=f"attachment://{MVP_CARD_FILE}")
+            extra["file"] = discord.File(io.BytesIO(png), filename=MVP_CARD_FILE)
+        await channel.send(content=f"🎉 {member.mention}", embed=embed, **extra)
         note = "" if given else "\n⚠️ 역할은 권한이 없어 못 줬어요."
         return f"{channel.mention}에 발표했어요 — **{member.display_name}** 님{note}"
 

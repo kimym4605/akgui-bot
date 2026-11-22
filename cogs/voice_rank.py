@@ -24,7 +24,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils import voice_level
+from utils import stat_art, voice_level
 
 log = logging.getLogger(__name__)
 
@@ -175,8 +175,19 @@ class VoiceRank(commands.Cog):
             color=0x5865F2,
         )
         embed.set_footer(text="혼자 있는 시간은 세지 않아요 · 5분마다 정산돼요")
+        # 🏆 순위표 그림(2026-11-23). 못 그리면 위 글 목록 그대로.
+        board_file = await stat_art.board_attach(
+            embed, interaction.guild, f"음성 활동 {'이번 주' if weekly else '누적'} 순위",
+            "통화방에서 2명 이상 함께 있던 시간",
+            [{"title": "활동 시간", "rows": [
+                {"rank": i + 1, "uid": r["userId"], "value": voice_level.format_minutes(r["minutes"]),
+                 "sub": f"Lv.{r['level']}"} for i, r in enumerate(rows)]}], 0x5865F2)
+        extra = {}
+        if board_file is not None:
+            embed.description = None
+            extra["file"] = board_file
         await interaction.followup.send(
-            embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            embed=embed, allowed_mentions=discord.AllowedMentions.none(), **extra)
 
 
 async def setup(bot: commands.Bot):

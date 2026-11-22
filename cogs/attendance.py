@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs import mission
-from utils import profile_card, profile_service
+from utils import profile_card, profile_service, stat_art
 from utils.channel_check import channel_key, restrict_to_channel
 from utils import attend_service
 from utils.settings_store import set_setting
@@ -256,12 +256,13 @@ class ProfileMoreSelect(
             await rank_cog.send_rank_report(interaction, ephemeral=True)
 
         elif kind == "scrim":
-            from cogs.achievement import build_scrim_embed, scrim_empty_text
+            from cogs.achievement import attach_scrim_card, build_scrim_embed, scrim_empty_text
             embed = await build_scrim_embed(user)
             if embed is None:
                 await send(scrim_empty_text(user), ephemeral=True)
             else:
-                await send(embed=embed, ephemeral=True)
+                card = await attach_scrim_card(user, embed)       # ⚔️ 그림 카드 (못 그리면 글 그대로)
+                await send(embed=embed, files=[card] if card else [], ephemeral=True)
 
         elif kind == "voice":
             from cogs.voice_rank import build_voice_embed
@@ -499,8 +500,19 @@ class Attendance(commands.Cog):
             color=0xFFC850,
             description="-# ⏳ 는 오늘 출석을 아직 안 한 사람이에요.",
         )
-        embed.add_field(name="🔥 연속 출석", value=render(data["streak"], "일"), inline=False)
-        embed.add_field(name="📅 누적 출석", value=render(data["total"], "회"), inline=False)
+        # 🏆 순위표 그림(2026-11-23). 그리면 글 목록 두 칸 대신 그림, ⏳는 "오늘 출석 전"으로.
+        def rows_of(rows, suffix):
+            return [{"rank": i + 1, "uid": r[0], "value": f"{r[1]}{suffix}",
+                     "sub": "" if len(r) < 3 or r[2] else "오늘 출석 전"} for i, r in enumerate(rows)]
+        board_file = await stat_art.board_attach(
+            embed, interaction.guild, "출석 순위", "매일 /출석 으로 이어가요",
+            [{"title": "연속 출석", "rows": rows_of(data["streak"], "일")},
+             {"title": "누적 출석", "rows": rows_of(data["total"], "회")}], 0xFFC850)
+        if board_file is not None:
+            embed.description = None
+        else:
+            embed.add_field(name="🔥 연속 출석", value=render(data["streak"], "일"), inline=False)
+            embed.add_field(name="📅 누적 출석", value=render(data["total"], "회"), inline=False)
         if data["risky"]:
             names = " · ".join(f"<@{uid}> ({streak}일)" for uid, streak in data["risky"])
             embed.add_field(
@@ -509,7 +521,8 @@ class Attendance(commands.Cog):
                 inline=False,
             )
         # 멘션 글씨는 보이되 핑은 안 쏴요 (순위표가 사람들을 호출하면 시끄러워요).
-        await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        extra = {"file": board_file} if board_file is not None else {}
+        await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none(), **extra)
 
     @app_commands.command(name="출석", description="오늘의 출석체크를 합니다. (하루 1회, 악귀코인 획득)")
     @restrict_to_channel("attend")
