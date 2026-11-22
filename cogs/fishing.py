@@ -113,7 +113,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs import mission
-from utils import coin_wallet, fish_art, fish_data, fishing_store, profile_service
+from utils import coin_wallet, fish_anim, fish_art, fish_data, fishing_store, profile_service
 from utils.channel_check import restrict_to_channel
 from utils.fish_data import (
     BY_KEY, COIN_PIECES, DAILY_CAST_CAP, FISH, GRADE_ORDER, GRADES,
@@ -194,6 +194,20 @@ _casting: dict[int, float] = {}
 CAST_GUARD_TTL = BITE_MAX + STRIKE_WAIT + 15.0
 WAIT_COLOR, BITE_COLOR = 0x2B6CB0, 0x38A169
 MISS_COLOR = 0x6B7280
+
+# 🎞️ 움직이는 그림 첨부 이름(2026-11-22) -> utils/fish_anim.py
+WAIT_GIF_NAME = "fish_wait.gif"      # 찌가 떠 있는 호수 (끝없이 돌아요)
+BITE_GIF_NAME = "fish_bite.gif"      # 입질! 찌가 쑥쑥 들어가요
+CATCH_GIF_NAME = "fish_catch.gif"    # 대물·전설이 물 위로 튀어올라요 (한 번만)
+
+
+def anim_file(embed: discord.Embed, path, name: str) -> list[discord.File]:
+    """미리 만들어 둔 GIF를 임베드에 크게 걸어요. 파일이 없으면 그림 자리를 비우고 빈 목록."""
+    if path is None:
+        embed.set_image(url=None)
+        return []
+    embed.set_image(url=f"attachment://{name}")
+    return [discord.File(path, filename=name)]
 
 _GRADE_KEYS = {g: [f["key"] for f in rows] for g, rows in FISH.items()}
 
@@ -456,6 +470,13 @@ async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> 
     else:
         next_view = BuyRodView(interaction.user.id)
     files = attach_fish_art(embed, key)
+    if key and BY_KEY[key][0] in BIG_ART_GRADES:
+        # 🎞️ 대물·전설은 물 위로 **튀어오르는 GIF**로 크게 보여줘요(한 번만 돌고 물고기가 떠 있는 장에 멈춰요).
+        #    못 그리면 원래 그림(`attach_fish_art`) 그대로예요.
+        gif = await fish_anim.catch_gif(key, BY_KEY[key][0])
+        if gif:
+            embed.set_image(url=f"attachment://{CATCH_GIF_NAME}")
+            files = [discord.File(io.BytesIO(gif), filename=CATCH_GIF_NAME)]
     try:
         await interaction.edit_original_response(embed=embed, view=next_view, attachments=files)
     except discord.HTTPException:
@@ -876,7 +897,15 @@ async def _run_cast(interaction: discord.Interaction, *, edit: bool,
         embed.set_footer(text="너무 일찍 누르면 미끼만 날려요")
     # 🚨 **본인에게만** 보여요. 한 채널에서 여러 명이 동시에 던지면 찌가 뒤섞여서
     #    어느 게 내 건지 알 수 없고, 남의 '입질!'을 보고 눌러버리기도 해요.
-    await show(content=None, embed=embed, view=view)
+    # 🎞️ 찌가 떠 있는 GIF를 같이 띄워요. 🚨 그림 때문에 실패하면 **그림 없이 한 번 더** - 낚시대는
+    #    이미 깎였으니 화면을 못 띄우는 게 제일 나빠요.
+    try:
+        await show(content=None, embed=embed, view=view,
+                   attachments=anim_file(embed, fish_anim.wait_path(), WAIT_GIF_NAME))
+    except discord.HTTPException:
+        log.warning("🎞️ 찌 GIF를 못 붙였어요 - 그림 없이 다시 띄워요 (user=%s)", uid, exc_info=True)
+        embed.set_image(url=None)
+        await show(content=None, embed=embed, view=view)
 
     # 입질까지 기다려요. 그 사이에 유저가 누르면 done이 먼저 떨어져요(= 성급).
     try:
@@ -892,9 +921,16 @@ async def _run_cast(interaction: discord.Interaction, *, edit: bool,
             color=BITE_COLOR,
         )
         try:
-            await interaction.edit_original_response(embed=bite, view=view)
+            await interaction.edit_original_response(
+                embed=bite, view=view,
+                attachments=anim_file(bite, fish_anim.bite_path(), BITE_GIF_NAME))
         except discord.HTTPException:
-            log.info("입질 표시 실패 (메시지가 사라졌을 수 있어요)")
+            # 그림 때문일 수 있어요 → 그림 없이 한 번 더 (입질을 못 보면 챔질을 못 해요)
+            try:
+                bite.set_image(url=None)
+                await interaction.edit_original_response(embed=bite, view=view, attachments=[])
+            except discord.HTTPException:
+                log.info("입질 표시 실패 (메시지가 사라졌을 수 있어요)")
 
         # 🚨 시계는 **메시지를 보낸 뒤에** 시작해요.
         #

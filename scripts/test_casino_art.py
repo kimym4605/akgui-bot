@@ -463,6 +463,7 @@ def order(*kinds) -> bool:
 cog = cas.Casino(None)
 saved_cas = (cas.take_bet, cas.pay_out, games.spin_slot, games.roll_highlow, games.new_deck,
              art.slot_card, art.highlow_card, art.blackjack_card, art.lobby_card)
+saved_bj_anim = art.blackjack_anim
 cas.take_bet, cas.pay_out = _take_bet, _pay_out
 asyncio.sleep = _fake_sleep
 logging.disable(logging.CRITICAL)
@@ -541,6 +542,8 @@ try:
           and not it.sent[1]["embed"].image.url and "결과" in fields(it.sent[1]["embed"]))
 
     # ── 블랙잭 ──
+    # 🎞️ 여기 아래 묶음은 **GIF를 못 만들 때**(정지 그림만) 예전처럼 도는지 봐요. GIF 흐름은 그 뒤 묶음.
+    art.blackjack_anim = _no_art
     # 덱은 **뒤에서부터** 뽑아요: 나 [10, 5] · 딜러 [10, 6] → 히트 2 → 히트 2 → 딜러가 9를 뽑아 25
     def _deck():
         return [4, 4, 4, 9, 2, 2, 6, 10, 5, 10]
@@ -655,6 +658,99 @@ try:
     finally:
         cas.refund_bet = saved_refund
 
+    # ── 🎞️ 블랙잭 GIF 흐름 ──
+    art.blackjack_anim = spied(saved_bj_anim)
+    GIF = b"GIF89a"
+
+    def _is_gif(kw) -> bool:
+        files = list(kw.get("attachments") or []) + ([kw["file"]] if kw.get("file") else [])
+        return len(files) == 1 and files[0].filename == cas.BJ_ANIM_FILE and files[0].fp.read(6) == GIF
+
+    async def _deal_and_hit():
+        games.new_deck = _deck
+        it = FakeInteraction()
+        await cog.blackjack.callback(cog, it, 5)
+        v = it.sent[0]["view"]
+        first_task = v._settle_task
+        await first_task
+        h = FakeInteraction()
+        h.view = v
+        await v.hit.callback(h)
+        hit_task = v._settle_task
+        await hit_task
+        # 교체를 기다리는 사이에 화면이 바뀐 경우: 그 교체는 아무것도 안 해야 해요
+        h2 = FakeInteraction()
+        h2.view = v
+        v.settle_later(h2, v.table_embed(reveal=False), b"\xff\xd8\xff", 0.1)
+        v.screen += 1
+        await v._settle_task
+        return it, v, h, h2
+    events.clear(), slept.clear()
+    it, v6, h, h2 = asyncio.run(_deal_and_hit())
+    deal = it.sent[0]
+    check("블랙잭 GIF: 판을 열 때 카드를 나눠주는 GIF + 버튼", _is_gif(deal) and isinstance(deal.get("view"), cas.BlackjackView)
+          and deal["embed"].image.url == f"attachment://{cas.BJ_ANIM_FILE}")
+    check("블랙잭 GIF: 🚨 처음 글에 딜러 둘째 장·합계가 없다", "`6`" not in fields(deal["embed"]) and "16" not in fields(deal["embed"]))
+    msg_edits = deal_msg_edits = getattr(v6.message, "edits", [])
+    check("블랙잭 GIF: 다 놓이면 같은 메시지가 정지 그림으로 바뀐다(버튼 유지)",
+          len(msg_edits) == 1 and _names(msg_edits[0]) == [cas.BJ_FILE] and msg_edits[0]["view"] is v6)
+    check("블랙잭 GIF 히트: GIF → 정지 그림 순서", len(h.edits) == 2 and _is_gif(h.edits[0])
+          and _names(h.edits[1]) == [cas.BJ_FILE] and len(v6.player) == 3, str([_names(e) for e in h.edits]))
+    check("블랙잭 GIF: 🚨 기다리는 사이 화면이 바뀌었으면 정지 그림으로 덮지 않는다", not h2.edits)
+    check("블랙잭 GIF: 이미 놓인 카드 수를 기억한다(다음 GIF는 새 카드만)", (v6.shown_player, v6.shown_dealer) == (3, 2))
+
+    async def _stand(v):
+        s = FakeInteraction()
+        s.view = v
+        events.clear(), slept.clear()
+        await v.stand.callback(s)
+        return s
+    s = asyncio.run(_stand(v6))
+    check("블랙잭 GIF 스탠드: 정산 → GIF → 기다림 → 결과", order("pay_out", "art", "edit", "sleep", "edit")
+          and len(s.edits) == 2 and _is_gif(s.edits[0]) and _names(s.edits[1]) == [cas.BJ_FILE],
+          str([e[0] for e in events]))
+    pend = s.edits[0]["embed"]
+    check("블랙잭 GIF 스탠드: 🚨 GIF가 도는 동안 글에 결과·딜러 패가 없다",
+          "결과" not in fields(pend) and "`6`" not in fields(pend), fields(pend))
+    check("블랙잭 GIF 스탠드: 끝나면 결과 글 + 버튼 꺼짐", "결과" in fields(s.edits[1]["embed"])
+          and all(b.disabled for b in v6.children) and slept and slept[0] > cas.BJ_ANIM_PAD)
+
+    games.new_deck = lambda: [9, 9, 6, 10, 13, 1]
+    events.clear(), slept.clear()
+    it = FakeInteraction()
+    asyncio.run(cog.blackjack.callback(cog, it, 5))
+    check("블랙잭 GIF 즉시 21: GIF(결과 없음·버튼 없음) → 결과 그림으로 교체",
+          len(it.sent) == 1 and _is_gif(it.sent[0]) and "view" not in it.sent[0] and "결과" not in fields(it.sent[0]["embed"])
+          and len(it.edits) == 1 and _names(it.edits[0]) == [cas.BJ_FILE] and "결과" in fields(it.edits[0]["embed"]))
+
+    refunds.clear()
+    cas.refund_bet = _refund
+    try:
+        games.new_deck = _deck
+        it = FakeInteraction(fail="art")
+        asyncio.run(cog.blackjack.callback(cog, it, 5))
+        check("블랙잭 GIF: 🚨 GIF도 정지 그림도 못 보내면 글만으로 판을 열고 환불은 안 한다",
+              refunds == [] and len(it.sent) == 3 and _is_gif(it.sent[0])
+              and isinstance(it.sent[2].get("view"), cas.BlackjackView) and not it.sent[2]["embed"].image.url,
+              f"{refunds} / 전송 {len(it.sent)}번")
+    finally:
+        cas.refund_bet = saved_refund
+
+    # 그림 자체: 숨긴 카드가 GIF에서 안 새는지 · 마지막 장이 정지 그림과 같은지
+    kw = dict(dealer_suits=["spade", "heart"], player_suits=["heart", "club"], bet=10,
+              shown_dealer=0, shown_player=0, reveal=False)
+    g1, still1, sec1 = art.render_blackjack_anim([10, 6], [9, 5], **kw)
+    g2, _s2, _ = art.render_blackjack_anim([10, 13], [9, 5], **dict(kw, dealer_suits=["spade", "club"]))
+    check("블랙잭 GIF: 🚨 엎어둔 카드를 바꿔도 GIF가 **똑같다**", g1 == g2)
+    gif_im = Image.open(io.BytesIO(g1))
+    gif_im.seek(gif_im.n_frames - 1)
+    gap = diff(gif_im.convert("RGB"), Image.open(io.BytesIO(still1)))
+    check(f"블랙잭 GIF: 마지막 장 = 정지 그림 (차이 {gap:.1f})", gap < 4, f"{gap:.1f}")
+    check(f"블랙잭 GIF: 첫 배분 {sec1:.1f}초 · {len(g1) // 1024}KB (3초·700KB 안)", sec1 < 3 and len(g1) < 700 * 1024)
+    gn, _sn, secn = art.render_blackjack_anim([10, 6, 8], [1, 13], **dict(kw, reveal=True, note="블랙잭!", outcome=3))
+    check(f"블랙잭 GIF: 즉시 21(배분+공개+딜러 한 장) {secn:.1f}초 · {len(gn) // 1024}KB (4초·900KB 안)",
+          secn < 4 and len(gn) < 900 * 1024)
+
     # ── 현황 ──
     async def _state(_uid):
         return 20, 20
@@ -691,12 +787,13 @@ finally:
     logging.disable(logging.NOTSET)
     (cas.take_bet, cas.pay_out, games.spin_slot, games.roll_highlow, games.new_deck,
      art.slot_card, art.highlow_card, art.blackjack_card, art.lobby_card) = saved_cas
+    art.blackjack_anim = saved_bj_anim
 
 # 그림 파일 이름이 서로 달라야 해요(같으면 한 메시지에서 그림이 뒤바뀌어요).
-file_names = [cas.SLOT_SPIN_FILE, cas.SLOT_FILE, cas.HIGHLOW_FILE, cas.BJ_FILE, cas.LOBBY_FILE]
-check("첨부 이름 5개가 서로 다르고 확장자가 내용과 맞다",
-      len(set(file_names)) == 5 and cas.SLOT_SPIN_FILE.endswith(".gif")
-      and all(n.endswith(".jpg") for n in file_names[1:]), str(file_names))
+file_names = [cas.SLOT_SPIN_FILE, cas.BJ_ANIM_FILE, cas.SLOT_FILE, cas.HIGHLOW_FILE, cas.BJ_FILE, cas.LOBBY_FILE]
+check("첨부 이름 6개가 서로 다르고 확장자가 내용과 맞다",
+      len(set(file_names)) == 6 and all(n.endswith(".gif") for n in file_names[:2])
+      and all(n.endswith(".jpg") for n in file_names[2:]), str(file_names))
 
 print("\n" + ("✅ 전부 통과" if not fails else f"❌ 실패 {fails}건"))
 sys.exit(1 if fails else 0)

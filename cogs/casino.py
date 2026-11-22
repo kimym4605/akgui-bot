@@ -64,10 +64,13 @@ SLOT_SPIN_FILE = "slot_spin.gif"
 SLOT_FILE = "slot.jpg"
 HIGHLOW_FILE = "highlow.jpg"
 BJ_FILE = "blackjack.jpg"
+BJ_ANIM_FILE = "blackjack.gif"
 LOBBY_FILE = "casino.jpg"
 # 🎰 릴이 다 멈춘 뒤 결과 글을 띄우기까지 **더** 기다리는 시간(초). GIF는 유저 화면에 다 내려받아진
 #    뒤에야 돌기 시작해요. 딱 맞춰 바꾸면 릴이 멈추기도 전에 결과가 먼저 떠요.
 SLOT_REVEAL_PAD = 0.9
+# 🃏 블랙잭 카드 GIF도 같은 이유로 움직이는 시간보다 이만큼 더 기다렸다가 정지 그림으로 바꿔요.
+BJ_ANIM_PAD = 0.9
 
 # 🚨 `coin_log`에 남는 이름. **"도박"으로 시작하면 안 돼요.**
 #    `scripts/report_economy.py`가 `도박`으로 시작하는 spend를 **베팅액**으로 세서,
@@ -340,12 +343,95 @@ class BlackjackView(discord.ui.View):
         #    늦게 끝난 쪽이 화면을 덮으면 한 장 전의 판이 남아요. 한 번에 하나씩만 돌게 줄을 세워요.
         #    (`ack`는 줄 **밖**에서 먼저 해요 - 줄에서 기다리다 3초를 넘기면 안 되니까요.)
         self.turn = asyncio.Lock()
+        # 🎞️ 카드 GIF(2026-11-22). 지난 화면에 **이미 놓여 있던** 장 수 - 다음 GIF는 그 뒤 카드만 날아와요.
+        self.shown_player = 0
+        self.shown_dealer = 0
+        # 🚨 화면을 고칠 때마다 1씩 올려요. GIF가 끝나면 정지 그림으로 바꾸는 일이 **나중에** 도는데,
+        #    그 사이 히트·정산으로 화면이 바뀌었으면(번호가 달라졌으면) 바꾸지 않아요 - 안 그러면 한 장
+        #    전의 패로 덮여요.
+        self.screen = 0
+        self._settle_task: asyncio.Task | None = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("본인 판만 만질 수 있어요.", ephemeral=True)
             return False
         return True
+
+    async def table_anim(self, *, reveal: bool, note: str = "",
+                         outcome: int | None = None) -> tuple[bytes, bytes, float] | None:
+        """🎞️ 지난 화면 뒤로 바뀐 카드가 날아오는 GIF (GIF, 정지 그림, 움직이는 초). 실패하면 None.
+
+        🚨 `table_art`처럼 **절대 예외를 올리지 않아요.**"""
+        try:
+            self.suit_book.extend(self.player_suits, self.player)
+            self.suit_book.extend(self.dealer_suits, self.dealer)
+            return await casino_art.blackjack_anim(
+                self.dealer, self.player, dealer_suits=list(self.dealer_suits),
+                player_suits=list(self.player_suits), shown_dealer=self.shown_dealer,
+                shown_player=self.shown_player, reveal=reveal, note=note, outcome=outcome, bet=self.bet)
+        except Exception:                                    # noqa: BLE001
+            log.exception("🎞️ 블랙잭 GIF 준비에 실패했어요 - 정지 그림으로 (user=%s)", self.user_id)
+            return None
+
+    def _edit_fn(self, interaction: discord.Interaction | None):
+        if interaction is not None:
+            return interaction.edit_original_response
+        return self.message.edit if self.message is not None else None
+
+    def _mark_shown(self) -> int:
+        self.screen += 1
+        self.shown_player, self.shown_dealer = len(self.player), len(self.dealer)
+        return self.screen
+
+    async def play_gif(self, interaction: discord.Interaction | None, embed: discord.Embed,
+                       gif: bytes) -> bool:
+        """GIF를 붙여 화면을 고쳐요. 보냈으면 True, 못 보냈으면 False(부른 쪽이 정지 그림으로 물러나요)."""
+        edit = self._edit_fn(interaction)
+        if edit is None:
+            return False
+        embed.set_image(url=f"attachment://{BJ_ANIM_FILE}")
+        try:
+            await edit(embed=embed, view=self, attachments=[discord.File(io.BytesIO(gif), BJ_ANIM_FILE)])
+        except discord.HTTPException:
+            log.warning("🎞️ 블랙잭 GIF를 못 붙였어요 - 정지 그림으로 다시 해요", exc_info=True)
+            return False
+        self._mark_shown()
+        return True
+
+    def settle_later(self, interaction: discord.Interaction | None, embed: discord.Embed,
+                     still: bytes, seconds: float) -> None:
+        """GIF가 다 움직인 뒤 **정지 그림으로** 바꿔요(그대로 두면 화면에 다시 들어올 때마다 처음부터
+        다시 돌아요). 그 사이 화면이 바뀌었으면 아무것도 안 해요(`self.screen` 주석)."""
+        screen, edit = self.screen, self._edit_fn(interaction)
+        if edit is None:
+            return
+        embed = embed.copy()          # 보낸 임베드는 건드리지 않아요(그림 주소만 바꿔 끼워요)
+
+        async def run():
+            await asyncio.sleep(seconds + BJ_ANIM_PAD)
+            async with self.turn:
+                if screen != self.screen:
+                    return
+                try:
+                    await edit(embed=embed, view=self, attachments=art_files(embed, still, BJ_FILE))
+                except discord.HTTPException:
+                    log.info("🎞️ 블랙잭 GIF → 정지 그림 교체 실패 (판은 그대로예요, user=%s)", self.user_id)
+
+        self._settle_task = asyncio.create_task(run())
+
+    async def show_moving(self, interaction: discord.Interaction | None, embed: discord.Embed, *,
+                          reveal: bool) -> None:
+        """진행 중 화면(히트·처음 배분). GIF가 되면 GIF → 나중에 정지 그림, 안 되면 예전처럼 정지 그림."""
+        anim = await self.table_anim(reveal=reveal)
+        if anim is not None:
+            gif, still, seconds = anim
+            if await self.play_gif(interaction, embed, gif):
+                self.settle_later(interaction, embed, still, seconds)
+                return
+            await self.show(interaction, embed, still)
+            return
+        await self.show(interaction, embed, await self.table_art(reveal=reveal))
 
     def table_embed(self, *, reveal: bool, note: str = "", color: int = HOUSE_COLOR) -> discord.Embed:
         dealer_line = (
@@ -389,12 +475,10 @@ class BlackjackView(discord.ui.View):
            상호작용이라 `response.*`를 다시 쓸 수 없어요.
         🚨 `attachments=`를 **항상** 넘겨요(`art_files` 주석). 그림 때문에 실패하면 글만으로
            한 번 더 해요 - 정산은 끝났는데 화면이 안 바뀌면 이겼는지 졌는지 못 봐요."""
-        if interaction is not None:
-            edit = interaction.edit_original_response
-        elif self.message is not None:
-            edit = self.message.edit
-        else:
+        edit = self._edit_fn(interaction)
+        if edit is None:
             return
+        self._mark_shown()
         files = art_files(embed, card, BJ_FILE)
         try:
             await edit(embed=embed, view=self, attachments=files)
@@ -429,7 +513,18 @@ class BlackjackView(discord.ui.View):
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
 
-        card = await self.table_art(reveal=True, note=note, outcome=multiplier)
+        # 🎞️ 딜러가 엎은 카드를 뒤집고 더 받는 GIF를 먼저 보여주고, 다 움직이면 결과를 띄워요(슬롯처럼).
+        #    🚨 GIF가 도는 동안의 글에는 **결과가 없어요** - 그림보다 글이 먼저 승패를 알려주면 김이 새요.
+        #    정산은 위에서 이미 끝났어요. 여기서부터 어디서 실패해도 결과 화면은 꼭 나가요.
+        anim = await self.table_anim(reveal=True, note=note, outcome=multiplier)
+        card = None
+        if anim is not None:
+            gif, card, seconds = anim
+            pending = self.table_embed(reveal=False, note="🃏 딜러 차례예요…")
+            if await self.play_gif(interaction, pending, gif):
+                await asyncio.sleep(seconds + BJ_ANIM_PAD)
+        if card is None:
+            card = await self.table_art(reveal=True, note=note, outcome=multiplier)
         if interaction is not None:
             await self.show(interaction, embed, card)
             return
@@ -464,8 +559,7 @@ class BlackjackView(discord.ui.View):
             if games.hand_value(self.player) >= 21:
                 await self.finish(interaction)
                 return
-            await self.show(interaction, self.table_embed(reveal=False),
-                            await self.table_art(reveal=False))
+            await self.show_moving(interaction, self.table_embed(reveal=False), reveal=False)
 
     @discord.ui.button(label="스탠드", emoji="✋", style=discord.ButtonStyle.secondary)
     async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -604,6 +698,33 @@ class Casino(commands.Cog):
             embed = view.table_embed(reveal=True, note=note,
                                      color=WIN_COLOR if payout > 금액 else HOUSE_COLOR)
             embed.add_field(name="결과", value=result_line(금액, payout, balance), inline=False)
+            # 🎞️ 배분부터 정산까지 한 GIF로 보여주고 결과로 바꿔요(슬롯과 같은 순서·같은 물러나기).
+            anim = await view.table_anim(reveal=True, note=note, outcome=multiplier)
+            if anim is not None:
+                gif, still, seconds = anim
+                pending = view.table_embed(reveal=False, note="🃏 카드를 나눠요…")
+                pending.set_image(url=f"attachment://{BJ_ANIM_FILE}")
+                try:
+                    await interaction.followup.send(
+                        embed=pending, file=discord.File(io.BytesIO(gif), BJ_ANIM_FILE))
+                except discord.HTTPException:
+                    log.warning("🃏 블랙잭 GIF를 못 보냈어요 - 정지 그림으로 보내요", exc_info=True)
+                else:
+                    await asyncio.sleep(seconds + BJ_ANIM_PAD)
+                    try:
+                        await interaction.edit_original_response(
+                            embed=embed, attachments=art_files(embed, still, BJ_FILE))
+                    except discord.HTTPException:
+                        log.warning("🃏 블랙잭 결과 그림으로 못 바꿨어요 - 글만 고쳐요", exc_info=True)
+                        try:
+                            await interaction.edit_original_response(
+                                embed=embed, attachments=art_files(embed, None, BJ_FILE))
+                        except discord.HTTPException:
+                            log.exception("🃏 블랙잭 결과를 화면에 못 띄웠어요 (user=%s · %d코인 → %d코인)",
+                                          interaction.user.id, 금액, payout)
+                    return
+                await send_with_art(interaction, embed, still, BJ_FILE)
+                return
             await send_with_art(
                 interaction, embed,
                 await view.table_art(reveal=True, note=note, outcome=multiplier), BJ_FILE)
@@ -615,9 +736,27 @@ class Casino(commands.Cog):
         # 한 사람이 5코인과 하루 한도 5를 날렸어요(그걸로 이 버그를 발견했어요).
         # 🎨 그림 때문에 못 띄운 거면 `send_with_art`가 글만으로 한 번 더 해봐요. 그것도 안 되면 환불.
         try:
-            view.message = await send_with_art(
-                interaction, view.table_embed(reveal=False),
-                await view.table_art(reveal=False), BJ_FILE, view=view)
+            # 🎞️ 카드를 나눠주는 GIF로 판을 열고, 다 놓이면 정지 그림으로 바꿔요. GIF가 안 되면 예전처럼.
+            embed = view.table_embed(reveal=False)
+            anim = await view.table_anim(reveal=False)
+            if anim is not None:
+                gif, still, seconds = anim
+                embed.set_image(url=f"attachment://{BJ_ANIM_FILE}")
+                try:
+                    view.message = await interaction.followup.send(
+                        embed=embed, view=view, wait=True,
+                        file=discord.File(io.BytesIO(gif), BJ_ANIM_FILE))
+                except discord.HTTPException:
+                    log.warning("🃏 블랙잭 첫 GIF를 못 보냈어요 - 정지 그림으로 다시 해요", exc_info=True)
+                    view.message = await send_with_art(interaction, embed, still, BJ_FILE, view=view)
+                    view._mark_shown()
+                else:
+                    view._mark_shown()
+                    view.settle_later(None, embed, still, seconds)
+            else:
+                view.message = await send_with_art(
+                    interaction, embed, await view.table_art(reveal=False), BJ_FILE, view=view)
+                view._mark_shown()
         except discord.HTTPException:
             view.done = True
             view.stop()

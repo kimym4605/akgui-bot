@@ -530,6 +530,83 @@ def render_blackjack(dealer: list[int], player: list[int], **kwargs) -> bytes:
     return _jpeg(_blackjack_image(dealer, player, **kwargs))
 
 
+class _BjKit:
+    """한 번 그리는 동안만 쓰는 블랙잭 재료(테이블·뒷면·앞면). 다 그리면 버려요(메모리에 안 남겨요).
+
+    움직이는 그림은 같은 카드를 수십 장 그려서, 앞면을 장마다 새로 만들지 않게 여기 모아 둬요."""
+
+    def __init__(self):
+        felt = _load("felt", "RGB")
+        self.table = _cover(felt, BJ_W, BJ_H) if felt is not None else Image.new("RGB", (BJ_W, BJ_H), (58, 30, 104))
+        self.shadow = Image.new("RGBA", (CARD_W + 8, CARD_H + 8), (0, 0, 0, 0))
+        ImageDraw.Draw(self.shadow).rounded_rectangle((3, 4, CARD_W + 4, CARD_H + 5), 11, fill=(8, 2, 20, 110))
+        self._back: Image.Image | None = None
+        self._faces: dict[tuple[int, str], Image.Image] = {}
+
+    def back(self) -> Image.Image:
+        if self._back is None:
+            self._back = _card_back()
+        return self._back
+
+    def face(self, rank: int, suit: str) -> Image.Image:
+        key = (rank, suit)
+        if key not in self._faces:
+            self._faces[key] = _card_face(rank, suit)
+        return self._faces[key]
+
+
+def _suit_at(suits: list[str], i: int) -> str:
+    return suits[i] if i < len(suits) else SUITS[i % len(SUITS)]
+
+
+# 한 줄의 카드 한 장 = (x, 숫자, 무늬, 앞면 정도). 앞면 정도 1.0 = 앞면, 0.0 = 뒷면, 사이 = 뒤집히는 중.
+# 🚨 앞면 정도가 0.5 미만(뒷면이 보이는 장)이면 숫자·무늬 자리에 **None**을 넣어요 - 그림이 아예
+#    못 읽게요(뒤집힌 카드가 그림에서 새면 안 돼요).
+BjCard = tuple[float, "int | None", "str | None", float]
+
+
+def _bj_scene(kit: _BjKit, rows: list[tuple[int, str, list[BjCard]]], *, note: str, outcome: int | None,
+              bet: int | None, banner: bool = True,
+              flying: tuple[float, float, float] | None = None) -> Image.Image:
+    """테이블 한 장. `rows` = (y, 이름, 카드들). `flying` = 날아오는 뒷면 카드 (x, y, 기울기°)."""
+    img = kit.table.copy()
+    d = ImageDraw.Draw(img, "RGBA")
+    for y, name, cards in rows:
+        shown = [rank for _x, rank, _s, phase in cards if phase >= 0.5 and rank is not None]
+        # `+?`는 딜러 줄에만 붙여요. 내 카드는 뒤집히는 찰나에만 뒷면이라 `+?`가 깜빡이면 어색해요.
+        hidden = y == BJ_ROW_DEALER and any(phase < 0.5 for *_r, phase in cards)
+        value = games.hand_value(shown)
+        # 이름표 + 합계
+        d.rounded_rectangle((24, y + 30, 122, y + 92), 16, fill=INK + (205,), outline=GOLD_DARK, width=2)
+        _center(d, 73, y + 35, name, _font("bold", 19), MUTED)
+        total = f"{value}+?" if hidden else (str(value) if cards else "-")
+        _center(d, 73, y + 58, total, _font("bold", 25), RED if value > 21 else TEXT)
+        for x, rank, suit, phase in cards:
+            if phase >= 1.0:
+                art, lift = kit.face(rank, suit), 0.0
+            elif phase <= 0.0:
+                art, lift = kit.back(), 0.0
+            else:
+                # 뒤집기: 가로로 접혔다가(뒷면) 다시 펴져요(앞면). 살짝 들려요.
+                side = kit.face(rank, suit) if phase >= 0.5 and rank is not None else kit.back()
+                w = max(2, round(CARD_W * abs(math.cos(math.pi * phase))))
+                art = side.resize((w, CARD_H), Image.BILINEAR)
+                lift = 7 * math.sin(math.pi * phase)
+            ox = (CARD_W - art.width) / 2
+            shadow = kit.shadow if art.width == CARD_W else kit.shadow.resize((art.width + 8, kit.shadow.height))
+            _paste(img, shadow, x + ox - 1, y)
+            _paste(img, art, x + ox, y - lift)
+    if flying is not None:
+        fx, fy, angle = flying
+        card = kit.back().rotate(angle, resample=Image.BICUBIC, expand=True) if angle else kit.back()
+        sh = kit.shadow.rotate(angle, resample=Image.BICUBIC, expand=True) if angle else kit.shadow
+        cx, cy = fx + CARD_W / 2, fy + CARD_H / 2
+        _paste(img, sh, cx - sh.width / 2 + 6, cy - sh.height / 2 + 10)
+        _paste(img, card, cx - card.width / 2, cy - card.height / 2)
+    _bj_overlay(img, d, note=note if banner else "", outcome=outcome, bet=bet)
+    return img
+
+
 def _blackjack_image(dealer: list[int], player: list[int], *, dealer_suits: list[str], player_suits: list[str],
                      reveal: bool, note: str = "", outcome: int | None = None, bet: int | None = None) -> Image.Image:
     """블랙잭 테이블. `reveal=False`면 딜러의 둘째 장부터 뒤집어 둬요(합계도 첫 장만 세요).
@@ -537,35 +614,25 @@ def _blackjack_image(dealer: list[int], player: list[int], *, dealer_suits: list
     🚨 뒤집힌 카드는 **숫자·무늬를 아예 읽지 않아요**(뒷면 그림만 얹어요). 그림에서 패가 새면
        안 되니까요 - test_casino_art가 "숨긴 카드를 바꿔도 그림이 똑같은지" 봐요.
     `note`는 `casino_games.settle_blackjack`의 문구, `outcome`은 그 배당 배수예요."""
-    felt = _load("felt", "RGB")
-    img = _cover(felt, BJ_W, BJ_H) if felt is not None else Image.new("RGB", (BJ_W, BJ_H), (58, 30, 104))
-    d = ImageDraw.Draw(img, "RGBA")
-    back = None
 
-    def row(y: int, name: str, cards: list[int], suits: list[str], hidden_from: int | None) -> None:
-        nonlocal back
-        n = len(cards)
-        x, step = _bj_row(n)
-        shown = cards if hidden_from is None else cards[:hidden_from]
-        value = games.hand_value(shown)
-        # 이름표 + 합계
-        d.rounded_rectangle((24, y + 30, 122, y + 92), 16, fill=INK + (205,), outline=GOLD_DARK, width=2)
-        _center(d, 73, y + 35, name, _font("bold", 19), MUTED)
-        total = f"{value}+?" if hidden_from is not None and hidden_from < n else str(value)
-        _center(d, 73, y + 58, total, _font("bold", 25), RED if value > 21 else TEXT)
-        shadow = Image.new("RGBA", (CARD_W + 8, CARD_H + 8), (0, 0, 0, 0))
-        ImageDraw.Draw(shadow).rounded_rectangle((3, 4, CARD_W + 4, CARD_H + 5), 11, fill=(8, 2, 20, 110))
+    def lay(cards: list[int], suits: list[str], hidden_from: int | None) -> list[BjCard]:
+        x0, step = _bj_row(len(cards))
+        out: list[BjCard] = []
         for i, rank in enumerate(cards):
             if hidden_from is not None and i >= hidden_from:
-                face = back = back or _card_back()
+                out.append((x0 + i * step, None, None, 0.0))
             else:
-                face = _card_face(rank, suits[i] if i < len(suits) else SUITS[i % len(SUITS)])
-            _paste(img, shadow, x + i * step - 1, y)
-            _paste(img, face, x + i * step, y)
+                out.append((x0 + i * step, rank, _suit_at(suits, i), 1.0))
+        return out
 
-    row(BJ_ROW_DEALER, "딜러", dealer, dealer_suits, None if reveal else 1)
-    row(BJ_ROW_PLAYER, "나", player, player_suits, None)
+    rows = [(BJ_ROW_DEALER, "딜러", lay(dealer, dealer_suits, None if reveal else 1)),
+            (BJ_ROW_PLAYER, "나", lay(player, player_suits, None))]
+    return _bj_scene(_BjKit(), rows, note=note, outcome=outcome, bet=bet)
 
+
+def _bj_overlay(img: Image.Image, d: ImageDraw.ImageDraw, *, note: str, outcome: int | None,
+                bet: int | None) -> None:
+    """가운데 줄: 베팅 꼬리표 + 결과 띠."""
     cy = BJ_H // 2
     tag_w = 0.0
     if bet is not None:
@@ -585,7 +652,123 @@ def _blackjack_image(dealer: list[int], player: list[int], *, dealer_suits: list
         d.rounded_rectangle(((BJ_W - tw) / 2 - 24, cy - 23, (BJ_W + tw) / 2 + 24, cy + 23), 23,
                             fill=INK + (225,), outline=GOLD if outcome else GOLD_DARK, width=2)
         d.text(((BJ_W - tw) / 2, cy - size * 0.62), text, font=font, fill=color)
-    return img
+
+
+# ── 🃏 블랙잭 움직이는 그림 (2026-11-22) ──────────────────────────────
+# 카드가 오른쪽 위(카드 통)에서 **뒷면으로 날아와 놓이고**, 앞면인 카드는 그 자리에서 뒤집혀요.
+# 정산 때는 딜러의 엎어둔 카드가 뒤집히고, 딜러가 더 받는 카드가 한 장씩 날아와요.
+# 🚨 마지막 장 = `_blackjack_image`(같은 판·같은 공개 여부)와 **같은 그림**이어야 해요. 부른 쪽이
+#    GIF가 끝나면 그 정지 그림으로 바꿔 끼우는데, 다르면 바꾸는 순간 카드가 튀어요.
+BJ_FRAME_MS = 40                           # GIF 시간은 10ms 단위라 10의 배수로
+BJ_FLY_FRAMES = 6                          # 날아오는 장 수
+BJ_FLIP_PHASES = (0.2, 0.4, 0.6, 0.8, 1.0)  # 뒤집기 (0.5는 카드가 옆으로 서서 안 보이는 순간이라 건너뛰어요)
+BJ_LAND_MS = 70                            # 카드가 놓인 뒤 잠깐 멈추는 시간
+BJ_REVEAL_MS = 380                         # 딜러 엎은 카드를 뒤집은 뒤 숨 고르는 시간
+BJ_HOLD_MS = 30_000                        # 마지막 장(그 전에 정지 그림으로 바꿔요)
+BJ_SHOE = (BJ_W + 14.0, -CARD_H - 24.0)    # 카드가 날아오는 곳(화면 오른쪽 위 밖)
+BJ_COLORS = 240
+
+
+def _ease_out(t: float) -> float:
+    return 1 - (1 - t) ** 3
+
+
+def _bj_anim_build(dealer: list[int], player: list[int], *, dealer_suits: list[str], player_suits: list[str],
+                   shown_dealer: int, shown_player: int, reveal: bool, note: str = "",
+                   outcome: int | None = None, bet: int | None = None
+                   ) -> tuple[list[Image.Image], list[int], Image.Image]:
+    """(GIF 프레임들(P), 프레임별 시간, 마지막 정지 그림(RGB)).
+
+    `shown_*` = 지난 화면에 **이미 놓여 있던** 장 수예요(그건 처음부터 놓인 채로 시작해요).
+    둘 다 0이면 첫 배분(나 → 딜러 → 나 → 딜러(엎어서)) 순서로 날아와요.
+    `reveal=True`면 딜러 엎은 카드를 뒤집고, 딜러가 더 받은 카드도 날아와요."""
+    kit = _BjKit()
+    hands = {"d": dealer, "p": player}
+    suits = {"d": dealer_suits, "p": player_suits}
+    row_y = {"d": BJ_ROW_DEALER, "p": BJ_ROW_PLAYER}
+    # 줄마다 놓인 카드: [x, 앞면 정도]
+    placed: dict[str, list[list[float]]] = {"d": [], "p": []}
+    for key, n, hidden_from in (("p", shown_player, None), ("d", shown_dealer, 1)):
+        x0, step = _bj_row(max(1, n))
+        placed[key] = [[x0 + i * step, 0.0 if hidden_from is not None and i >= hidden_from else 1.0]
+                       for i in range(n)]
+    plan: list[tuple[list, tuple | None, bool, int]] = []   # (줄들, 날아오는 카드, 결과 띠, 시간)
+
+    def snap(*, fly=None, banner=False, ms=BJ_FRAME_MS):
+        rows = []
+        for key, name in (("d", "딜러"), ("p", "나")):
+            cards: list[BjCard] = []
+            for i, (x, phase) in enumerate(placed[key]):
+                up = phase >= 0.5
+                cards.append((x, hands[key][i] if up else None, _suit_at(suits[key], i) if up else None, phase))
+            rows.append((row_y[key], name, cards))
+        plan.append((rows, fly, banner, ms))
+
+    def flip(key: str, i: int, pause: int = 0) -> None:
+        for k, phase in enumerate(BJ_FLIP_PHASES):
+            placed[key][i][1] = phase
+            last = k == len(BJ_FLIP_PHASES) - 1
+            snap(ms=BJ_FRAME_MS + (BJ_LAND_MS + pause if last else 0))
+
+    def deal(key: str, up: bool) -> None:
+        i = len(placed[key])
+        x0, step = _bj_row(i + 1)
+        targets = [x0 + k * step for k in range(i + 1)]
+        start = [c[0] for c in placed[key]]
+        sx, sy = BJ_SHOE
+        for f in range(1, BJ_FLY_FRAMES + 1):
+            t = _ease_out(f / BJ_FLY_FRAMES)
+            for k, c in enumerate(placed[key]):          # 먼저 놓인 카드는 자리를 비켜줘요
+                c[0] = start[k] + (targets[k] - start[k]) * t
+            if f < BJ_FLY_FRAMES:
+                snap(fly=(sx + (targets[i] - sx) * t, sy + (row_y[key] - sy) * t, 32 * (1 - t)))
+        placed[key].append([targets[i], 0.0])
+        snap(ms=BJ_FRAME_MS + (0 if up else BJ_LAND_MS))
+        if up:
+            flip(key, i)
+
+    snap()
+    if shown_dealer == 0 and shown_player == 0:
+        for key, up in (("p", True), ("d", True), ("p", True), ("d", False)):
+            deal(key, up)
+    while len(placed["p"]) < len(player):
+        deal("p", True)
+    if reveal:
+        for i, c in enumerate(placed["d"]):
+            if c[1] < 1.0:
+                flip("d", i, pause=BJ_REVEAL_MS)
+        while len(placed["d"]) < len(dealer):
+            deal("d", True)
+    snap(banner=True, ms=BJ_HOLD_MS)
+
+    def render(k: int) -> Image.Image:
+        rows, fly, banner, _ms = plan[k]
+        return _bj_scene(kit, rows, note=note, outcome=outcome, bet=bet, banner=banner, flying=fly)
+
+    # 팔레트 한 벌: 첫 장 + 마지막 장 + 카드가 날아오는 장(뒷면 색)에서 뽑아요. 디더링은 꺼요(슬롯 주석).
+    # 🚨 프레임은 **그리자마자 색을 줄여** 쥐어요. RGB로 60장을 다 들고 있으면 순간 46MB라
+    #    운영 머신(여유 50MB 안팎)에선 위험해요 - 줄인 장은 장당 1/3 크기예요.
+    flying_idx = next((k for k, p in enumerate(plan) if p[1] is not None), len(plan) // 2)
+    picks = [0, len(plan) - 1, flying_idx]
+    sheet = Image.new("RGB", (BJ_W, BJ_H * len(picks)))
+    for k, idx in enumerate(picks):
+        sheet.paste(render(idx), (0, BJ_H * k))
+    palette = sheet.quantize(colors=BJ_COLORS, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+    del sheet
+    frames = [render(k).quantize(palette=palette, dither=Image.Dither.NONE) for k in range(len(plan))]
+    still = _blackjack_image(dealer, player, dealer_suits=dealer_suits, player_suits=player_suits,
+                             reveal=reveal, note=note, outcome=outcome, bet=bet)
+    return frames, [p[3] for p in plan], still
+
+
+def render_blackjack_anim(dealer: list[int], player: list[int], **kwargs) -> tuple[bytes, bytes, float]:
+    """(움직이는 GIF, 마지막 정지 JPEG, 움직이는 시간(초) - 마지막 장 붙들기 제외)."""
+    frames, durations, still = _bj_anim_build(list(dealer), list(player), **kwargs)
+    buf = io.BytesIO()
+    # ⚠️ `loop`를 안 줘요 = 한 번만 돌아요(슬롯과 같아요).
+    frames[0].save(buf, "GIF", save_all=True, append_images=frames[1:], duration=durations,
+                   disposal=1, optimize=True)
+    return buf.getvalue(), _jpeg(still), sum(durations[:-1]) / 1000
 
 
 # ── 현황 배너 ─────────────────────────────────────────────────────────
@@ -624,6 +807,11 @@ async def highlow_card(number: int, choice: str, multiplier: int) -> bytes | Non
 
 async def blackjack_card(dealer: list[int], player: list[int], **kwargs) -> bytes | None:
     return await _safe("블랙잭", render_blackjack, list(dealer), list(player), **kwargs)
+
+
+async def blackjack_anim(dealer: list[int], player: list[int], **kwargs) -> tuple[bytes, bytes, float] | None:
+    """🃏 카드가 날아오는 GIF + 정지 그림 + 움직이는 시간. 실패하면 None(부른 쪽이 정지 그림으로 물러나요)."""
+    return await _safe("블랙잭 GIF", render_blackjack_anim, list(dealer), list(player), **kwargs)
 
 
 async def lobby_card() -> bytes | None:
