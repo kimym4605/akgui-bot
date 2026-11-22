@@ -188,6 +188,7 @@ class ProfileMoreSelect(
         "fish":   ("낚시", "🎣", "어항 · 최고 기록 · 챔질 성공률 · 낚시대"),
         "attend": ("출석", "📅", "연속·누적 출석 · 보호권 · 다음 보너스"),
         "coin":   ("코인", "🪙", "보유 코인 · 최근 입출금 10건"),
+        "theme":  ("테마 바꾸기", "🎨", "내가 가진 테마로 카드 배경을 바꿔요 (무료)"),
     }
 
     def __init__(self, user_id: int):
@@ -279,6 +280,9 @@ class ProfileMoreSelect(
             from cogs.coin import build_coin_embed
             await send(embed=await build_coin_embed(user), ephemeral=True)
 
+        elif kind == "theme":
+            await send_theme_switcher(interaction, card_message=interaction.message)
+
         else:
             await send("알 수 없는 항목이에요. `/프로필`을 다시 열어주세요.", ephemeral=True)
 
@@ -323,6 +327,110 @@ async def build_attend_embed(user: discord.abc.User) -> discord.Embed:
     if st["last_date"]:
         embed.set_footer(text=f"마지막 출석 {st['last_date']}")
     return embed
+
+
+# ── 🎨 프로필에서 테마 바꾸기 (2026-11-22 사용자 요청) ─────────────────────────
+# 산 테마끼리 바꾸려면 `/악귀상점`을 열어야 했고, 거기엔 안 산 테마가 가격과 같이 섞여 있어서
+# "다시 사야 하나?"로 보였어요. 프로필에서는 **가진 것만** 보여주고 고르면 바로(무료) 바꿔요.
+# 🚨 여기서는 **절대 코인을 안 빼요.** 사는 건 상점 몫이에요 - 그래서 고른 값이 정말 보유 중인지
+#    누를 때 DB로 다시 확인해요(드롭다운은 3분 동안 남아 있어서 그 사이 상태가 바뀔 수 있어요).
+
+async def owned_theme_choices(user_id: int) -> tuple[list[tuple[str, str, str]], str]:
+    """([(키, 이모지, 설명)], 지금 테마). 지금 상점에 있는 테마 중 **가진 것만**.
+
+    🖼️ 커스텀(내 그림)은 승인된 그림이 있을 때만 넣어요(없는데 고르면 기본 배경이 나와요)."""
+    from utils import cosmetic_store, custom_theme_store
+    state = await cosmetic_store.get(user_id)
+    owned, selected = state["themes"], state["theme"]
+    out: list[tuple[str, str, str]] = []
+    for key in owned:
+        if key == profile_card.CUSTOM_THEME_KEY:
+            try:
+                has_art = (await custom_theme_store.status(user_id))["has_image"]
+            except Exception:                                # noqa: BLE001
+                has_art = False
+            if has_art:
+                info = profile_card.CUSTOM_THEME
+                out.append((key, info["emoji"], info["desc"]))
+            continue
+        info = profile_card.ALL_THEMES.get(key)
+        if info is None:          # 방장이 뺀 테마는 못 골라요(카드가 기본으로 그려져요)
+            continue
+        out.append((key, info["emoji"], info["desc"]))
+    return out[:25], selected      # 드롭다운 한도 25개
+
+
+class ThemeSwitchSelect(discord.ui.Select):
+    def __init__(self, user_id: int, choices: list[tuple[str, str, str]], selected: str,
+                 card_message: discord.Message | None):
+        super().__init__(
+            placeholder="🎨 바꿀 테마를 골라요 (가진 것만)",
+            options=[discord.SelectOption(label=key, value=key, emoji=emoji, description=desc[:100],
+                                          default=(key == selected))
+                     for key, emoji, desc in choices],
+        )
+        self.user_id = user_id
+        self.card_message = card_message
+
+    async def callback(self, interaction: discord.Interaction):
+        from utils import cosmetic_store
+        key = self.values[0]
+        await interaction.response.defer()
+        choices, _ = await owned_theme_choices(self.user_id)
+        if key not in {k for k, *_ in choices}:
+            await interaction.edit_original_response(
+                content=f"⚠️ **{key}** 테마는 지금 가지고 있지 않아요. 사는 건 `/악귀상점`에서 해요.",
+                view=None)
+            return
+        await cosmetic_store.select_theme(self.user_id, key)
+        log.info("🎨 프로필에서 테마 변경: user=%s → %s", self.user_id, key)
+        done = f"🎨 카드 테마를 **{key}**(으)로 바꿨어요."
+
+        # 카드를 새 테마로 다시 그려서 **그 자리에서** 바꿔요. 못 바꾸면 새 카드를 나만 보이게 보여줘요.
+        png = None
+        try:
+            data = await profile_service.collect(interaction.user)
+            avatar = await profile_service.avatar_for(interaction.user)
+            png = await profile_card.render_card(data, avatar)
+        except Exception:                                    # noqa: BLE001
+            log.exception("🎨 테마 바꾼 뒤 카드 다시 그리기 실패 (user=%s)", self.user_id)
+        if png is None:
+            await interaction.edit_original_response(
+                content=done + " `/프로필`을 다시 치면 보여요.", view=None)
+            return
+        name = f"agwi_profile_{self.user_id}.png"
+        if self.card_message is not None:
+            try:
+                await self.card_message.edit(attachments=[discord.File(io.BytesIO(png), filename=name)],
+                                             view=build_profile_view(self.user_id))
+                await interaction.edit_original_response(content=done + " 카드도 바꿔 뒀어요.", view=None)
+                return
+            except discord.HTTPException:
+                log.info("🎨 카드 제자리 교체 실패 → 새 카드를 나만 보이게 보내요 (user=%s)", self.user_id)
+        await interaction.edit_original_response(content=done + " (`/프로필`을 다시 치면 모두에게 이렇게 보여요)",
+                                                 view=None,
+                                                 attachments=[discord.File(io.BytesIO(png), filename=name)])
+
+
+class ThemeSwitchView(discord.ui.View):
+    """나만 보이는 메시지에 붙는 일회용 메뉴(영속 아님 - 3분 뒤 꺼져요)."""
+
+    def __init__(self, user_id: int, choices, selected: str, card_message):
+        super().__init__(timeout=180)
+        self.add_item(ThemeSwitchSelect(user_id, choices, selected, card_message))
+
+
+async def send_theme_switcher(interaction: discord.Interaction, *, card_message) -> None:
+    choices, selected = await owned_theme_choices(interaction.user.id)
+    if len(choices) <= 1:
+        await interaction.followup.send(
+            "🎨 아직 **기본 테마**만 있어요. 테마는 `/악귀상점` → 🎨 프로필 카드 테마에서 살 수 있어요.\n"
+            "-# 한 번 산 테마는 여기서 언제든 무료로 바꿔 낄 수 있어요.", ephemeral=True)
+        return
+    await interaction.followup.send(
+        f"🎨 **가지고 있는 테마 {len(choices)}개** · 지금은 **{selected}**\n"
+        "-# 고르면 바로 바뀌어요(무료). 새 테마 구매는 `/악귀상점`에서 해요.",
+        view=ThemeSwitchView(interaction.user.id, choices, selected, card_message), ephemeral=True)
 
 
 def build_profile_view(user_id: int) -> discord.ui.View:
