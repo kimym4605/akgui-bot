@@ -74,6 +74,27 @@ def _is_today_kst(unix_seconds: int | None) -> bool:
     return played == datetime.now(KST).date()
 
 
+def best_win_streak(matches: list, name: str, tag: str) -> int:
+    """⚔️ 주어진 경기들에서 **가장 길게 연달아 이긴 수** (`val_streak2` 판정, 2026-11-24).
+
+    🚨 HenrikDev는 **최신 경기가 앞**이에요. 순서를 그대로 쓰면 연승이 거꾸로 세어져도
+       결과는 같지만, 시작 시각이 없는 판이 섞이면 어긋나니 **`game_start`로 정렬**해요.
+    ⚠️ 내 스탯을 못 뽑는 판(데스매치처럼 팀 정보가 없는 판 · 닉네임 변경)은 **건너뛰어요** —
+       끊지도 잇지도 않아요. 무승부는 `won=False`라 연승을 끊어요."""
+    ordered = sorted(
+        (m for m in matches if m),
+        key=lambda m: int((m.get("metadata") or {}).get("game_start") or 0),
+    )
+    best = run = 0
+    for m in ordered:
+        s = _extract_player_match_stats(m, name, tag)
+        if s is None:
+            continue
+        run = run + 1 if s["won"] else 0
+        best = max(best, run)
+    return best
+
+
 # ------------------------------------------------------------------
 # 미션 완료 처리 (모듈 함수)
 #
@@ -494,6 +515,8 @@ class Mission(commands.Cog):
                 # 🚨 킬 수를 여기에 숫자로 적지 않아요. 안내문(`MISSIONS[...]["desc"]`)과 같은
                 #    상수를 봐야 "20킬이라고 써놓고 15킬에 깨지는" 일이 없어요.
                 achieved = any(s["kills"] >= mission_store.KILLS_TARGET for s in stats)
+            elif key == "val_streak2":
+                achieved = best_win_streak(matches, name, tag) >= 2
             elif key == "val_kd1":
                 achieved = any(s["kills"] / max(s["deaths"], 1) >= 1.0 for s in stats)
             elif key == "val_comp":

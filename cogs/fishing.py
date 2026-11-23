@@ -387,7 +387,7 @@ async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> 
 
     # 🎣 주간 대회 적립은 `fishing_store.record_cast` **안에서** 일어나요.
     #    🚨 여기서 또 부르면 `caught`가 2배로 세어져요(2026-10-18에 실제로 그랬어요).
-    await fishing_store.record_cast(interaction.user.id, key, size)
+    crowns = await fishing_store.record_cast(interaction.user.id, key, size)
 
     # 🎯 🎣 "세 마리 낚기" 미션 (2026-10-23). **잡았을 때만** 1마리씩 올려요.
     #
@@ -408,13 +408,17 @@ async def finish_cast(interaction: discord.Interaction, view: "FishingView") -> 
         grade, name = BY_KEY[key]
         g = GRADES[grade]
         pieces = pieces_of(key, size)
-        lo, hi = fish_data.SIZE_BY_KEY[key]
         # 📏 같은 어종 안에서 몇 %짜리인지 - "대물급 피라미"의 재미가 여기서 나와요.
-        pct = int((size - lo) / max(1, hi - lo) * 100)
-        tag = " 🏆 **최대급!**" if pct >= 90 else (" ✨ 큼직해요" if pct >= 70 else "")
+        # 👑 "최대급"과 도감 왕관은 **같은 기준**(`fish_data.is_crown`)이에요 — 어긋나지 않게.
+        pct = fish_data.size_pct(key, size)
+        tag = (" 🏆 **최대급!**" if fish_data.is_crown(key, size)
+               else (" ✨ 큼직해요" if pct >= 70 else ""))
+        desc = f"판매가 **{pieces / COIN_PIECES:.1f}코인**"
+        if crowns:
+            desc += f"\n👑 **도감 왕관 획득!** {name} 칸에 금색 왕관이 붙었어요 (`/낚시도감`)"
         embed = discord.Embed(
             title=f"{g['emoji']} {grade} · {name} {size}cm{tag}",
-            description=f"판매가 **{pieces / COIN_PIECES:.1f}코인**",
+            description=desc,
             color=g["color"],
         )
     else:
@@ -539,7 +543,7 @@ async def finish_batch(interaction: discord.Interaction, view: "FishingView") ->
         key = roll_catch()
         catches.append((key, roll_size(key)))
 
-    await fishing_store.record_casts(uid, n, catches)
+    crowns = await fishing_store.record_casts(uid, n, catches)
 
     # 🎯 🎣 "세 마리 낚기" — 묶음은 **목표치만큼만** 불러요.
     #    `progress`는 1씩 올리니 N번 불러야 N마리가 세어지는데, 목표를 넘겨 부르면
@@ -561,9 +565,9 @@ async def finish_batch(interaction: discord.Interaction, view: "FishingView") ->
 
     bkey, bsize = max(catches, key=lambda kv: (_rank(kv[0]), kv[1]))
     bgrade, bname = BY_KEY[bkey]
-    blo, bhi = fish_data.SIZE_BY_KEY[bkey]
-    bpct = int((bsize - blo) / max(1, bhi - blo) * 100)
-    btag = " 🏆 **최대급!**" if bpct >= 90 else (" ✨ 큼직해요" if bpct >= 70 else "")
+    bpct = fish_data.size_pct(bkey, bsize)
+    btag = (" 🏆 **최대급!**" if fish_data.is_crown(bkey, bsize)
+            else (" ✨ 큼직해요" if bpct >= 70 else ""))
 
     embed = discord.Embed(
         title=f"🎣 {n}번 던져서 {len(catches)}마리!",
@@ -592,6 +596,12 @@ async def finish_batch(interaction: discord.Interaction, view: "FishingView") ->
         embed.add_field(
             name=f"🐠 희귀 이상 {len(rare)}마리",
             value="\n".join(lines) + (f"\n-# 외 {more}마리" if more > 0 else ""),
+            inline=False,
+        )
+    if crowns:
+        embed.add_field(
+            name="👑 도감 왕관 획득!",
+            value=" · ".join(BY_KEY[k][1] for k in crowns) + " 칸에 금색 왕관이 붙었어요 (`/낚시도감`)",
             inline=False,
         )
 
@@ -1066,12 +1076,15 @@ async def act_dex(interaction: discord.Interaction, *, public: bool = False) -> 
     await interaction.response.defer(ephemeral=not public)
     data = await fishing_store.get(interaction.user.id)
     dex = data.get("dex") or {}
+    dexmax = data.get("dexmax") or {}
     name = getattr(interaction.user, "display_name", None) or interaction.user.name
-    png = await fish_art.dex_card(dex, f"{name}의 낚시 도감")
+    png = await fish_art.dex_card(dex, f"{name}의 낚시 도감", dexmax=dexmax)
     seen = sum(1 for k in BY_KEY if dex.get(k))
+    crowned = sum(1 for k in BY_KEY if fish_data.is_crown(k, dexmax.get(k)))
     embed = discord.Embed(
-        title=f"📖 낚시 도감 — {seen}/{len(BY_KEY)}종",
+        title=f"📖 낚시 도감 — {seen}/{len(BY_KEY)}종 · 👑 {crowned}",
         description=("잡아본 물고기는 그림으로, 아직 못 만난 물고기는 그림자로 보여요.\n"
+                     f"👑 그 종을 **최대치의 {fish_data.CROWN_PCT}% 이상** 크기로 잡으면 칸에 금색 왕관이 붙어요.\n"
                      "-# 도감은 11/22부터 기록해요. 그 전 기록은 어항·최고 기록에 남은 것만 채웠어요."),
         color=0x8B5CF6,
     )

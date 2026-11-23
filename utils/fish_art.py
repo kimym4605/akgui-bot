@@ -70,8 +70,30 @@ def _rgb(color: int) -> tuple[int, int, int]:
     return (color >> 16) & 255, (color >> 8) & 255, color & 255
 
 
-def render_dex(dex: dict[str, int], title: str = "낚시 도감") -> bytes:
-    """`dex` = `{key: 잡은 마리 수}`. 등급별 한 줄씩, 높은 등급이 위예요."""
+GOLD = (255, 205, 60)
+GOLD_DARK = (176, 120, 14)
+
+
+def _draw_crown(d: ImageDraw.ImageDraw, x: int, y: int, w: int = 38) -> None:
+    """👑 금색 왕관을 (x, y) 왼쪽 위에서 폭 `w`로 그려요 (2026-11-24 도감 왕관).
+    ⚠️ 이모지 글꼴이 없어서(나눔고딕) 글자 대신 도형으로 그려요."""
+    h = int(w * 0.72)
+    base = y + h
+    pts = [(x, base), (x, y + h * 0.28), (x + w * 0.27, y + h * 0.58), (x + w * 0.5, y),
+           (x + w * 0.73, y + h * 0.58), (x + w, y + h * 0.28), (x + w, base)]
+    d.polygon(pts, fill=GOLD, outline=GOLD_DARK, width=2)
+    d.rectangle((x, base - h * 0.2, x + w, base), fill=GOLD_DARK)
+    r = max(2, w // 12)
+    for cx, cy in ((x, y + h * 0.28), (x + w * 0.5, y), (x + w, y + h * 0.28)):
+        d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=GOLD, outline=GOLD_DARK)
+
+
+def render_dex(dex: dict[str, int], title: str = "낚시 도감",
+               dexmax: dict[str, int] | None = None) -> bytes:
+    """`dex` = `{key: 잡은 마리 수}`. 등급별 한 줄씩, 높은 등급이 위예요.
+    `dexmax` = `{key: 잡아본 최대 치수}` — 왕관 기준(`fish_data.is_crown`)을 넘은 칸에 👑을 그려요."""
+    from utils.fish_data import is_crown
+    dexmax = dexmax or {}
     cols = max(len(FISH[g]) for g in GRADE_ORDER)
     width = PAD * 2 + LABEL_W + cols * TILE + (cols - 1) * GAP
     height = HEADER_H + PAD + len(GRADE_ORDER) * (TILE + 30 + GAP) + PAD
@@ -84,6 +106,13 @@ def render_dex(dex: dict[str, int], title: str = "낚시 도감") -> bytes:
     prog = f"{seen_n} / {len(BY_KEY)}종"
     pw = d.textlength(prog, font=_font("bold", 28))
     d.text((width - PAD - pw, 28), prog, font=_font("bold", 28), fill=(255, 215, 120))
+    crowned = sum(1 for k in BY_KEY if dex.get(k) and is_crown(k, dexmax.get(k)))
+    if crowned:
+        ct = f"{crowned}"
+        cw = d.textlength(ct, font=_font("bold", 28))
+        cx = width - PAD - pw - 36 - cw
+        d.text((cx, 28), ct, font=_font("bold", 28), fill=GOLD)
+        _draw_crown(d, int(cx - 44), 30, 36)
 
     y = HEADER_H + PAD
     for grade in GRADE_ORDER:
@@ -94,8 +123,10 @@ def render_dex(dex: dict[str, int], title: str = "낚시 도감") -> bytes:
         for f in FISH[grade]:
             key, n = f["key"], int(dex.get(f["key"]) or 0)
             seen = n > 0
+            crown = seen and is_crown(key, dexmax.get(key))
             d.rounded_rectangle((x, y, x + TILE, y + TILE), 18, fill=CARD,
-                                outline=accent if seen else (80, 66, 110), width=3 if seen else 2)
+                                outline=GOLD if crown else (accent if seen else (80, 66, 110)),
+                                width=4 if crown else (3 if seen else 2))
             art = _tile_art(key, seen)
             if art is not None:
                 if seen:
@@ -113,6 +144,9 @@ def render_dex(dex: dict[str, int], title: str = "낚시 도감") -> bytes:
                 bw = d.textlength(badge, font=bf)
                 d.rounded_rectangle((x + TILE - bw - 18, y + 6, x + TILE - 6, y + 32), 10, fill=(20, 14, 34))
                 d.text((x + TILE - bw - 12, y + 8), badge, font=bf, fill=TEXT)
+            if crown:
+                # ⚠️ 다른 그림(`img.alpha_composite`) 뒤에 그려야 물고기에 안 가려져요.
+                _draw_crown(d, x + 8, y + 6)
             x += TILE + GAP
         y += TILE + 30 + GAP
 
@@ -121,11 +155,12 @@ def render_dex(dex: dict[str, int], title: str = "낚시 도감") -> bytes:
     return buf.getvalue()
 
 
-async def dex_card(dex: dict[str, int], title: str) -> bytes:
+async def dex_card(dex: dict[str, int], title: str,
+                   dexmax: dict[str, int] | None = None) -> bytes:
     """`render_dex`를 스레드에서 돌려요(Pillow는 CPU 일 — 루프에서 돌리면 워치독이 깨요).
     동시에 그리는 수는 프로필 카드와 **같은 자물쇠**로 묶어요(운영 머신 RAM이 넉넉지 않아요)."""
     async with _RENDER_LOCK:
-        return await asyncio.to_thread(render_dex, dex, title)
+        return await asyncio.to_thread(render_dex, dex, title, dexmax)
 
 
 # ── 어항 카드 ─────────────────────────────────────────────────────────

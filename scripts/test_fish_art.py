@@ -283,5 +283,31 @@ _src = open(os.path.join(BOT_DIR, "cogs", "attendance.py"), encoding="utf-8").re
 check("`/프로필` → 자세히 보기 → 낚시도 같은 화면(build_tank_reply)을 쓴다",
       "build_tank_reply" in _src and "build_tank_embed" not in _src)
 
+# ==================================================================
+print("[9] 👑 도감 왕관 (2026-11-24)")
+# ------------------------------------------------------------------
+from utils import fish_data as _fd  # noqa: E402
+from utils import fishing_store as _fs  # noqa: E402
+
+_lo, _hi = SIZE_BY_KEY["f01"]                        # 피라미 8~20
+check("최대치는 왕관", _fd.is_crown("f01", _hi))
+check("90% 지점은 왕관", _fd.is_crown("f01", _lo + (_hi - _lo) * 0.9 + 0.01))
+check("89%는 왕관 아님", not _fd.is_crown("f01", _lo + int((_hi - _lo) * 0.85)))
+check("치수를 모르면(None, 옛 물고기) 왕관 아님", not _fd.is_crown("f01", None))
+check("모든 종에서 최대치는 왕관 (범위가 좁은 송사리 2~5도)",
+      all(_fd.is_crown(k, SIZE_BY_KEY[k][1]) for k in BY_KEY))
+check("새 왕관만 알린다 — 이미 왕관이면 빈 목록",
+      _fs._new_crowns({"f01": _hi}, {"f01": _hi}) == [])
+check("새 왕관만 알린다 — 처음이면 그 종",
+      _fs._new_crowns({"f01": _lo}, {"f01": _hi, "f02": SIZE_BY_KEY["f02"][0]}) == ["f01"])
+_png_c = fish_art.render_dex({"f01": 1}, "t", {"f01": _hi})
+_png_n = fish_art.render_dex({"f01": 1}, "t", {"f01": _lo})
+check("왕관 칸이 있으면 그림이 달라진다", _png_c != _png_n)
+check("한 판·몰아 던지기 둘 다 `dexmax`를 $max로 남긴다",
+      src.count('update["$max"]') >= 2 and src.count("dexmax.{k") + src.count("dexmax.{key") >= 2,
+      f'$max={src.count(chr(117) + "pdate[" + chr(34) + "$max")}')
+check("낚시 결과의 '최대급' 표시가 왕관과 같은 기준(is_crown)을 쓴다",
+      cog.count("fish_data.is_crown(") >= 2 and "pct >= 90" not in cog)
+
 print("\n" + ("✅ 전부 통과" if not fails else f"❌ 실패 {fails}건"))
 sys.exit(1 if fails else 0)

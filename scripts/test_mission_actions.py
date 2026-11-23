@@ -120,7 +120,8 @@ for key, target in (("attend_check", 1), ("catch_fish", 3), ("play_gamble", 1)):
         check(f"{key} kind=server", info["kind"] == "server", info["kind"])
         check(f"{key} target={target}", info["target"] == target, str(info.get("target")))
 check("서버 미션이 8종", len(SERVER_KEYS) == 8, f"{len(SERVER_KEYS)}종")
-check("발로 미션은 5종 그대로", len(VALORANT_KEYS) == 5, f"{len(VALORANT_KEYS)}종")
+# 🔄 2026-11-24: 5 → 6종 (⚔️ 연승하기 `val_streak2` 추가)
+check("발로 미션은 6종", len(VALORANT_KEYS) == 6, f"{len(VALORANT_KEYS)}종")
 
 
 print("\n2) 🔞 도박 미션은 성인이 아니면 배정 자체가 안 된다")
@@ -661,8 +662,10 @@ RATE_2026_11_02 = {
     "voice_together": 76, "attend_check": 53, "catch_fish": 49, "use_rank": 46,
     "use_myshop": 43, "use_map": 42, "create_room": 35, "play_gamble": 30,
     "val_kd1": 74, "val_win": 73, "val_play": 72, "val_kills15": 44, "val_comp": 65,
+    # ⚔️ 2026-11-24 추가: 추정치(전적 카드 1,999건 · `mission_store` 주석). 2주 뒤 재측정.
+    "val_streak2": 47,
 }
-check("실측 표가 미션 13종을 전부 덮는다",
+check(f"실측 표가 미션 {len(MISSIONS)}종을 전부 덮는다",
       set(RATE_2026_11_02) == set(MISSIONS),
       f"빠짐 {sorted(set(MISSIONS) - set(RATE_2026_11_02))} / "
       f"잉여 {sorted(set(RATE_2026_11_02) - set(MISSIONS))}")
@@ -840,6 +843,38 @@ try:
         _got = "val_kills15" in done_of(_uid)
         check(f"   한 경기 {_kills}킬 → {'완료' if _want else '미완료'}", _got is _want and _note is None,
               f"done={done_of(_uid)} note={_note!r}")
+
+    # ⚔️ 연승하기(`val_streak2`, 2026-11-24) — 시작 시각 순으로 **연달아** 이겨야 해요.
+    print("\n⚔️ 연승하기 판정")
+
+    def _wl(won: bool, start: int, mid: str, team: bool = True) -> dict:
+        m = _val_match(10, mid)
+        m["metadata"]["game_start"] = start
+        m["teams"]["red"]["has_won"] = won
+        if not team:
+            m["teams"] = {}            # 데스매치처럼 팀 정보가 없는 판
+        return m
+
+    # ⚠️ 몇 시간 전으로 잡으면 새벽에 돌릴 때 "어제 경기"가 돼서 판정에서 빠져요. 분 단위로 둬요.
+    _t0 = int(_time.time()) - 600
+    _cases = (
+        ("승·승", [(True, 0), (True, 1)], True),
+        ("승·패·승 (안 이어짐)", [(True, 0), (False, 1), (True, 2)], False),
+        ("최신순으로 와도 시각으로 정렬 — 패·승·승", [(True, 2), (True, 1), (False, 0)], True),
+        ("승 한 판", [(True, 0)], False),
+    )
+    for _i, (_label, _games, _want) in enumerate(_cases):
+        _uid = 9960 + _i
+        _ms = [_wl(w, _t0 + h * 60, f"s{_i}{h}") for w, h in _games]
+        install_doc(_uid, ["val_streak2", "use_map", "use_rank"])
+        _mcog._fetch_recent_matches = _mk_async(lambda name, tag, user_id=None, _m=_ms: (_m, 200))
+        asyncio.run(_mcog._check_valorant(_uid, ["val_streak2"], FakeChannel()))
+        _got = "val_streak2" in done_of(_uid)
+        check(f"   {_label} → {'완료' if _want else '미완료'}", _got is _want, f"done={done_of(_uid)}")
+
+    _dm = [_wl(True, _t0, "d0"), _wl(False, _t0 + 60, "d1", team=False), _wl(True, _t0 + 120, "d2")]
+    check("   데스매치(팀 정보 없음)는 연승을 끊지 않는다",
+          mission_cog.best_win_streak(_dm, "Tester", "KR1") == 2)
 finally:
     riot_account_store.get_account = lambda uid: None    # 위 스텁(비연동자)으로 되돌려요
 

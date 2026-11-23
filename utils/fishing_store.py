@@ -35,8 +35,18 @@ from pymongo import ReturnDocument
 
 from utils import fishing_week
 from utils.fish_data import (
-    BY_KEY, COIN_PIECES, DAILY_CAST_CAP, GRADE_ORDER, daily_cap_for, pieces_of,
+    BY_KEY, COIN_PIECES, DAILY_CAST_CAP, GRADE_ORDER, daily_cap_for, is_crown, pieces_of,
 )
+
+
+# 👑 도감 왕관 (2026-11-24): 종마다 **잡아본 제일 큰 치수**를 `dexmax.<key>`에 `$max`로 남겨요.
+#    어항(`tank`)은 팔면 비고 `best`는 전체 1마리뿐이라, 종별 최대치는 따로 적어야 해요.
+#    ⚠️ 도입 전 기록은 `scripts/backfill_fish_crown.py`가 어항·최고기록으로만 채웠어요.
+def _new_crowns(prev_max: dict, sizes_by_key: dict[str, int]) -> list[str]:
+    """이번에 **처음** 왕관 기준을 넘은 종. 이미 왕관이 있던 종은 빼요(알림이 반복되지 않게).
+    ⚠️ 읽고 쓰는 사이에 같은 사람이 동시에 낚으면 알림이 두 번 갈 수 있어요 — 표시만이라 무해해요."""
+    return [k for k, s in sizes_by_key.items()
+            if is_crown(k, s) and not is_crown(k, (prev_max or {}).get(k))]
 from utils.pokemon_store import _db
 
 log = logging.getLogger(__name__)
@@ -262,21 +272,23 @@ def _give_back_rods_sync(user_id, n: int) -> None:
             {"$inc": {"casts_today": -back}})
 
 
-def _record_casts_sync(user_id, casts: int,
-                       catches: list[tuple[str, int]]) -> tuple[str, int, int] | None:
+def _record_casts_sync(user_id, casts: int, catches: list[tuple[str, int]]
+                       ) -> tuple[tuple[str, int, int] | None, list[str]]:
     """🎣 몰아 던지기 결과를 **한 번의 update로** 기록해요. (8차)
 
     `catches`는 `(어종key, 치수)` 목록, `casts`는 던진 총 횟수예요(놓친 판까지 셈).
-    돌려주는 건 그 묶음에서 제일 좋은 놈 `(key, size, rank)` — 주간 대회가 써요.
+    돌려주는 건 `(best, new_crowns)` — best는 그 묶음에서 제일 좋은 놈 `(key, size, rank)`
+    (주간 대회가 써요), new_crowns는 이번에 처음 👑 왕관을 단 종이에요.
 
     🚨 `record_cast`를 N번 부르면 Atlas 왕복이 **N×2회**예요(최고기록 조회까지).
        30번 몰아 던지면 60회라 결과 화면이 그만큼 늦어요.
     🚨 같은 어종이 여러 마리면 `$push`에 **`$each`로 모아야** 해요. 같은 키로
        `$push`를 두 번 쓰면 MongoDB가 `ConflictingUpdateOperators`로 거절해요."""
     if casts <= 0 and not catches:
-        return None
+        return None, []
     update: dict = {"$inc": {"casts": casts}}
     best: tuple[str, int, int] | None = None
+    crowns: list[str] = []
 
     if catches:
         from utils.fish_data import GRADE_ORDER
@@ -293,18 +305,27 @@ def _record_casts_sync(user_id, casts: int,
             update["$inc"][f"dex.{key}"] = update["$inc"].get(f"dex.{key}", 0) + 1
         update["$push"] = push
 
+        # 👑 종별 최대치 — 묶음 안에서 종마다 제일 큰 것만 `$max`에 넣어요(같은 키 두 번은 충돌).
+        biggest: dict[str, int] = {}
+        for key, size in catches:
+            if size is not None and size > biggest.get(key, -1):
+                biggest[key] = size
+        if biggest:
+            update["$max"] = {f"dexmax.{k}": s for k, s in biggest.items()}
+
         bkey, bsize = max(catches, key=lambda kv: (_rank(kv[0]), kv[1] or 0))
         brank = _rank(bkey)
         best = (bkey, bsize, brank)
 
-        doc = _fish.find_one({"_id": _uid(user_id)}, {"best": 1}) or {}
+        doc = _fish.find_one({"_id": _uid(user_id)}, {"best": 1, "dexmax": 1}) or {}
         prev = doc.get("best") or {}
         prev_rank, prev_size = int(prev.get("rank", 0)), int(prev.get("size") or 0)
         if brank > prev_rank or (brank == prev_rank and (bsize or 0) > prev_size):
             update["$set"] = {"best": {"key": bkey, "rank": brank, "size": bsize}}
+        crowns = _new_crowns(doc.get("dexmax") or {}, biggest)
 
     _fish.update_one({"_id": _uid(user_id)}, update, upsert=True)
-    return best
+    return best, crowns
 
 
 def _use_rod_sync(user_id) -> tuple[int | None, str | None]:
@@ -384,12 +405,16 @@ def _get_sync(user_id) -> dict:
         "sold": int(doc.get("sold", 0) or 0),
         "best": doc.get("best"),
         "dex": {k: int(v or 0) for k, v in (doc.get("dex") or {}).items()},
+        # 👑 종별 잡아본 최대 치수 (2026-11-24). 왕관 여부는 `fish_data.is_crown`으로 봐요.
+        "dexmax": {k: int(v) for k, v in (doc.get("dexmax") or {}).items() if v is not None},
     }
 
 
-def _record_cast_sync(user_id, key: str | None, size: int | None = None) -> None:
-    """던진 횟수를 세고, 잡았으면 어항에 담아요. key가 None이면 놓친 거예요."""
+def _record_cast_sync(user_id, key: str | None, size: int | None = None) -> list[str]:
+    """던진 횟수를 세고, 잡았으면 어항에 담아요. key가 None이면 놓친 거예요.
+    이번에 처음 👑 왕관을 단 종이 있으면 `[key]`, 없으면 `[]`를 돌려줘요."""
     update: dict = {"$inc": {"casts": 1}}
+    crowns: list[str] = []
     if key:
         update["$inc"]["caught"] = 1
         # 📖 도감(2026-11-22): 종별 **누적** 마리 수. 어항(`tank`)은 팔면 비워지니
@@ -403,14 +428,19 @@ def _record_cast_sync(user_id, key: str | None, size: int | None = None) -> None
         grade = BY_KEY[key][0]
         from utils.fish_data import GRADE_ORDER
         rank = len(GRADE_ORDER) - GRADE_ORDER.index(grade)
-        doc = _fish.find_one({"_id": _uid(user_id)}, {"best": 1}) or {}
+        doc = _fish.find_one({"_id": _uid(user_id)}, {"best": 1, f"dexmax.{key}": 1}) or {}
         prev = doc.get("best") or {}
         prev_rank, prev_size = int(prev.get("rank", 0)), prev.get("size") or 0
         better = rank > prev_rank or (
             rank == prev_rank and (size or 0) > prev_size)
         if better:
             update["$set"] = {"best": {"key": key, "rank": rank, "size": size}}
+        if size is not None:
+            # 👑 종별 최대치(`_new_crowns` 위 주석)
+            update["$max"] = {f"dexmax.{key}": size}
+            crowns = _new_crowns(doc.get("dexmax") or {}, {key: size})
     _fish.update_one({"_id": _uid(user_id)}, update, upsert=True)
+    return crowns
 
 
 def _sell_all_sync(user_id) -> tuple[dict[str, list[int]], int, int]:
@@ -513,15 +543,17 @@ async def give_back_rods(user_id, n: int) -> None:
 
 
 async def record_casts(user_id, casts: int,
-                       catches: list[tuple[str, int]]) -> None:
+                       catches: list[tuple[str, int]]) -> list[str]:
     """🎣 몰아 던지기 결과를 한 번에 기록해요(어항 + 누적 + 주간 대회). (8차)
+    이번에 처음 👑 왕관을 단 종 목록을 돌려줘요(2026-11-24).
 
     🚨 **주간 대회 적립을 여기서 해요.** `record_cast`와 마찬가지로 호출부에서 또
     부르면 `caught`가 두 배로 세어져요(2026-10-18에 실제로 그랬어요)."""
-    best = await asyncio.to_thread(_record_casts_sync, user_id, casts, catches)
+    best, crowns = await asyncio.to_thread(_record_casts_sync, user_id, casts, catches)
     if catches:
         bkey, bsize, brank = best if best else (None, None, 0)
         await fishing_week.record_catches(user_id, len(catches), bkey, bsize, brank)
+    return crowns
 
 
 async def cast_quota(user_id) -> tuple[int, int]:
@@ -533,8 +565,9 @@ async def get(user_id) -> dict:
     return await asyncio.to_thread(_get_sync, user_id)
 
 
-async def record_cast(user_id, key: str | None, size: int | None = None) -> None:
-    await asyncio.to_thread(_record_cast_sync, user_id, key, size)
+async def record_cast(user_id, key: str | None, size: int | None = None) -> list[str]:
+    """한 판 기록. 이번에 처음 👑 왕관을 단 종 목록(`[]` 또는 `[key]`)을 돌려줘요."""
+    crowns = await asyncio.to_thread(_record_cast_sync, user_id, key, size)
 
     # 🎣 주간 대회 집계 (2026-10-18). 기존 문서 구조는 그대로 두고 별도 컬렉션에만 쌓아요.
     # 🚨 여기서 실패해도 낚시 본 흐름은 계속돼야 해요(fishing_week가 예외를 삼켜요).
@@ -542,6 +575,7 @@ async def record_cast(user_id, key: str | None, size: int | None = None) -> None
         grade = BY_KEY.get(key, (None, None))[0]
         rank = (len(GRADE_ORDER) - GRADE_ORDER.index(grade)) if grade in GRADE_ORDER else 0
         await fishing_week.record_catch(user_id, key, size, rank)
+    return crowns
 
 
 async def sell_all(user_id) -> tuple[dict[str, list[int]], int, int]:

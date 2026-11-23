@@ -381,6 +381,26 @@ def roll_size(key: str, rng=None) -> int:
     return int(round(rng.triangular(lo, hi, lo + (hi - lo) * SIZE_SKEW)))
 
 
+def size_pct(key: str, size: int | None) -> int:
+    """이 어종 범위에서 몇 %짜리인지 (최소 0 · 최대 100). 치수를 모르면 0이에요."""
+    if size is None:
+        return 0
+    lo, hi = SIZE_BY_KEY.get(key, (1, 1))
+    return int((size - lo) / max(1, hi - lo) * 100)
+
+
+# 👑 도감 왕관 (2026-11-24, `#💡｜기능-추천방` 11/18 건의 "최대치를 잡으면 도감에 금색 왕관").
+#    딱 최대치는 삼각분포 끝이라 거의 안 나와요(철갑상어는 사실상 0) → **상위 10%(= 90% 이상)**
+#    로 정했어요(사용자 결정). 낚시 결과의 "🏆 최대급!" 표시와 **같은 기준**이에요 — 둘이
+#    어긋나면 "최대급이라는데 왕관이 없다"가 돼요. 그래서 둘 다 `is_crown`을 써요.
+#    한 번에 걸릴 확률은 약 1.4%(SIZE_SKEW 0.3 기준: 0.1² / 0.7). 보상은 없고 표시만이에요.
+CROWN_PCT = 90
+
+
+def is_crown(key: str, size: int | None) -> bool:
+    return size is not None and size_pct(key, size) >= CROWN_PCT
+
+
 def pieces_of(key: str, size: int | None = None) -> int:
     """이 물고기의 값(**조각**). 치수가 클수록 비싸요.
 
