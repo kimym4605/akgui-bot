@@ -318,7 +318,7 @@ def _report(d: dict) -> bytes:
 
 
 # ── 3. 🏆 순위표 ───────────────────────────────────────────────────────
-ROW_H = 52
+ROW_H = 60
 
 
 def _board(title: str, subtitle: str, sections: list[dict], accent, avatars: dict) -> bytes:
@@ -343,27 +343,32 @@ def _board(title: str, subtitle: str, sections: list[dict], accent, avatars: dic
             _text(dr, (x0, y + 10), _clean(sec.get("empty", "아직 기록이 없어요")), 19, TEXT_DIM)
         for row in sec["rows"]:
             rank = row["rank"]
+            cy = y + (ROW_H - 8) // 2          # 행 세로 중심 — 메달·아바타·값·이름 묶음을 여기 맞춰요
             if rank == 1:
-                dr.rounded_rectangle((x0 - 8, y - 4, x0 + col_w, y + ROW_H - 6), radius=12,
+                dr.rounded_rectangle((x0 - 8, y - 4, x0 + col_w, y + ROW_H - 4), radius=12,
                                      fill=(48, 42, 28), outline=(110, 90, 40))
             mc = MEDAL.get(rank)
             if mc:
-                dr.ellipse((x0, y + 6, x0 + 32, y + 38), fill=mc)
-                _text(dr, (x0 + 16, y + 22), str(rank), 18, (30, 24, 10), bold=True, anchor="mm")
+                dr.ellipse((x0, cy - 16, x0 + 32, cy + 16), fill=mc)
+                _text(dr, (x0 + 16, cy), str(rank), 18, (30, 24, 10), bold=True, anchor="mm")
             else:
-                _text(dr, (x0 + 16, y + 22), str(rank), 19, TEXT_DIM, bold=True, anchor="mm")
-            _avatar(img, avatars.get(row.get("uid")), (x0 + 44, y + 3), 38, row.get("name", ""))
+                _text(dr, (x0 + 16, cy), str(rank), 19, TEXT_DIM, bold=True, anchor="mm")
+            _avatar(img, avatars.get(row.get("uid")), (x0 + 44, cy - 19), 38, row.get("name", ""))
             vf = _font("bold", 22)
             value = _clean(row.get("value", ""))
             vw = dr.textlength(value, font=vf)
-            _text(dr, (x0 + col_w - 14, y + 10), value, 22, accent if rank <= 3 else TEXT, bold=True, anchor="ra")
+            _text(dr, (x0 + col_w - 14, cy), value, 22, accent if rank <= 3 else TEXT, bold=True, anchor="rm")
             name_w = col_w - 100 - vw - 30
             nf = _font("bold" if rank <= 3 else "regular", 21)
-            _text(dr, (x0 + 94, y + 4), _fit_text(dr, _clean(row.get("name", "")), nf, name_w), 21,
-                  TEXT, bold=rank <= 3)
+            name = _fit_text(dr, _clean(row.get("name", "")), nf, name_w)
             if row.get("sub"):
+                # 이름(21)과 보조 글씨(15)를 두 줄 묶음으로 보고 중심에 맞춰요 — 줄 사이 5px
                 sf = _font("regular", 15)
-                _text(dr, (x0 + 95, y + 29), _fit_text(dr, _clean(row["sub"]), sf, name_w), 15, TEXT_DIM)
+                _text(dr, (x0 + 94, cy - 3), name, 21, TEXT, bold=rank <= 3, anchor="ls")
+                _text(dr, (x0 + 95, cy + 5), _fit_text(dr, _clean(row["sub"]), sf, name_w), 15, TEXT_DIM,
+                      anchor="lt")
+            else:
+                _text(dr, (x0 + 94, cy), name, 21, TEXT, bold=rank <= 3, anchor="lm")
             y += ROW_H
     return _png(img)
 
