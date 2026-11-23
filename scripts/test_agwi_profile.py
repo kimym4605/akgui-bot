@@ -184,7 +184,8 @@ async def test_achievements():
     summary = await achievement_store.summary(U1, stats)
     # 2026-09-30 포켓몬 기능을 접으면서 도감 5 + 레벨 4 + 스타팅 1 = 10개를 뺐어요 (60 → 50).
     # 2026-11-15 🎙️ 통화 4 + 🎣 낚시 4 추가 (50 → 58).
-    check("요약 집계", summary["unlocked"] == len(newly) and summary["total"] == 58,
+    # 2026-11-24 🧩 발로들 연속 7일·30일 추가 (58 → 60).
+    check("요약 집계", summary["unlocked"] == len(newly) and summary["total"] == 60,
           f"{summary['unlocked']}/{summary['total']}")
 
     # 🎙️ · 🎣 소급 해금 (2026-11-15) — 기록이 이미 쌓여 있는 사람은 보는 순간 열려야 해요.

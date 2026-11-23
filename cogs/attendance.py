@@ -459,7 +459,8 @@ async def send_profile_card(interaction: discord.Interaction, target: discord.ab
         names = ", ".join(f"{a['emoji']} **{a['name']}**" for a in newly[:5])
         if len(newly) > 5:
             names += f" 외 {len(newly) - 5}개"
-        content = f"🎉 새 업적 {len(newly)}개 달성! {names} (+{total_reward}코인)"
+        content = (f"🎉 새 업적 {len(newly)}개 달성! {names}"
+                   + (f" (+{total_reward}코인)" if total_reward else ""))
 
     # 버튼이 영속(DynamicItem)이라 메시지를 붙잡아둘 필요가 없어요. 시간이 지나도, 봇이
     # 재시작돼도 custom_id만으로 되살아나니까 `view.message`를 기억하지 않아요.

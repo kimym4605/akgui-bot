@@ -46,11 +46,13 @@ CATEGORIES = {
 }
 
 
-def _a(key, name, desc, emoji, category, metric, need, grade):
+def _a(key, name, desc, emoji, category, metric, need, grade, reward=None):
+    """`reward`를 주면 등급 보상 대신 그 값을 써요(0이면 코인 없는 업적).
+    등급은 그대로 색·라벨에 쓰여요."""
     return {
         "key": key, "name": name, "desc": desc, "emoji": emoji,
         "category": category, "metric": metric, "need": need, "grade": grade,
-        "reward": GRADES[grade][0],
+        "reward": GRADES[grade][0] if reward is None else int(reward),
     }
 
 
@@ -139,6 +141,13 @@ ACHIEVEMENTS = [
     _a("has_title",   "이름을 얻다",    "칭호를 달아본 적 있음", "🏷️", "etc", "title_owned",     1, "silver"),
     _a("riot_link",   "연결된 자",      "라이엇 계정 연동",      "🔗", "etc", "riot_linked",     1, "bronze"),
     _a("birthday",    "생일 등록",      "생일을 등록해둠",       "🎂", "etc", "birthday_set",    1, "bronze"),
+
+    # -- 🧩 발로들 연속 칭호 (2) — 2026-11-24 ------------------------
+    # 🚨 **보상 코인이 0이에요.** 기획이 "칭호는 코인 경제를 건드리지 않게"라서 등급 보상을 끄고
+    #    색·라벨만 써요. 이름은 `config/balodle/settings.json`의 `titles`와 같아야 해요
+    #    (프로필 카드 칭호 자리에 같은 이름이 나와요). 판정은 **최고 연속**이라 끊겨도 남아요.
+    _a("balodle_7",   "발로들 단골",    "발로들 연속 7일",       "🧩", "etc", "balodle_best_streak", 7,  "silver", reward=0),
+    _a("balodle_30",  "발로들 박사",    "발로들 연속 30일",      "🎓", "etc", "balodle_best_streak", 30, "gold",   reward=0),
 ]
 
 TOTAL = len(ACHIEVEMENTS)

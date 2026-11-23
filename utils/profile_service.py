@@ -27,6 +27,9 @@ import discord
 from utils import (
     achievement_store,
     agwi_weekly_store,
+    balodle_data,
+    balodle_logic,
+    balodle_store,
     birthday_store,
     coin_wallet,
     cosmetic_store,
@@ -43,6 +46,8 @@ from utils import (
 log = logging.getLogger(__name__)
 
 DEFAULT_ACCENT = (88, 101, 242)  # 디스코드 블러플 - 티어를 모를 때 쓰는 기본색
+# 🧩 발로들 칭호 글자 색 (볼트 `악귀봇 디자인` D6). 연속 일수 → 색. 산 칭호의 금색과 구분돼요.
+BALODLE_TITLE_COLORS = {7: (110, 220, 170), 30: (180, 140, 255)}
 
 
 def _tier_info(member: discord.Member | None) -> tuple[str | None, tuple[int, int, int]]:
@@ -130,6 +135,24 @@ async def collect(member: discord.Member | discord.User, *, evaluate_achievement
     except Exception:  # noqa: BLE001 — 최대어 한 줄 때문에 카드가 죽으면 안 돼요
         log.warning("최대어 조회 실패 (user=%s)", member.id, exc_info=True)
 
+    # --- 🧩 발로들 연속·칭호 (2026-11-24) ---
+    # 연속은 카드 오른쪽 위 배지로 나와요(0이면 숨겨요). 칭호는 **산 칭호가 없을 때만** 칭호 자리에
+    # 보여줘요 — 산 칭호(`title_store`)를 덮지 않아요.
+    balodle_streak, balodle_title = 0, None
+    try:
+        b_user = await balodle_store.get_user(member.id)
+        balodle_streak = balodle_logic.live_streak(
+            int(b_user.get("streak", 0) or 0), b_user.get("last_solved_day"),
+            balodle_logic.today_iso())
+        b_titles = balodle_data.SETTINGS.get("titles") or {}
+        balodle_title = balodle_logic.top_title(b_user.get("titles"), b_titles)
+        if balodle_title and not title_name:
+            title_name = balodle_title
+            title_color = BALODLE_TITLE_COLORS.get(
+                balodle_logic.title_days(balodle_title, b_titles))
+    except Exception:  # noqa: BLE001 — 발로들 한 줄 때문에 카드가 죽으면 안 돼요
+        log.warning("발로들 기록 조회 실패 (user=%s)", member.id, exc_info=True)
+
     # --- 🖼️ 커스텀 테마 그림 (고른 사람만 DB에서 꺼내요 — ~100KB라 아무나 꺼내면 낭비) ---
     theme = await cosmetic_store.selected_theme(member.id)
     custom_art = (await custom_theme_store.approved_art(member.id)
@@ -165,6 +188,9 @@ async def collect(member: discord.Member | discord.User, *, evaluate_achievement
         },
         "fishing": {"caught": stats.get("fish_caught", 0), "best": best_fish},
         "mission_total": stats.get("mission_total", 0),
+        # 🧩 발로들 — 지금 살아 있는 연속(0이면 배지를 안 그려요)과 얻은 칭호 중 가장 높은 것
+        "balodle_streak": balodle_streak,
+        "balodle_title": balodle_title,
         "season": scrim_record_store.current_season(),
         # 발로란트 간략 전적 (없으면 None → 카드에서 그 줄을 통째로 빼요)
         "valorant": valorant,

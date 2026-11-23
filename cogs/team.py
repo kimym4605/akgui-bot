@@ -1550,8 +1550,8 @@ async def _announce_achievements(interaction: discord.Interaction, user_ids: lis
             newly = await achievement_store.evaluate(user_id, stats)
             for achievement in newly:
                 lines.append(
-                    f"{achievement['emoji']} <@{user_id}> **{achievement['name']}** 업적 달성! "
-                    f"(+{achievement['reward']}코인)"
+                    f"{achievement['emoji']} <@{user_id}> **{achievement['name']}** 업적 달성!"
+                    + (f" (+{achievement['reward']}코인)" if achievement['reward'] else "")
                 )
         except Exception:
             log.warning("업적 판정 실패 (user=%s)", user_id, exc_info=True)

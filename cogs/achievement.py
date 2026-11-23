@@ -375,7 +375,7 @@ class Achievement(commands.Cog):
                 if len(newly) > 5:
                     names += f" 외 {len(newly) - 5}개"
                 await interaction.followup.send(
-                    f"🎉 새 업적 {len(newly)}개 달성! {names} (+{reward}코인)"
+                    f"🎉 새 업적 {len(newly)}개 달성! {names}" + (f" (+{reward}코인)" if reward else "")
                 )
 
         await interaction.followup.send(embed=await build_achievement_embed(target, 분야))

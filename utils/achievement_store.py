@@ -59,6 +59,7 @@ def _collect_sync(user_id, tier_index: int | None, riot_linked: bool, birthday_s
         "agwi_best": 0, "tier_index": tier_index or 0,
         "mission_total": 0, "title_owned": 0,
         "voice_level": 0, "voice_minutes": 0, "fish_caught": 0,
+        "balodle_best_streak": 0,
         "riot_linked": 1 if riot_linked else 0,
         "birthday_set": 1 if birthday_set else 0,
     }
@@ -109,6 +110,11 @@ def _collect_sync(user_id, tier_index: int | None, riot_linked: bool, birthday_s
     fish_doc = _db["fish"].find_one({"_id": uid}, {"caught": 1})
     if fish_doc:
         stats["fish_caught"] = int(fish_doc.get("caught", 0) or 0)
+
+    # --- 🧩 발로들 최고 연속 (2026-11-24) — `balodle_users`도 `_id`가 문자열 유저 ID예요 ---
+    balodle_doc = _db["balodle_users"].find_one({"_id": uid}, {"best_streak": 1})
+    if balodle_doc:
+        stats["balodle_best_streak"] = int(balodle_doc.get("best_streak", 0) or 0)
 
     # --- 칭호: 지금 달고 있거나, 예전에 사본 적 있으면 인정 ---
     #
@@ -180,7 +186,10 @@ async def evaluate(user_id, stats: dict, *, give_reward: bool = True) -> list[di
     if newly and give_reward:
         total = sum(a["reward"] for a in newly)
         try:
-            await coin_wallet.add(user_id, total, reason=f"업적 {len(newly)}개 달성")
+            # ⚠️ 보상이 0인 업적(🧩 발로들 칭호)만 열렸을 때는 지갑을 건드리지 않아요 —
+            #    0코인 지급이 `coin_log`에 한 줄씩 남으면 경제 리포트가 지저분해져요.
+            if total > 0:
+                await coin_wallet.add(user_id, total, reason=f"업적 {len(newly)}개 달성")
         except Exception:
             # 코인 지급이 실패해도 해금 자체는 유지해요(다시 열리진 않지만, 기록이
             # 뒤로 돌아가는 것보다 낫고 수동 보정이 가능해요).

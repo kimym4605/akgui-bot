@@ -352,6 +352,56 @@ def _progress_bar(draw, x, y, width, height, ratio: float, color=GOLD, track=(38
         draw.rounded_rectangle((x, y, x + filled, y + height), radius=height // 2, fill=color)
 
 
+# ── 🧩 발로들 연속 배지 (2026-11-24, 볼트 `악귀봇 디자인` D7) ─────────────────
+# 오른쪽 위 작은 알약 모양이에요. 통계 칸은 그대로 두고, 연속이 0인 사람의 카드는 전혀 안 바뀌어요.
+# 숫자는 디자이너 기준 구현(`발로들그림/make_mockups.py`의 `draw_balodle_badge`)을 그대로 옮겼어요.
+BALODLE_BADGE_RIGHT = CARD_WIDTH - 44     # 통계 칸 오른쪽 끝과 같은 선 (956)
+BALODLE_BADGE_TOP = 100                   # 워터마크("시즌 S1") 아래
+BALODLE_BADGE_H = 36
+BALODLE_BADGE_PAD = 14
+BALODLE_ICON = 22
+BALODLE_GAP = 8
+BALODLE_BADGE_FILL = (23, 26, 40, 225)    # 색 테마·그림 테마 모두 같은 어두운 바탕
+BALODLE_EDGE = (44, 49, 72)               # 1~6일
+BALODLE_EDGE_7 = (110, 220, 170)          # 7일 이상 = 「발로들 단골」 색
+BALODLE_EDGE_30 = (180, 140, 255)         # 30일 이상 = 「발로들 박사」 색
+BALODLE_LABEL = (190, 196, 215)
+BALODLE_NUMBER = (87, 199, 133)
+# 🚨 서버에는 이모지 글꼴이 없어서 퍼즐 조각을 글자(🧩)로 못 그려요 → 그림 파일로 넣어요.
+BALODLE_ICON_PATH = (Path(__file__).resolve().parent.parent
+                     / "assets" / "valorant" / "balodle" / "ui" / "streak_icon.png")
+
+
+def _balodle_badge(image, streak: int) -> int | None:
+    """발로들 연속 배지를 그리고 **배지 왼쪽 끝 x**를 돌려줘요(칭호 줄 폭을 줄이는 데 써요).
+    연속이 0이면 아무것도 안 그리고 `None`이에요."""
+    if streak <= 0:
+        return None
+    # ⭐ `Draw(image, "RGBA")`라 RGB 카드 위에서도 반투명 바탕이 섞여요.
+    draw = ImageDraw.Draw(image, "RGBA")
+    label_font, num_font = _font("regular", 18), _font("bold", 20)
+    label, number = "발로들 연속", f"{streak}일"
+    label_w = draw.textlength(label, font=label_font)
+    number_w = draw.textlength(number, font=num_font)
+    has_icon = BALODLE_ICON_PATH.exists()
+    icon_w = BALODLE_ICON + BALODLE_GAP if has_icon else 0
+    width = int(BALODLE_BADGE_PAD + icon_w + label_w + 6 + number_w + BALODLE_BADGE_PAD)
+    x0, y0 = BALODLE_BADGE_RIGHT - width, BALODLE_BADGE_TOP
+    edge = (BALODLE_EDGE_30 if streak >= 30 else BALODLE_EDGE_7 if streak >= 7 else BALODLE_EDGE)
+    draw.rounded_rectangle(
+        (x0, y0, BALODLE_BADGE_RIGHT, y0 + BALODLE_BADGE_H), radius=BALODLE_BADGE_H // 2,
+        fill=BALODLE_BADGE_FILL, outline=(*edge, 255), width=2)
+    if has_icon:
+        with Image.open(BALODLE_ICON_PATH) as src:
+            icon = src.convert("RGBA").resize((BALODLE_ICON, BALODLE_ICON), Image.LANCZOS)
+        image.paste(icon, (x0 + BALODLE_BADGE_PAD, y0 + (BALODLE_BADGE_H - BALODLE_ICON) // 2), icon)
+    cy = y0 + BALODLE_BADGE_H // 2
+    tx = x0 + BALODLE_BADGE_PAD + icon_w
+    draw.text((tx, cy), label, font=label_font, fill=BALODLE_LABEL, anchor="lm")
+    draw.text((tx + label_w + 6, cy), number, font=num_font, fill=BALODLE_NUMBER, anchor="lm")
+    return x0
+
+
 def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
     """실제 그리기. **동기 함수**라 반드시 to_thread로 불러야 해요."""
     # 모르는 테마 이름이 들어와도(테마를 지웠거나 데이터가 낡았거나) 기본으로 그려요.
@@ -432,6 +482,11 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
         font=name_font, fill=TEXT, **art_stroke,
     )
 
+    # 🧩 발로들 연속 배지 (오른쪽 위). 연속이 0이면 안 그려요.
+    # 🚨 배지가 있으면 **칭호 줄의 최대 폭을 줄여요** — 그대로 두면 긴 칭호가 배지에 닿아요.
+    badge_left = _balodle_badge(image, int(data.get("balodle_streak") or 0))
+    title_max = (badge_left - 16 - text_x) if badge_left else (CARD_WIDTH - text_x - 60)
+
     title = data.get("title")
     if title:
         title_font = _font("bold", 24)
@@ -439,7 +494,7 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
         label = f"「{title}」"
         draw.text(
             (text_x, avatar_y + 58),
-            _fit_text(draw, label, title_font, CARD_WIDTH - text_x - 60),
+            _fit_text(draw, label, title_font, title_max),
             font=title_font, fill=title_color, **art_stroke,
         )
 

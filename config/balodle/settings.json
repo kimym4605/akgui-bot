@@ -1,0 +1,13 @@
+{
+  "start_date": "2026-11-24",
+  "max_attempts": {"agent": 6, "ability": 6, "map": 6},
+  "rewards": [[1, 3], [3, 2], [6, 1]],
+  "streak_bonus": 0,
+  "release_mode": "order",
+  "year_close": 1,
+  "order_close": 2,
+  "no_repeat_days": {"agent": 14, "ability": 30, "map": 5},
+  "zoom_steps": [0.08, 0.13, 0.20, 0.32, 0.50, 0.75],
+  "notify_time": "09:00",
+  "titles": {"7": "발로들 단골", "30": "발로들 박사"}
+}
