@@ -15,6 +15,9 @@ import os
 import sys
 from collections import defaultdict
 
+# ⚠️ 윈도우 콘솔(cp949)은 👑을 못 찍어서 기록 전에 죽어요(2026-11-24에 실제로). UTF-8로 내보내요.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 BOT_DIR = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, BOT_DIR)
 os.chdir(BOT_DIR)
