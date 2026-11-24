@@ -78,6 +78,7 @@ KEY_NOTIFY_MSG = "balodle:notify_msg"  # {id, day}
 VIEW_TIMEOUT = 14 * 60                 # 문제 화면. 상호작용 토큰(15분)보다 짧게 둬요.
 BANNER_FILE = "panel_banner.png"
 ABILITY_FILE = "ability.png"
+BOARD_FILE = "agent_board.png"
 MAP_FILE = "map.jpg"
 
 NEW_DAY_AT = datetime.time(hour=0, minute=0, second=5, tzinfo=KST)
@@ -170,8 +171,11 @@ def _agent_rows(part: dict, day: dict) -> list[str]:
     return rows
 
 
-def problem_embed(kind: str, day: dict, part: dict) -> discord.Embed:
-    """푸는 중인 문제 화면."""
+def problem_embed(kind: str, day: dict, part: dict, *, with_art: bool = False) -> discord.Embed:
+    """푸는 중인 문제 화면.
+
+    `with_art=True`면 비교표(요원)·힌트(스킬)를 **그림이 맡아서** 글에서는 빼요(2026-11-24).
+    그림을 못 그렸으면 False로 불러 예전처럼 글로 보여줘요."""
     limit = logic.max_attempts(kind, balodle_data.SETTINGS)
     guesses = part.get("guesses") or []
     turn = min(len(guesses) + 1, limit)
@@ -180,7 +184,9 @@ def problem_embed(kind: str, day: dict, part: dict) -> discord.Embed:
     if kind == "agent":
         lines = ["요원 이름을 넣으면 정답과 얼마나 비슷한지 알려드려요.", ""]
         rows = _agent_rows(part, day)
-        if rows:
+        if rows and with_art:
+            lines.append("-# 🟩 같아요 · 🟨 비슷해요 · ⬛ 달라요 · ▲ 정답이 더 나중 · ▼ 정답이 더 먼저")
+        elif rows:
             lines += ["`역할군 · 출신 · 출시 · 성별`", *rows,
                       "-# 🟩 같아요 · 🟨 비슷해요 · ⬛ 달라요 · ⬆ 정답이 더 나중 · ⬇ 정답이 더 먼저"]
         else:
@@ -192,12 +198,13 @@ def problem_embed(kind: str, day: dict, part: dict) -> discord.Embed:
         agent = balodle_data.AGENTS.get(ab.get("agent")) or {}
         lines = ["이 스킬은 어느 요원의 스킬일까요?", ""]
         hints = logic.ability_hints(len(guesses), ab, agent)
-        if hints:
+        if hints and not with_art:
             lines += ["💡 힌트", *(f"{head}: **{value}**" for head, value in hints), ""]
         wrong = _wrong_guesses(kind, part)
         if wrong:
             lines.append("넣은 답: " + " · ".join(f"~~{w}~~" for w in wrong))
-        lines.append("-# 틀릴 때마다 힌트가 하나씩 늘어나요.")
+        if not with_art:
+            lines.append("-# 틀릴 때마다 힌트가 하나씩 늘어나요.")
         title = f"{emoji} {name} 맞히기 · {turn}/{limit}"
 
     else:
@@ -505,19 +512,56 @@ class Balodle(commands.Cog):
         return self._map_shots[key]
 
     # -------------------------- 문제 화면 --------------------------
+    async def _board_png(self, kind: str, day: dict, part: dict) -> bytes | None:
+        """요원 비교표·스킬 힌트판 그림. 그릴 게 없거나 실패하면 None(글 화면으로 물러나요)."""
+        settings = balodle_data.SETTINGS
+        guesses = list(part.get("guesses") or [])
+        try:
+            if kind == "agent":
+                rows = [(g, logic.compare_agent(g, day["agent"], balodle_data.AGENTS, settings))
+                        for g in guesses if g in balodle_data.AGENTS]
+                if not rows:
+                    return None
+                return await asyncio.to_thread(balodle_art.agent_board, rows)
+
+            ab = balodle_data.ABILITIES.get(day.get("ability")) or {}
+            agent = balodle_data.AGENTS.get(ab.get("agent")) or {}
+            status = part.get("status")
+            limit = logic.max_attempts(kind, settings)
+            if status == "playing":
+                hints = logic.ability_hints(len(guesses), ab, agent)
+                marks = ["wrong"] * len(guesses) + ["now"]
+            else:                                  # 끝났으면 힌트를 다 열어 보여줘요
+                hints = logic.ability_hints(len(logic.HINT_HEADS), ab, agent)
+                marks = ["wrong"] * len(guesses)
+                if status == "solved" and marks:
+                    marks[-1] = "solved"
+            marks = (marks + ["left"] * limit)[:limit]
+            return await asyncio.to_thread(balodle_art.ability_board, day["ability"], hints,
+                                           logic.HINT_HEADS, marks)
+        except Exception:                          # noqa: BLE001 — 그림은 덤이에요
+            log.warning("🧩 발로들 %s 그림을 못 그렸어요 — 글로 보여줘요", kind, exc_info=True)
+            return None
+
     async def _screen(self, uid: int, kind: str, day: dict, part: dict, outcome: dict | None):
         """(embed, 첨부 파일들, 뷰 또는 None). 상태에 따라 푸는 화면·끝난 화면을 골라요."""
         playing = part.get("status") == "playing"
+        art = None
+        if kind == "agent" or (kind == "ability" and (playing or outcome is not None)):
+            art = await self._board_png(kind, day, part)
         if playing:
-            embed = problem_embed(kind, day, part)
+            embed = problem_embed(kind, day, part, with_art=art is not None)
         elif outcome is not None:
             embed = done_embed(kind, day, part, outcome)
         else:
             embed = already_embed(kind, day, part)
 
         files = []
-        if kind == "ability" and (playing or outcome is not None):
-            png = await asyncio.to_thread(balodle_art.ability_card, day["ability"])
+        if kind == "agent" and art is not None:
+            files.append(discord.File(io.BytesIO(art), filename=BOARD_FILE))
+            embed.set_image(url=f"attachment://{BOARD_FILE}")
+        elif kind == "ability" and (playing or outcome is not None):
+            png = art or await asyncio.to_thread(balodle_art.ability_card, day["ability"])
             files.append(discord.File(io.BytesIO(png), filename=ABILITY_FILE))
             embed.set_image(url=f"attachment://{ABILITY_FILE}")
         elif kind == "map" and (playing or outcome is not None):

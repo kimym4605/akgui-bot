@@ -190,7 +190,8 @@ check("가장 높은 칭호", L.top_title(["발로들 단골", "발로들 박사
 print("\n[7] 맵 확대 단계")
 SIZE = (1920, 1080)
 steps = SETTINGS["zoom_steps"]
-check("확대 단계는 6개 (8·13·20·32·50·75%)", steps == [0.08, 0.13, 0.20, 0.32, 0.50, 0.75], steps)
+# 2026-11-24 8% → 15% 시작으로 완화("맵 그림이 잘 안 보여요" — 8%는 원본 154px를 4배 넘게 늘려 뭉개졌어요)
+check("확대 단계는 6개 (15·21·29·40·55·75%)", steps == [0.15, 0.21, 0.29, 0.40, 0.55, 0.75], steps)
 widths = []
 for i, frac in enumerate(steps):
     l, t, r, b = L.zoom_box(i, (0.5, 0.5), SIZE, steps)
@@ -618,9 +619,15 @@ async def db_checks():
     check("없는 이름: 제안하고 기회는 그대로", "혹시 **제트**인가요?" in it.edits[-1]["content"]
           and (await S.get_play(D1, U1))["agent"]["guesses"] == [], it.edits[-1]["content"])
     await cog.handle_guess(it, view, "소바")
-    check("틀린 답: 힌트 한 줄이 늘고 안내는 지워진다", it.edits[-1]["content"] is None
-          and "**소바**" in it.edits[-1]["embed"].description
+    # 2026-11-24: 비교 줄은 글이 아니라 **그림**(agent_board.png)으로 나와요. 글에는 범례만 남아요.
+    check("틀린 답: 비교표 그림이 붙고 안내는 지워진다", it.edits[-1]["content"] is None
+          and [f.filename for f in it.edits[-1]["attachments"]] == ["agent_board.png"]
+          and "**소바**" not in it.edits[-1]["embed"].description
+          and "▲ 정답이 더 나중" in it.edits[-1]["embed"].description
           and it.edits[-1]["embed"].title == "🕵️ 요원 맞히기 · 2/6", it.edits[-1]["embed"].title)
+    check("그림 없이 부르면 예전처럼 글 줄로 나온다(그림 실패 대비)",
+          "**소바**" in balodle.problem_embed("agent", await S.get_day(D1),
+                                             (await S.get_play(D1, U1))["agent"]).description)
     await cog.handle_guess(it, view, "sova")
     check("이미 넣은 답: 안내만 하고 기회는 그대로", "**소바**는 이미 넣었어요" in it.edits[-1]["content"]
           and (await S.get_play(D1, U1))["agent"]["guesses"] == ["sova"], it.edits[-1]["content"])

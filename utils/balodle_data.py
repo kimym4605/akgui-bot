@@ -33,7 +33,7 @@ DEFAULT_SETTINGS = {
     "year_close": 1,
     "order_close": 2,
     "no_repeat_days": {"agent": 14, "ability": 30, "map": 5},
-    "zoom_steps": [0.08, 0.13, 0.20, 0.32, 0.50, 0.75],
+    "zoom_steps": [0.15, 0.21, 0.29, 0.40, 0.55, 0.75],
     "notify_time": "09:00",
     "titles": {"7": "발로들 단골", "30": "발로들 박사"},
 }
