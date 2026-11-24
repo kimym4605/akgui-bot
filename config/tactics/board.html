@@ -1,0 +1,764 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="robots" content="noindex">
+<title>악귀봇 작전판</title>
+<style>
+  :root {
+    --bg: #0e1018; --panel: #171a26; --panel2: #1f2333; --line: #2a2f42; --text: #e8e9f0; --soft: #9aa0b5;
+    --ally: #4fc3f7; --enemy: #ff4655; --pick: #f5c518;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; }
+  button, input { font: inherit; color: var(--text); }
+  button { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+  button:hover { border-color: #3a4260; }
+  button.on { border-color: var(--pick); box-shadow: 0 0 0 1px var(--pick) inset; }
+  button:disabled { opacity: .4; cursor: default; }
+  input[type=text] { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; min-width: 0; }
+  .top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px;
+         border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  .top h1 { font-size: 16px; margin: 0; white-space: nowrap; }
+  #title { width: 220px; }
+  .grow { flex: 1; }
+  #status { color: var(--soft); font-size: 12px; }
+  .wrap { display: grid; grid-template-columns: 300px minmax(0, 1fr) 240px; gap: 12px; padding: 12px; max-width: 1500px; margin: 0 auto; }
+  .view .wrap { grid-template-columns: minmax(0, 1fr) 260px; }
+  @media (max-width: 1100px) { .wrap, .view .wrap { grid-template-columns: 1fr; } .mapcol { order: -1; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+  .card h2 { font-size: 13px; color: var(--soft); margin: 2px 0 8px; font-weight: 600; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; }
+  .agents button { padding: 2px; aspect-ratio: 1; border-radius: 10px; }
+  .agents img { width: 100%; height: 100%; display: block; border-radius: 8px; }
+  .abil { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .abil button { display: flex; align-items: center; gap: 6px; text-align: left; padding: 6px; }
+  .abil img { width: 26px; height: 26px; background: #000; border-radius: 6px; padding: 2px; flex: none; }
+  .abil .k { font-weight: 800; color: var(--pick); width: 14px; flex: none; }
+  .abil .n { font-size: 12px; line-height: 1.25; }
+  .sel-agent { display: flex; align-items: center; gap: 8px; margin: 10px 0 8px; font-weight: 700; }
+  .sel-agent img { width: 34px; height: 34px; border-radius: 8px; }
+  .scenes { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .scenes button.sc { min-width: 36px; font-weight: 700; }
+  #scene-title { width: 180px; }
+  .mapbox { position: relative; width: 100%; aspect-ratio: 1 / 1; background: #0a0c12;
+            border: 1px solid var(--line); border-radius: 12px; overflow: hidden; touch-action: none; }
+  #stage { position: absolute; inset: 0; transform-origin: 0 0; }
+  #stage img { position: absolute; inset: 0; width: 100%; height: 100%; user-select: none; pointer-events: none; -webkit-user-drag: none; }
+  #stage svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .zoom { position: absolute; right: 8px; top: 8px; display: flex; flex-direction: column; gap: 4px; z-index: 2; }
+  .zoom button { width: 36px; height: 36px; padding: 0; background: rgba(23,26,38,.85); font-size: 18px; }
+  .hint { color: var(--soft); font-size: 12px; margin-top: 6px; }
+  .opts { display: flex; gap: 12px; color: var(--soft); font-size: 13px; margin-top: 6px; flex-wrap: wrap; }
+  .list .g { display: flex; align-items: center; gap: 6px; margin: 6px 0 2px; font-weight: 700; }
+  .list .g img { width: 22px; height: 22px; border-radius: 6px; }
+  .list .a { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--soft); padding-left: 28px; }
+  .list .a img { width: 16px; height: 16px; background: #000; border-radius: 4px; }
+  #err { padding: 40px 16px; color: var(--soft); }
+  .view .edit-only { display: none !important; }
+  .edit .view-only { display: none !important; }
+  .team-ally.on { border-color: var(--ally); box-shadow: 0 0 0 1px var(--ally) inset; }
+  .team-enemy.on { border-color: var(--enemy); box-shadow: 0 0 0 1px var(--enemy) inset; }
+  @media (pointer: coarse) {
+    button { padding: 10px 12px; }
+    .agents { grid-template-columns: repeat(auto-fill, minmax(54px, 1fr)); gap: 8px; }
+    .abil img { width: 32px; height: 32px; }
+    .zoom button { width: 44px; height: 44px; }
+  }
+</style>
+</head>
+<body>
+<div id="err" hidden></div>
+<div id="root" hidden>
+  <div class="top">
+    <h1 id="mapname">🗺️</h1>
+    <input type="text" id="title" class="edit-only" maxlength="40" placeholder="제목">
+    <span id="title-view" class="view-only" style="font-weight:700"></span>
+    <button id="side" class="edit-only" title="공격/수비 표시">⚔️ 공격</button>
+    <span id="side-view" class="view-only" style="color:var(--soft)"></span>
+    <span class="grow"></span>
+    <span id="status"></span>
+    <button id="save" class="edit-only">💾 저장</button>
+    <button id="share" class="edit-only">👀 보기 링크 복사</button>
+    <button id="post" class="edit-only">📤 디스코드에 올리기</button>
+  </div>
+  <div class="wrap">
+    <aside class="card edit-only">
+      <div class="row">
+        <button id="team-ally" class="team-ally on">🔵 아군</button>
+        <button id="team-enemy" class="team-enemy">🔴 적군</button>
+      </div>
+      <div class="row" id="roles"></div>
+      <div class="agents" id="agents"></div>
+      <div id="agent-panel" hidden>
+        <div class="sel-agent"><img id="sa-icon" alt=""><span id="sa-name"></span></div>
+        <div class="abil" id="abil"></div>
+      </div>
+      <h2 style="margin-top:12px">도구</h2>
+      <div class="row">
+        <button id="t-select" class="on">🖐️ 선택·이동</button>
+        <button id="t-arrow">➡️ 화살표</button>
+        <button id="t-text">🔤 글</button>
+        <button id="t-ruler">📏 거리</button>
+      </div>
+      <div class="row">
+        <button id="undo">↩️ 되돌리기</button>
+        <button id="del" disabled>🗑️ 지우기</button>
+        <button id="clear">장면 비우기</button>
+      </div>
+      <div class="hint" id="tool-hint">요원을 고르고 스킬을 누른 뒤 맵을 누르세요.</div>
+    </aside>
+    <main class="mapcol">
+      <div class="scenes">
+        <span id="scene-tabs" class="scenes" style="margin:0"></span>
+        <button id="scene-add" class="edit-only" title="지금 장면을 복사해 다음 장면 만들기">＋ 장면</button>
+        <button id="scene-del" class="edit-only">장면 삭제</button>
+        <input type="text" id="scene-title" class="edit-only" maxlength="40" placeholder="장면 제목 (예: 진입 전)">
+        <span id="scene-title-view" class="view-only" style="color:var(--soft)"></span>
+      </div>
+      <div class="mapbox" id="mapbox">
+        <div id="stage">
+          <img id="mini" alt="미니맵" draggable="false">
+          <svg id="svg" viewBox="0 0 1000 1000" preserveAspectRatio="none">
+            <defs>
+              <marker id="ah-ally" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4fc3f7"/></marker>
+              <marker id="ah-enemy" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#ff4655"/></marker>
+            </defs>
+            <g id="g-callouts"></g>
+            <g id="g-items"></g>
+            <g id="g-preview"></g>
+          </svg>
+        </div>
+        <div class="zoom">
+          <button id="z-in" title="확대">＋</button>
+          <button id="z-out" title="축소">－</button>
+          <button id="z-reset" title="원래대로">⟲</button>
+        </div>
+      </div>
+      <div class="opts">
+        <label><input type="checkbox" id="opt-callout" checked> 구역 이름</label>
+        <span>원 크기·벽 길이는 실제 비율의 <b>대략값</b>이에요 · 두 손가락/휠로 확대</span>
+      </div>
+    </main>
+    <aside class="card list">
+      <h2>놓인 것</h2>
+      <div id="list"></div>
+    </aside>
+  </div>
+</div>
+<script>
+"use strict";
+const NS = "http://www.w3.org/2000/svg";
+const parts = location.pathname.split("/").filter(Boolean);
+const MODE = parts[0] === "e" ? "edit" : "view";
+const KEY = parts[1] || "";
+const TEAM = { ally: "#4fc3f7", enemy: "#ff4655" };
+const FILL = { smoke: { ally: "rgba(150,210,240,.42)", enemy: "rgba(255,140,150,.40)" },
+               zone: { ally: "rgba(79,195,247,.20)", enemy: "rgba(255,70,85,.22)" },
+               wall: { ally: "rgba(79,195,247,.9)", enemy: "rgba(255,70,85,.9)" } };
+const TAP = 0.015;        // 이보다 짧게 끌면 '톡 누름'
+
+let META = null, MAP = null, AG = {}, scenes = [{ title: "", items: [] }], cur = 0, side = "atk", viewId = "";
+let team = "ally", tool = "select", curAgent = null, curAbility = null, selected = -1;
+let undoStack = [], dirty = false, saveTimer = null, drag = null, roleFilter = "", ruler = null;
+const Z = { s: 1, x: 0, y: 0 }, pointers = new Map();
+let pinch = null;
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, attrs = {}, parent) => {
+  const n = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  if (parent) parent.appendChild(n);
+  return n;
+};
+const X = (u) => u * 1000, Y = (v) => v * 1000;
+const items = () => scenes[cur].items;
+const meters = (du) => du / (MAP.unit || 0.007);
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+async function getJSON(url, opts) {
+  const r = await fetch(url, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `오류 ${r.status}`);
+  return j;
+}
+
+async function main() {
+  document.body.classList.add(MODE);
+  try {
+    const [meta, board] = await Promise.all([
+      getJSON("/api/meta"),
+      getJSON(`/api/board/${MODE === "edit" ? "e" : "v"}/${encodeURIComponent(KEY)}`),
+    ]);
+    META = meta; MAP = meta.maps[board.map];
+    if (!MAP) throw new Error("맵 자료가 없어요.");
+    for (const a of meta.agents) AG[a.id] = a;
+    const data = board.data || {};
+    if (Array.isArray(data.scenes) && data.scenes.length)
+      scenes = data.scenes.map((s) => ({ title: s.title || "", items: s.items || [] }));
+    side = data.side || "atk";
+    viewId = board.view;
+    $("title").value = board.title || "";
+    $("title-view").textContent = board.title || "";
+    document.title = `${board.title || MAP.name} · 악귀봇 작전판`;
+  } catch (e) {
+    $("err").hidden = false; $("err").textContent = "⚠️ " + e.message; return;
+  }
+  $("mapname").textContent = `🗺️ ${MAP.name}`;
+  $("mini").src = MAP.minimap;
+  $("root").hidden = false;
+  drawCallouts();
+  if (MODE === "edit") setupEditor();
+  setupZoom();
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT") return;
+    if (MODE === "view" || tool === "select") {
+      if (e.key === "ArrowRight" && cur < scenes.length - 1) { gotoScene(cur + 1); }
+      if (e.key === "ArrowLeft" && cur > 0) { gotoScene(cur - 1); }
+    }
+  });
+  updateSide();
+  renderScenes();
+  render();
+}
+
+// ---------------------------------------------------------------- 곡선
+// 점 목록 → 부드러운 곡선(Catmull-Rom을 베지어로). 좌표는 0~1.
+function smoothD(pts) {
+  const P = pts.map(([u, v]) => [X(u), Y(v)]);
+  if (P.length < 3) return `M${P[0][0]},${P[0][1]} L${P[P.length - 1][0]},${P[P.length - 1][1]}`;
+  let d = `M${P[0][0]},${P[0][1]}`;
+  for (let i = 0; i < P.length - 1; i++) {
+    const p0 = P[i - 1] || P[i], p1 = P[i], p2 = P[i + 1], p3 = P[i + 2] || p2;
+    const c1 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6];
+    const c2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+    d += ` C${c1[0].toFixed(1)},${c1[1].toFixed(1)} ${c2[0].toFixed(1)},${c2[1].toFixed(1)} ${p2[0]},${p2[1]}`;
+  }
+  return d;
+}
+// 손떨림 점 줄이기 (Ramer–Douglas–Peucker). eps는 0~1 좌표 기준.
+function simplify(pts, eps = 0.003) {
+  if (pts.length < 3) return pts;
+  const [a, b] = [pts[0], pts[pts.length - 1]];
+  let best = -1, idx = 0;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const p = pts[i], dx = b[0] - a[0], dy = b[1] - a[1];
+    const len = Math.hypot(dx, dy) || 1e-9;
+    const d = Math.abs(dy * p[0] - dx * p[1] + b[0] * a[1] - b[1] * a[0]) / len;
+    if (d > best) { best = d; idx = i; }
+  }
+  if (best <= eps) return [a, b];
+  return simplify(pts.slice(0, idx + 1), eps).slice(0, -1).concat(simplify(pts.slice(idx), eps));
+}
+function finishPts(raw) {
+  let pts = simplify(raw.map(([u, v]) => [+u.toFixed(4), +v.toFixed(4)]));
+  while (pts.length > 64) pts = pts.filter((_, i) => i % 2 === 0 || i === pts.length - 1);
+  return pts;
+}
+// 점 목록을 길이 max(0~1 좌표)까지만 남겨요(넘는 곳은 그 지점에서 자름).
+function clampPath(pts, max) {
+  if (!max) return pts;
+  const out = [pts[0]]; let total = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const seg = dist(pts[i - 1], pts[i]);
+    if (total + seg > max) {
+      const t = (max - total) / seg;
+      out.push([pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * t, pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * t]);
+      return out;
+    }
+    total += seg; out.push(pts[i]);
+  }
+  return out;
+}
+function pathLen(pts) { let s = 0; for (let i = 1; i < pts.length; i++) s += dist(pts[i - 1], pts[i]); return s; }
+// 곧은 벽: 고정 길이면 그 길이로, 최대 길이면 그 안으로. 방향은 끈 방향.
+function fitLine(a, b, { fixed = 0, max = 0 } = {}) {
+  let dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);
+  if (len < 1e-6) { dx = 1; dy = 0; len = 1; }
+  const want = fixed ? fixed : (max && len > max ? max : len);
+  return [a[0] + (dx / len) * want, a[1] + (dy / len) * want];
+}
+function midOf(it) {
+  if (it.pts && it.pts.length > 1) { const p = it.pts[Math.floor((it.pts.length - 1) / 2)]; return [X(p[0]), Y(p[1])]; }
+  return [(X(it.u) + X(it.u2)) / 2, (Y(it.v) + Y(it.v2)) / 2];
+}
+
+// ---------------------------------------------------------------- 그리기
+function drawCallouts() {
+  const g = $("g-callouts"); g.innerHTML = "";
+  if (!$("opt-callout").checked) return;
+  for (const c of MAP.callouts) {
+    const t = el("text", { x: X(c.u), y: Y(c.v), "text-anchor": "middle", "dominant-baseline": "middle",
+      "font-size": 15, fill: "#dfe2ee", stroke: "#000", "stroke-width": 3, "paint-order": "stroke", opacity: .7,
+      "pointer-events": "none" }, g);
+    t.textContent = c.name;
+  }
+}
+
+function abilityOf(it) {
+  const a = AG[it.agent];
+  return a ? a.abilities.find((x) => x.slot === it.slot) : null;
+}
+
+let clipN = 0;
+function iconDisc(g, x, y, r, href, ring, dark = true) {
+  const cid = `c${clipN++}`;
+  const cp = el("clipPath", { id: cid }, g);
+  el("circle", { cx: x, cy: y, r }, cp);
+  el("circle", { cx: x, cy: y, r: r + 2, fill: dark ? "#0b0d14" : "#222" }, g);
+  if (href) el("image", { href, x: x - r * (dark ? .78 : 1), y: y - r * (dark ? .78 : 1),
+    width: r * (dark ? 1.56 : 2), height: r * (dark ? 1.56 : 2), "clip-path": `url(#${cid})` }, g);
+  el("circle", { cx: x, cy: y, r: r + 2, fill: "none", stroke: ring, "stroke-width": 3.5 }, g);
+}
+function lineD(it) { return it.pts && it.pts.length > 1 ? smoothD(it.pts) : `M${X(it.u)},${Y(it.v)} L${X(it.u2)},${Y(it.v2)}`; }
+function label(g, x, y, text) {
+  const t = el("text", { x, y, "font-size": 18, "font-weight": 700, fill: "#fff", stroke: "#000", "stroke-width": 4,
+    "paint-order": "stroke", "pointer-events": "none" }, g);
+  t.textContent = text;
+}
+
+function drawItem(g, it, idx, preview = false) {
+  const col = TEAM[it.team] || TEAM.ally;
+  const grp = el("g", { "data-i": idx, style: preview ? "pointer-events:none;opacity:.75" : "cursor:pointer" }, g);
+  if (it.type === "agent") {
+    iconDisc(grp, X(it.u), Y(it.v), 21, (AG[it.agent] || {}).icon, col, false);
+    const t = el("title", {}, grp); t.textContent = (AG[it.agent] || {}).name || "";
+  } else if (it.type === "ability") {
+    const ab = abilityOf(it) || { shape: { kind: "icon" } };
+    const sh = ab.shape || { kind: "icon" };
+    const style = sh.style || "zone";
+    if ((sh.kind === "line" || sh.kind === "path") && it.u2 != null) {
+      const w = style === "smoke" ? 12 : (style === "wall" ? 8 : 7);
+      const d = lineD(it);
+      el("path", { d, fill: "none", stroke: style === "smoke" ? FILL.smoke[it.team] : col, "stroke-width": w,
+        "stroke-linecap": "round", "stroke-linejoin": "round", "stroke-dasharray": style === "zone" ? "14 8" : "" }, grp);
+      el("path", { d, fill: "none", stroke: col, "stroke-width": 2, opacity: .9, "stroke-linejoin": "round" }, grp);
+      const [mx, my] = midOf(it);
+      iconDisc(grp, mx, my, 11, ab.icon, col);
+    } else {
+      // 던진 경로가 있으면 점선 경로 + 떨어진 곳(u2,v2)에 놓아요
+      let cx = X(it.u), cy = Y(it.v);
+      if (it.u2 != null) {
+        el("path", { d: lineD(it), fill: "none", stroke: "#000", "stroke-width": 5, opacity: .45, "stroke-linecap": "round" }, grp);
+        el("path", { d: lineD(it), fill: "none", stroke: "#fff", "stroke-width": 2.5, "stroke-dasharray": "7 6", opacity: .9 }, grp);
+        el("circle", { cx: X(it.u), cy: Y(it.v), r: 4, fill: col }, grp);
+        cx = X(it.u2); cy = Y(it.v2);
+      }
+      if (sh.kind === "circle") {
+        const r = Math.max(10, sh.r * MAP.unit * 1000);
+        el("circle", { cx, cy, r, fill: FILL[style][it.team] || FILL.zone.ally,
+          stroke: col, "stroke-width": 3, "stroke-dasharray": style === "zone" ? "10 6" : "" }, grp);
+        iconDisc(grp, cx, cy, 11, ab.icon, col);
+      } else {
+        iconDisc(grp, cx, cy, 14, ab.icon, col);
+      }
+    }
+    const t = el("title", {}, grp);
+    t.textContent = `${(AG[it.agent] || {}).name || ""} · ${ab.name || ""} (${it.slot})` + (sh.r ? ` · 반경 약 ${sh.r}m` : "");
+  } else if (it.type === "arrow") {
+    const d = lineD(it);
+    el("path", { d, fill: "none", stroke: "#000", "stroke-width": 8, opacity: .5, "stroke-linecap": "round", "stroke-linejoin": "round" }, grp);
+    el("path", { d, fill: "none", stroke: col, "stroke-width": 5, "stroke-linecap": "round", "stroke-linejoin": "round",
+      "marker-end": `url(#ah-${it.team === "enemy" ? "enemy" : "ally"})` }, grp);
+  } else if (it.type === "text") {
+    const t = el("text", { x: X(it.u), y: Y(it.v), "text-anchor": "middle", "dominant-baseline": "middle",
+      "font-size": 22, "font-weight": 700, fill: "#fff", stroke: "#000", "stroke-width": 4, "paint-order": "stroke" }, grp);
+    t.textContent = it.text;
+    const w = Math.min(400, it.text.length * 20 + 10);
+    el("line", { x1: X(it.u) - w / 2, y1: Y(it.v) + 15, x2: X(it.u) + w / 2, y2: Y(it.v) + 15, stroke: col, "stroke-width": 3 }, grp);
+  }
+  if (idx === selected && !preview) {
+    const b = grp.getBBox();
+    el("rect", { x: b.x - 6, y: b.y - 6, width: b.width + 12, height: b.height + 12, fill: "none",
+      stroke: "var(--pick)", "stroke-width": 3, "stroke-dasharray": "8 5", rx: 8 }, grp);
+  }
+}
+
+function rank(it) {
+  if (it.type === "ability") return ((abilityOf(it) || {}).shape || {}).kind === "circle" ? 0 : 1;
+  return it.type === "arrow" ? 2 : 3;
+}
+function render() {
+  const g = $("g-items"); g.innerHTML = ""; clipN = 0;
+  const order = items().map((it, i) => [it, i]).sort((a, b) => rank(a[0]) - rank(b[0]));
+  for (const [it, i] of order) drawItem(g, it, i);
+  if (ruler) drawRuler(g, ruler.a, ruler.b);
+  renderList();
+  if (MODE === "edit") $("del").disabled = selected < 0;
+}
+function drawRuler(g, a, b) {
+  el("line", { x1: X(a[0]), y1: Y(a[1]), x2: X(b[0]), y2: Y(b[1]), stroke: "#f5c518", "stroke-width": 3, "stroke-dasharray": "6 5", "pointer-events": "none" }, g);
+  for (const p of [a, b]) el("circle", { cx: X(p[0]), cy: Y(p[1]), r: 5, fill: "#f5c518", "pointer-events": "none" }, g);
+  label(g, X(b[0]) + 10, Y(b[1]) - 10, `${meters(dist(a, b)).toFixed(1)}m`);
+}
+
+function renderList() {
+  const by = {};
+  for (const it of items()) {
+    if (it.type !== "ability" && it.type !== "agent") continue;
+    const k = `${it.team}|${it.agent}`;
+    (by[k] = by[k] || { team: it.team, agent: it.agent, ab: {} });
+    if (it.type === "ability") by[k].ab[it.slot] = (by[k].ab[it.slot] || 0) + 1;
+  }
+  const rows = Object.values(by).sort((a, b) => (a.team > b.team ? 1 : -1));
+  const box = $("list"); box.innerHTML = "";
+  if (!rows.length) { box.innerHTML = `<div class="hint">${MODE === "edit" ? "아직 놓은 게 없어요." : "비어 있는 장면이에요."}</div>`; return; }
+  for (const r of rows) {
+    const a = AG[r.agent] || {};
+    const gdiv = document.createElement("div"); gdiv.className = "g";
+    const img = document.createElement("img"); img.src = a.icon || ""; img.style.outline = `2px solid ${TEAM[r.team]}`;
+    const nm = document.createElement("span"); nm.textContent = `${a.name || "?"}${r.team === "enemy" ? " (적)" : ""}`;
+    gdiv.append(img, nm); box.appendChild(gdiv);
+    for (const ab of a.abilities || []) {
+      if (!r.ab[ab.slot]) continue;
+      const d = document.createElement("div"); d.className = "a";
+      const i2 = document.createElement("img"); i2.src = ab.icon || "";
+      const s = document.createElement("span"); s.textContent = `${ab.slot} · ${ab.name}${r.ab[ab.slot] > 1 ? ` ×${r.ab[ab.slot]}` : ""}`;
+      d.append(i2, s); box.appendChild(d);
+    }
+  }
+}
+
+function updateSide() {
+  const t = side === "def" ? "🛡️ 수비" : "⚔️ 공격";
+  $("side").textContent = t; $("side-view").textContent = t;
+}
+
+// ---------------------------------------------------------------- 장면
+function renderScenes() {
+  const box = $("scene-tabs"); box.innerHTML = "";
+  scenes.forEach((s, i) => {
+    const b = document.createElement("button"); b.className = "sc" + (i === cur ? " on" : "");
+    b.textContent = s.title ? `${i + 1}. ${s.title}` : `${i + 1}`;
+    b.onclick = () => gotoScene(i);
+    box.appendChild(b);
+  });
+  if (scenes.length === 1 && MODE === "view") box.innerHTML = "";
+  $("scene-title").value = scenes[cur].title || "";
+  $("scene-title-view").textContent = scenes.length > 1 ? `← → 로 장면 넘기기` : "";
+  if (MODE === "edit") { $("scene-del").disabled = scenes.length < 2; $("scene-add").disabled = scenes.length >= 10; }
+}
+function gotoScene(i) { cur = i; selected = -1; ruler = null; renderScenes(); render(); }
+
+// ---------------------------------------------------------------- 편집
+function setupEditor() {
+  $("team-ally").onclick = () => setTeam("ally");
+  $("team-enemy").onclick = () => setTeam("enemy");
+  $("side").onclick = () => { side = side === "atk" ? "def" : "atk"; updateSide(); changed(); };
+  $("title").oninput = () => changed();
+  $("scene-title").oninput = () => { scenes[cur].title = $("scene-title").value.slice(0, 40); renderScenesTabsOnly(); changed(); };
+  $("scene-add").onclick = () => {
+    if (scenes.length >= 10) return;
+    push(); scenes.splice(cur + 1, 0, { title: "", items: JSON.parse(JSON.stringify(items())) });
+    gotoScene(cur + 1); changed(); status("지금 장면을 복사했어요 — 바뀐 것만 고치세요");
+  };
+  $("scene-del").onclick = () => {
+    if (scenes.length < 2 || !confirm(`${cur + 1}번 장면을 지울까요?`)) return;
+    push(); scenes.splice(cur, 1); gotoScene(Math.max(0, cur - 1)); changed();
+  };
+  $("t-select").onclick = () => setTool("select");
+  $("t-arrow").onclick = () => setTool("arrow");
+  $("t-text").onclick = () => setTool("text");
+  $("t-ruler").onclick = () => setTool("ruler");
+  $("undo").onclick = undo;
+  $("del").onclick = delSelected;
+  $("clear").onclick = () => { if (items().length && confirm("이 장면을 전부 비울까요?")) { push(); scenes[cur].items = []; selected = -1; changed(); render(); } };
+  $("save").onclick = save;
+  $("share").onclick = async () => {
+    const url = `${location.origin}/v/${viewId}`;
+    try { await navigator.clipboard.writeText(url); status("보기 링크를 복사했어요"); }
+    catch { status(url); }
+  };
+  $("post").onclick = postToDiscord;
+  const roles = [["", "전체"]];
+  for (const a of META.agents) if (!roles.some((r) => r[0] === a.role)) roles.push([a.role, a.roleName]);
+  for (const [k, name] of roles) {
+    const b = document.createElement("button"); b.textContent = name; b.dataset.role = k;
+    if (!k) b.classList.add("on");
+    b.onclick = () => { roleFilter = k; [...$("roles").children].forEach((x) => x.classList.toggle("on", x.dataset.role === k)); renderAgents(); };
+    $("roles").appendChild(b);
+  }
+  renderAgents();
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT") return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); }
+    if (e.key === "Delete" || e.key === "Backspace") delSelected();
+    if (e.key === "Escape") { setTool("select"); selected = -1; ruler = null; render(); }
+  });
+  window.addEventListener("beforeunload", (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+  status("자동 저장돼요");
+}
+function renderScenesTabsOnly() {
+  const b = $("scene-tabs").children[cur];
+  if (b) b.textContent = scenes[cur].title ? `${cur + 1}. ${scenes[cur].title}` : `${cur + 1}`;
+}
+
+function renderAgents() {
+  const box = $("agents"); box.innerHTML = "";
+  for (const a of META.agents) {
+    if (roleFilter && a.role !== roleFilter) continue;
+    const b = document.createElement("button"); b.title = a.name;
+    if (curAgent && curAgent.id === a.id) b.classList.add("on");
+    const img = document.createElement("img"); img.src = a.icon; img.alt = a.name;
+    b.appendChild(img);
+    b.onclick = () => { curAgent = a; renderAgents(); renderAbilities(); };
+    box.appendChild(b);
+  }
+}
+
+function shapeTip(sh) {
+  if (!sh) return "";
+  if (sh.kind === "path") return ` (끌어서 곡선${sh.max ? ` · 최대 약 ${sh.max}m` : ""})`;
+  if (sh.kind === "line") return sh.fixed ? ` (끌어서 방향 · 약 ${sh.fixed}m)` : ` (끌어서 선${sh.max ? ` · 최대 약 ${sh.max}m` : ""})`;
+  if (sh.kind === "circle") return ` (반경 약 ${sh.r}m)`;
+  return "";
+}
+function renderAbilities() {
+  $("agent-panel").hidden = !curAgent;
+  if (!curAgent) return;
+  $("sa-icon").src = curAgent.icon; $("sa-name").textContent = curAgent.name;
+  const box = $("abil"); box.innerHTML = "";
+  const mk = (label, icon, key, onClick, on) => {
+    const b = document.createElement("button");
+    if (on) b.classList.add("on");
+    const k = document.createElement("span"); k.className = "k"; k.textContent = key;
+    const i = document.createElement("img"); i.src = icon || "";
+    const n = document.createElement("span"); n.className = "n"; n.textContent = label;
+    b.append(k, i, n); b.onclick = onClick; box.appendChild(b);
+  };
+  mk("요원 놓기", curAgent.icon, "👤", () => setTool("agent"), tool === "agent");
+  for (const ab of curAgent.abilities) {
+    mk(ab.name + shapeTip(ab.shape), ab.icon, ab.slot, () => { curAbility = ab; setTool("ability"); },
+       tool === "ability" && curAbility === ab);
+  }
+}
+
+const HINT = {
+  select: "놓인 것을 눌러 고르고 끌어서 옮겨요. 빈 곳을 끌면 확대한 맵을 움직여요. ← → 장면 넘기기",
+  agent: "맵을 누르면 그 자리에 요원을 놓아요.",
+  ability: "톡 누르면 그 자리에 놓고, 끌면 던진 경로(튕김도 그대로)를 그린 뒤 끝에 떨어져요. 벽은 끌어서 그려요.",
+  arrow: "끄는 대로 이동 경로가 그려져요(코너를 돌아가도 돼요).",
+  text: "맵을 누르면 글을 넣어요(60자까지).",
+  ruler: "두 지점을 끌면 실제 거리(m, 대략)를 보여줘요. 저장되지 않아요.",
+};
+function setTool(t) {
+  tool = t;
+  for (const [id, k] of [["t-select", "select"], ["t-arrow", "arrow"], ["t-text", "text"], ["t-ruler", "ruler"]]) $(id).classList.toggle("on", tool === k);
+  $("tool-hint").textContent = HINT[t] || "";
+  if (t !== "ruler") ruler = null;
+  renderAbilities(); render();
+}
+function setTeam(t) {
+  team = t;
+  $("team-ally").classList.toggle("on", t === "ally");
+  $("team-enemy").classList.toggle("on", t === "enemy");
+}
+
+function snap() { return JSON.stringify({ scenes, cur }); }
+function push() { undoStack.push(snap()); if (undoStack.length > 60) undoStack.shift(); }
+function undo() {
+  if (!undoStack.length) return;
+  const s = JSON.parse(undoStack.pop()); scenes = s.scenes; cur = Math.min(s.cur, scenes.length - 1);
+  selected = -1; renderScenes(); changed(); render();
+}
+function delSelected() { if (selected < 0) return; push(); items().splice(selected, 1); selected = -1; changed(); render(); }
+
+// ---------------------------------------------------------------- 맵 위 조작 (편집·보기 공통: 확대·이동)
+function pt(e) {
+  const r = $("svg").getBoundingClientRect();
+  return { u: +((e.clientX - r.left) / r.width).toFixed(4), v: +((e.clientY - r.top) / r.height).toFixed(4) };
+}
+function hitIndex(e) {
+  let n = e.target;
+  while (n && n !== $("svg")) { if (n.dataset && n.dataset.i != null) return +n.dataset.i; n = n.parentNode; }
+  return -1;
+}
+function applyZoom() {
+  const box = $("mapbox").getBoundingClientRect();
+  Z.s = Math.min(4, Math.max(1, Z.s));
+  Z.x = Math.min(0, Math.max(box.width - box.width * Z.s, Z.x));
+  Z.y = Math.min(0, Math.max(box.height - box.height * Z.s, Z.y));
+  $("stage").style.transform = `translate(${Z.x}px, ${Z.y}px) scale(${Z.s})`;
+}
+function zoomAt(cx, cy, factor) {
+  const box = $("mapbox").getBoundingClientRect();
+  const lx = cx - box.left, ly = cy - box.top;
+  const ns = Math.min(4, Math.max(1, Z.s * factor));
+  Z.x = lx - (lx - Z.x) * (ns / Z.s); Z.y = ly - (ly - Z.y) * (ns / Z.s); Z.s = ns;
+  applyZoom();
+}
+function setupZoom() {
+  const box = $("mapbox");
+  const center = () => { const r = box.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; };
+  $("z-in").onclick = () => zoomAt(...center(), 1.4);
+  $("z-out").onclick = () => zoomAt(...center(), 1 / 1.4);
+  $("z-reset").onclick = () => { Z.s = 1; Z.x = 0; Z.y = 0; applyZoom(); };
+  for (const id of ["z-in", "z-out", "z-reset"]) $(id).addEventListener("pointerdown", (e) => e.stopPropagation());
+  box.addEventListener("wheel", (e) => { e.preventDefault(); zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.15 : 1 / 1.15); }, { passive: false });
+  box.addEventListener("pointerdown", onDown);
+  box.addEventListener("pointermove", onMove);
+  box.addEventListener("pointerup", onUp);
+  box.addEventListener("pointercancel", onUp);
+  window.addEventListener("resize", applyZoom);
+}
+
+function startPinch() {
+  const [a, b] = [...pointers.values()];
+  pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, s: Z.s, x: Z.x, y: Z.y };
+  if (drag && drag.kind === "move") { const s = JSON.parse(undoStack.pop()); scenes = s.scenes; }  // 옮기던 건 되돌려요
+  drag = null; $("g-preview").innerHTML = ""; render();
+}
+
+function curShape() { return tool === "arrow" ? { kind: "path" } : ((curAbility || {}).shape || { kind: "icon" }); }
+
+function onDown(e) {
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  $("mapbox").setPointerCapture(e.pointerId);
+  if (pointers.size === 2) { startPinch(); return; }
+  if (pointers.size > 2) return;
+  const p = pt(e), P = [p.u, p.v];
+  if (MODE === "view" || tool === "select") {
+    const i = MODE === "edit" ? hitIndex(e) : -1;
+    if (MODE === "edit") { selected = i; render(); }
+    if (i >= 0) { push(); drag = { kind: "move", start: p, orig: JSON.parse(JSON.stringify(items()[i])), moved: false }; }
+    else if (Z.s > 1) drag = { kind: "pan", cx: e.clientX, cy: e.clientY, x: Z.x, y: Z.y };
+    return;
+  }
+  if (tool === "ruler") { drag = { kind: "ruler", a: P }; ruler = { a: P, b: P }; render(); return; }
+  if (tool === "agent" && curAgent) {
+    push(); items().push({ type: "agent", agent: curAgent.id, team, u: p.u, v: p.v });
+    selected = items().length - 1; setTool("select"); changed(); render(); return;
+  }
+  if (tool === "text") {
+    const text = (prompt("넣을 글 (60자까지)") || "").trim().slice(0, 60);
+    if (text) { push(); items().push({ type: "text", text, team, u: p.u, v: p.v }); changed(); render(); }
+    pointers.delete(e.pointerId); return;
+  }
+  if (tool === "arrow" || (tool === "ability" && curAbility)) drag = { kind: "draw", start: P, pts: [P] };
+}
+
+function onMove(e) {
+  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    const box = $("mapbox").getBoundingClientRect();
+    const ns = Math.min(4, Math.max(1, pinch.s * d / pinch.d));
+    const lx = pinch.mx - box.left, ly = pinch.my - box.top;
+    Z.s = ns; Z.x = lx - (lx - pinch.x) * (ns / pinch.s) + (mx - pinch.mx); Z.y = ly - (ly - pinch.y) * (ns / pinch.s) + (my - pinch.my);
+    applyZoom(); return;
+  }
+  if (!drag) return;
+  const p = pt(e), P = [p.u, p.v];
+  if (drag.kind === "pan") { Z.x = drag.x + e.clientX - drag.cx; Z.y = drag.y + e.clientY - drag.cy; applyZoom(); return; }
+  if (drag.kind === "ruler") { ruler.b = P; render(); return; }
+  if (drag.kind === "move") {
+    const i = selected, o = drag.orig, du = p.u - drag.start.u, dv = p.v - drag.start.v;
+    if (Math.abs(du) + Math.abs(dv) > 0.002) drag.moved = true;
+    const it = items()[i];
+    it.u = +(o.u + du).toFixed(4); it.v = +(o.v + dv).toFixed(4);
+    if (o.u2 != null) { it.u2 = +(o.u2 + du).toFixed(4); it.v2 = +(o.v2 + dv).toFixed(4); }
+    if (o.pts) it.pts = o.pts.map(([u, v]) => [+(u + du).toFixed(4), +(v + dv).toFixed(4)]);
+    render(); return;
+  }
+  const last = drag.pts[drag.pts.length - 1];
+  if (dist(P, last) > 0.004) drag.pts.push(P);
+  const g = $("g-preview"); g.innerHTML = "";
+  const it = newDrawnItem(drag, P, false);
+  if (it) {
+    drawItem(g, it, -1, true);
+    const sh = curShape();
+    if (tool === "ability" && (sh.kind === "line" || sh.kind === "path")) {
+      const len = it.pts ? pathLen(it.pts) : dist([it.u, it.v], [it.u2, it.v2]);
+      const cap = sh.fixed || sh.max;
+      label(g, X(it.u2) + 12, Y(it.v2) - 12, `${meters(len).toFixed(0)}m${cap ? ` / ${cap}m` : ""}`);
+    }
+  }
+}
+
+function onUp(e) {
+  pointers.delete(e.pointerId);
+  if (pinch) { if (pointers.size < 2) pinch = null; return; }
+  if (!drag) return;
+  const d = drag; drag = null; $("g-preview").innerHTML = "";
+  if (d.kind === "pan" || d.kind === "ruler") return;
+  if (d.kind === "move") { if (d.moved) changed(); else undoStack.pop(); return; }
+  const p = pt(e);
+  const it = newDrawnItem(d, [p.u, p.v], true);
+  if (!it) return;
+  push(); items().push(it); changed(); render();
+}
+
+// 끌기 결과 → 항목.
+//  - 곧은 벽(line): 고정·최대 길이에 맞춘 두 점   - 휘는 벽·화살표(path): 점 목록(최대 길이까지)
+//  - 그 밖의 스킬: 톡 누르면 그 자리, 끌면 던진 경로(pts) + 떨어진 곳(u2,v2)
+function newDrawnItem(d, P, final) {
+  const sh = curShape();
+  const unit = MAP.unit || 0.007;
+  const base = tool === "arrow" ? { type: "arrow", team } : { type: "ability", agent: curAgent.id, slot: curAbility.slot, team };
+  const a = d.start, moved = dist(a, P) >= TAP || d.pts.length > 2;
+  if (sh.kind === "line") {
+    const b = fitLine(a, moved ? P : [a[0] + 0.06, a[1]], { fixed: (sh.fixed || 0) * unit, max: (sh.max || 0) * unit });
+    return { ...base, u: a[0], v: a[1], u2: +b[0].toFixed(4), v2: +b[1].toFixed(4) };
+  }
+  if (sh.kind === "path") {
+    if (!moved) return final ? { ...base, u: a[0], v: a[1], u2: +(a[0] + 0.06).toFixed(4), v2: a[1] } : null;
+    let pts = clampPath(d.pts.concat([P]), (sh.max || 0) * unit);
+    if (final) pts = finishPts(pts);
+    if (pts.length < 2) return null;
+    return { ...base, pts, u: pts[0][0], v: pts[0][1], u2: pts[pts.length - 1][0], v2: pts[pts.length - 1][1] };
+  }
+  // 아이콘·원: 던지기
+  if (!moved) return final ? { ...base, u: a[0], v: a[1] } : null;
+  let pts = d.pts.concat([P]);
+  if (final) pts = finishPts(pts);
+  const it = { ...base, u: pts[0][0], v: pts[0][1], u2: pts[pts.length - 1][0], v2: pts[pts.length - 1][1] };
+  if (pts.length > 2) it.pts = pts;
+  return it;
+}
+
+// ---------------------------------------------------------------- 저장 · 올리기
+function status(t) { $("status").textContent = t; }
+function changed() {
+  dirty = true; status("저장 대기 중…");
+  clearTimeout(saveTimer); saveTimer = setTimeout(save, 2500);
+}
+async function save() {
+  clearTimeout(saveTimer);
+  const body = { title: $("title").value.trim(), data: { side, scenes } };
+  status("저장 중…");
+  try {
+    await getJSON(`/api/board/e/${encodeURIComponent(KEY)}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    dirty = false;
+    status(`저장됨 ${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`);
+    return true;
+  } catch (e) {
+    status("⚠️ 저장 실패: " + e.message);
+    saveTimer = setTimeout(save, 5000);
+    return false;
+  }
+}
+async function postToDiscord() {
+  if (!scenes.some((s) => s.items.length)) { status("빈 작전판이에요 — 먼저 그려 주세요"); return; }
+  $("post").disabled = true;
+  try {
+    if (dirty) { await new Promise((r) => setTimeout(r, 1100)); if (!(await save())) return; }
+    status("그림을 만들어 올리는 중…");
+    const j = await getJSON(`/api/board/e/${encodeURIComponent(KEY)}/post`, { method: "POST" });
+    status("📤 " + (j.message || "올렸어요"));
+  } catch (e) {
+    status("⚠️ " + e.message);
+  } finally {
+    setTimeout(() => { $("post").disabled = false; }, 3000);
+  }
+}
+
+$("opt-callout").onchange = drawCallouts;
+main();
+</script>
+</body>
+</html>

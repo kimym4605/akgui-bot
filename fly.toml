@@ -25,6 +25,16 @@ swap_size_mb = 512
   source = 'bot_data'
   destination = '/app/data'
 
+# 🗺️ 2026-11-25 /작전판 웹 전술판 — 봇 안의 aiohttp(포트 8080)를 https://akgui-bot.fly.dev 로 열어요.
+# 🚨 auto_stop_machines = 'off' 필수예요. 기본값(stop)이면 웹 요청이 없을 때 Fly가 머신을 꺼서
+#    **디스코드 봇까지 같이 꺼져요.** min_machines_running = 1 도 같은 이유예요.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = false
+  min_machines_running = 1
+
 # bot.py의 워치독이 이벤트 루프 멈춤을 감지하면 exit(1)로 죽어요.
 # 그때 Fly가 다시 띄워줘야 자동 복구가 완성돼요. (현재 머신 기본값과 동일하지만,
 # 나중에 누가 모르고 바꾸지 않도록 명시해둬요.)

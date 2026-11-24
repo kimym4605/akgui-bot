@@ -95,6 +95,7 @@ COG_GROUPS: dict[str, list[str]] = {
         "achievement",  # /업적, /내전전적, /주간랭킹, /내전시즌
         "weekly_mvp",   # 🏅 월요일마다 지난주 악귀력 1위를 발표하고 역할을 줘요
         "weekly_banner",  # 🖼️ 월요일 11:40 서버 배너에 지난주 MVP·낚시왕 (/배너갱신)
+        "tactics",        # 🗺️ /작전판 - 미니맵에 요원·스킬을 놓는 웹 전술판 (봇 안 웹 서버, Fly http_service)
     ],
     "🔊 즉석 생성형 통화방": [
         "room",             # /방만들기 (랭크방/폐관수련방/프리미어방 등)
