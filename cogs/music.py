@@ -60,6 +60,86 @@ PLAYLIST_PROBE_OPTIONS = {
 FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 FFMPEG_OPTIONS = "-vn"
 
+# ============================================================
+# 🔊 2026-11-25 끊김 대책 — "가끔 몇 초씩 멈춘다"는 제보
+#
+# 예전: FFmpegPCMAudio(날 PCM) + PCMVolumeTransformer → **봇(파이썬)이 20ms마다** 음량을 곱하고
+#   Opus로 압축했어요. 같은 봇이 GIF·카드·전적 그림을 CPU 1개로 같이 그려서, 겹치면 20ms 마감을 놓쳐요.
+#   그리고 ffmpeg↔봇 파이프(64KB)에 PCM은 **0.33초**밖에 안 쌓여서 유튜브가 잠깐만 늦어도 끊겼어요.
+# 지금: FFmpegOpusAudio → 음량(-af volume)·Opus 압축을 **ffmpeg(별도 프로세스)**가 해요.
+#   파이프도 1MB로 넓혀서(리눅스 F_SETPIPE_SZ) 256kbps 기준 **약 30초어치**를 미리 받아둬요.
+# 대가: 재생 중 음량을 바꾸면 ffmpeg를 그 위치부터 다시 띄워요(0.5~1초 끊김).
+# 같은 날 Fly 지표 확인: 최근 7일 CPU 스로틀 0시간, 메모리 여유 → 그쪽 원인은 아니었어요.
+# ============================================================
+PIPE_BUFFER_BYTES = 1 << 20
+_F_SETPIPE_SZ = 1031          # 리눅스 fcntl 상수 (윈도우엔 fcntl이 없어서 그냥 건너뛰어요)
+STALL_SECONDS = 0.3           # 이보다 오래 소리 조각을 못 보냈으면 '끊김'으로 기록해요
+FRAME_SECONDS = 0.02          # 디스코드 음성 한 조각 = 20ms
+
+
+class TimedOpusSource(discord.AudioSource):
+    """FFmpegOpusAudio를 감싸서 ① 재생 위치를 세고 ② 끊김을 원인별로 기록해요.
+
+    - 🌐 **전송**: ffmpeg에서 다음 조각을 받는 데(read) 오래 걸림 → 유튜브가 늦게 줌
+    - 🧠 **봇이 바쁨**: read를 부르는 간격 자체가 벌어짐 → 재생 스레드가 차례를 못 받음
+    """
+
+    def __init__(self, inner: discord.FFmpegOpusAudio, start: float = 0.0, label: str = ""):
+        self.inner = inner
+        self.start = start
+        self.label = label
+        self.frames = 0
+        self._last: float | None = None
+        self.stalls = {"net": 0, "busy": 0}
+        self.worst = 0.0
+        try:
+            import fcntl
+            fcntl.fcntl(inner._stdout.fileno(), _F_SETPIPE_SZ, PIPE_BUFFER_BYTES)
+        except Exception:  # noqa: BLE001 — 버퍼를 못 넓혀도 재생은 돼요
+            pass
+
+    @property
+    def position(self) -> float:
+        return self.start + self.frames * FRAME_SECONDS
+
+    def reset_clock(self) -> None:
+        """일시정지 → 재개 사이 간격을 끊김으로 세지 않게."""
+        self._last = None
+
+    def is_opus(self) -> bool:
+        return True
+
+    def read(self) -> bytes:
+        import time
+        t0 = time.perf_counter()
+        if self._last is not None:
+            gap = t0 - self._last
+            if gap > STALL_SECONDS:
+                self._note("busy", gap)
+        data = self.inner.read()
+        took = time.perf_counter() - t0
+        if took > STALL_SECONDS:
+            self._note("net", took)
+        self._last = time.perf_counter()
+        if data:
+            self.frames += 1
+        return data
+
+    def _note(self, kind: str, seconds: float) -> None:
+        self.stalls[kind] += 1
+        self.worst = max(self.worst, seconds)
+        why = "🌐 유튜브 전송이 늦음" if kind == "net" else "🧠 봇이 바빠 늦게 보냄"
+        log.warning(f"🎤 끊김 {seconds:.2f}초 ({why}) · {self.position:.0f}초 지점 · {self.label}")
+
+    def summary(self) -> str | None:
+        if not (self.stalls["net"] or self.stalls["busy"]):
+            return None
+        return (f"🎤 곡 끝 끊김 요약: 전송 {self.stalls['net']}번 · 봇 바쁨 {self.stalls['busy']}번 · "
+                f"최장 {self.worst:.2f}초 · {self.position:.0f}초 재생 · {self.label}")
+
+    def cleanup(self) -> None:
+        self.inner.cleanup()
+
 IDLE_LEAVE_SECONDS = 300  # 대기열이 비고 이 시간 동안 다음 곡이 없으면 자동으로 나가요.
 SEARCH_PICK_TIMEOUT_SECONDS = 60  # 검색 결과 드롭다운이 유효한 시간
 MAX_PLAYLIST_TRACKS = 50  # 재생목록 링크 하나로 한 번에 담을 수 있는 최대 곡 수
@@ -204,6 +284,10 @@ class GuildMusicState:
     # /스킵으로 넘어온 경우엔 "한 곡 반복"이라도 같은 곡을 다시 틀면 안 되니까(영원히 안 넘어가요)
     # 이 표시를 세워두고 _play_next에서 한 번만 건너뛰어요.
     skip_repeat_once: bool = False
+    # 🔊 지금 곡의 스트림 주소·소스 — /음량을 바꾸면 이 주소로 그 위치부터 다시 틀어요.
+    stream_url: str | None = None
+    source: "TimedOpusSource | None" = None
+    restart_at: float | None = None
 
 
 # ============================================================
@@ -308,6 +392,18 @@ class Music(commands.Cog):
         if voice_client is None:
             return
 
+        if state.source is not None:
+            summary = state.source.summary()
+            if summary:
+                log.warning(summary)
+            state.source = None
+
+        # 🔊 /음량으로 멈춘 거면 같은 곡을 그 위치부터 새 음량으로 이어 틀어요(대기열·반복은 그대로).
+        restart_at, state.restart_at = state.restart_at, None
+        if restart_at is not None and state.current is not None and state.stream_url:
+            self._start_source(guild, state, state.current, state.stream_url, start=restart_at)
+            return
+
         # 방금 끝난 곡을 반복 설정에 따라 대기열에 돌려놔요. 큐가 비었는지 확인하기 **전에**
         # 해야, 마지막 곡이 끝나도 반복이 이어져요.
         previous = state.current
@@ -340,10 +436,31 @@ class Music(commands.Cog):
                         f"⚠️ **{track.title}** 재생 준비 중 오류가 나서 건너뛸게요. ({e})"
                     )
 
-        source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(stream_url, before_options=FFMPEG_BEFORE_OPTIONS, options=FFMPEG_OPTIONS),
-            volume=state.volume,
+        state.stream_url = stream_url
+        self._start_source(guild, state, track, stream_url)
+
+        if state.text_channel is not None:
+            await state.text_channel.send(embed=_build_track_embed(track, status="🎶 지금 재생 중"))
+
+    def _start_source(self, guild: discord.Guild, state: GuildMusicState, track: Track,
+                      stream_url: str, *, start: float = 0.0) -> None:
+        """ffmpeg를 띄워 재생을 시작해요. `start`초부터(=/음량 변경 뒤 이어 틀기)."""
+        voice_client = guild.voice_client
+        if voice_client is None:
+            return
+
+        # 🔊 인코더 비트레이트를 **채널 음질에 맞춰요**(2026-11-15 부스트 2레벨 → 채널 256kbps).
+        #    채널 값보다 높게 보내봐야 의미가 없고, 512가 Opus 상한이에요.
+        #    2026-11-25부터는 이 값으로 **ffmpeg가** 압축해요(봇은 다 된 조각을 보내기만).
+        channel_kbps = getattr(voice_client.channel, "bitrate", 128_000) // 1000
+        bitrate = max(64, min(channel_kbps, 512))
+        before = FFMPEG_BEFORE_OPTIONS + (f" -ss {start:.2f}" if start > 0 else "")
+        options = f"{FFMPEG_OPTIONS} -af volume={state.volume:.2f}"
+        source = TimedOpusSource(
+            discord.FFmpegOpusAudio(stream_url, bitrate=bitrate, before_options=before, options=options),
+            start=start, label=track.title[:40],
         )
+        state.source = source
 
         def _after(error):
             # ⚠️ 이 콜백은 이벤트 루프가 아니라 **오디오 재생 스레드**에서 불려요.
@@ -365,15 +482,7 @@ class Music(commands.Cog):
 
             future.add_done_callback(_log_failure)
 
-        # 🔊 인코더 비트레이트를 **채널 음질에 맞춰요**(2026-11-15 부스트 2레벨 → 채널 256kbps).
-        #    discord.py 기본값은 128kbps 고정이라, 채널만 올려선 봇 소리가 그대로였어요.
-        #    채널 값보다 높게 보내봐야 의미가 없고, 512가 Opus 상한이에요.
-        channel_kbps = getattr(voice_client.channel, "bitrate", 128_000) // 1000
-        bitrate = max(64, min(channel_kbps, 512))
         voice_client.play(source, after=_after, bitrate=bitrate, signal_type="music")
-
-        if state.text_channel is not None:
-            await state.text_channel.send(embed=_build_track_embed(track, status="🎶 지금 재생 중"))
 
     async def add_track_and_play(
         self,
@@ -540,6 +649,9 @@ class Music(commands.Cog):
         if voice_client is None or not voice_client.is_paused():
             await interaction.response.send_message("일시정지된 노래가 없어요.", ephemeral=True)
             return
+        state = self._get_state(interaction.guild.id)
+        if state.source is not None:
+            state.source.reset_clock()   # 멈춰 있던 시간을 '끊김'으로 세지 않게
         voice_client.resume()
         await interaction.response.send_message("▶️ 다시 재생할게요.")
 
@@ -613,10 +725,22 @@ class Music(commands.Cog):
             await interaction.response.send_message(f"🔊 현재 음량: {int(state.volume * 100)}%", ephemeral=True)
             return
 
+        changed = abs(state.volume - 퍼센트 / 100) > 1e-6
         state.volume = 퍼센트 / 100
         voice_client = guild.voice_client
-        if voice_client is not None and isinstance(voice_client.source, discord.PCMVolumeTransformer):
-            voice_client.source.volume = state.volume
+        # 🔊 음량은 ffmpeg가 정해요(2026-11-25). 재생 중이면 지금 위치부터 새 음량으로 다시 틀어요.
+        #    stop() → after 콜백 → _play_next가 restart_at을 보고 같은 곡을 이어 틀어요.
+        if (changed and voice_client is not None and voice_client.is_playing()
+                and state.source is not None and state.stream_url):
+            state.restart_at = state.source.position
+            voice_client.stop()
+            await interaction.response.send_message(
+                f"🔊 음량을 {퍼센트}%로 바꿨어요. (지금 곡을 이 자리부터 새 음량으로 이어서 틀어요)")
+            return
+        if changed and voice_client is not None and voice_client.is_paused():
+            await interaction.response.send_message(
+                f"🔊 음량을 {퍼센트}%로 설정했어요. 일시정지 중이라 **다음 곡부터** 적용돼요.")
+            return
 
         await interaction.response.send_message(f"🔊 음량을 {퍼센트}%로 설정했어요.")
 
