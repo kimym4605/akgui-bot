@@ -402,6 +402,31 @@ def _balodle_badge(image, streak: int) -> int | None:
     return x0
 
 
+# 🎴 2026-11-24 개편: 정보는 왼쪽 열(x 44~COLUMN_RIGHT)에만. 오른쪽은 테마 그림 자리예요.
+COLUMN_RIGHT = 588
+
+
+def _right_emblem(image, data: dict, valorant: dict) -> None:
+    """색 테마(그림 없음)일 때 오른쪽 빈자리에 **티어 엠블럼**을 크게 깔아요.
+    티어를 모르면 주력 요원 얼굴을 옅게. 둘 다 없으면 아무것도 안 그려요(실패해도 조용히)."""
+    try:
+        from utils import stat_art           # 지연 import — stat_art가 이 모듈을 import해요
+        tier_id = valorant.get("tierId") or data.get("tier_id")
+        emblem = stat_art.tier_icon(int(tier_id), 250) if tier_id else None
+        fade = 0.9
+        if emblem is None:
+            agents = valorant.get("agents") or []
+            emblem = stat_art.agent_icon(agents[0], 230) if agents else None
+            fade = 0.35
+        if emblem is None:
+            return
+        alpha = emblem.getchannel("A").point(lambda a: int(a * fade))
+        cx, cy = (COLUMN_RIGHT + CARD_WIDTH) // 2 + 8, 360
+        image.paste(emblem, (cx - emblem.width // 2, cy - emblem.height // 2), alpha)
+    except Exception:                            # noqa: BLE001 — 장식이라 실패해도 카드는 나와야 해요
+        log.warning("🎴 카드 오른쪽 엠블럼을 못 그렸어요", exc_info=True)
+
+
 def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
     """실제 그리기. **동기 함수**라 반드시 to_thread로 불러야 해요."""
     # 모르는 테마 이름이 들어와도(테마를 지웠거나 데이터가 낡았거나) 기본으로 그려요.
@@ -507,132 +532,145 @@ def _render(data: dict, avatar_bytes: bytes | None) -> bytes:
         fill=accent if data.get("tier") else TEXT_DIM, **art_stroke,
     )
 
-    # ── 발로란트 간략 전적 (티어 줄 바로 아래 한 줄) ─────────
-    # `/전적`이 남겨둔 스냅샷이라 여기서 API를 부르지 않아요(profile_service 설명 참고).
-    # 값이 없으면(= /전적을 한 번도 안 돌림) 이 줄을 통째로 빼요 - 빈칸을 그리면 지저분해요.
+    # ════════════════════════════════════════════════════════════════════
+    # 🎴 2026-11-24 개편 — "내전 말고 발로란트 전적을, 그리고 테마를 너무 가린다"
+    #
+    # 예전엔 통계 칸 8개 + 업적 막대가 **가로 전체(x 44~956)**를 덮어서 그림 테마는 칸 틈과
+    # 오른쪽 위에만 보였어요. 이제 정보는 **왼쪽 열(x 44~588)**에만 두고 오른쪽 42%는 비워요.
+    #   - 발로란트 전적 칸(크게): 많이 한 요원 · K/D · 승률 · HS · ADR · 최근 10경기
+    #   - 작은 칩 6개: 코인 · 악귀력 · 음성 · 낚시 · 출석 · 미션
+    #   - 얇은 업적 막대
+    # 내전 전적은 카드에서 빠지고 📋 자세히 보기 → 내전에서 봐요.
+    # 그림이 없는 색 테마는 오른쪽이 휑해서 **티어 엠블럼**(없으면 주력 요원)을 크게 깔아요.
+    # ════════════════════════════════════════════════════════════════════
+    col_l, col_r = 44, COLUMN_RIGHT
     valorant = data.get("valorant") or {}
-    pairs = [
-        (label, fmt(valorant[key]))
-        for label, key, fmt in (
-            ("K/D", "kd", lambda v: f"{v:.2f}"),
-            ("승률", "winRate", lambda v: f"{v:.0f}%"),
-            ("HS", "hs", lambda v: f"{v:.0f}%"),
-        )
-        if valorant.get(key) is not None
-    ]
-    if pairs:
-        stat_y = tier_y + 36
-        label_font, value_font = _font("regular", 18), _font("bold", 20)
-        x = text_x
-        for index, (label, value) in enumerate(pairs):
-            if index:
-                draw.text((x, stat_y + 2), "·", font=label_font, fill=TEXT_DIM, **art_stroke)
-                x += draw.textlength("·", font=label_font) + 12
-            draw.text((x, stat_y + 2), label, font=label_font, fill=TEXT_SUB, **art_stroke)
-            x += draw.textlength(label, font=label_font) + 7
-            draw.text((x, stat_y), value, font=value_font, fill=TEXT, **art_stroke)
-            x += draw.textlength(value, font=value_font) + 12
 
-        tail_font = _font("regular", 16)
-        tail_parts = []
-        if valorant.get("matches"):
-            tail_parts.append(f"최근 {valorant['matches']}경기")
-        if data.get("riot_id"):
-            tail_parts.append(data["riot_id"])
-        if tail_parts:
-            tail = " · ".join(tail_parts)
-            draw.text(
-                (x + 4, stat_y + 4),
-                _fit_text(draw, tail, tail_font, max(CARD_WIDTH - 44 - x - 4, 0)),
-                font=tail_font, fill=TEXT_DIM, **art_stroke,
-            )
+    # ── 오른쪽 장식 (색 테마만) ───────────────────────────────
+    if not on_art:
+        _right_emblem(image, data, valorant)
 
-    # ── 통계 4칸 ─────────────────────────────────────────────
-    box_y, box_h, gap = 218, 116, 16
-    box_w = (CARD_WIDTH - 88 - gap * 3) // 4
-    left = 44
+    # ── 발로란트 전적 칸 ─────────────────────────────────────
+    vy0, vy1 = 214, 404
+    _rounded_panel(draw, (col_l, vy0, col_r, vy1), fill=panel, outline=panel_edge)
+    draw.text((col_l + 18, vy0 + 14), "발로란트 전적", font=_font("regular", 19), fill=TEXT_SUB)
+    head = [f"최근 {valorant['matches']}경기" if valorant.get("matches") else "", data.get("riot_id") or ""]
+    head_text = " · ".join(p for p in head if p)
+    if head_text:
+        hfont = _font("regular", 16)
+        head_text = _fit_text(draw, head_text, hfont, 300)
+        draw.text((col_r - 18, vy0 + 17), head_text, font=hfont, fill=sub_color, anchor="ra")
 
-    record = data["record"]
-    total_games = record["wins"] + record["losses"]
-    rate_sub = f"승률 {record['win_rate']:.0f}%" if total_games else "아직 기록 없음"
-
-    _stat_box(draw, left, box_y, box_w, box_h, "악귀코인", f"{data['coin']:,}", GOLD,
-              panel=panel, edge=panel_edge, sub_color=sub_color)
-    _stat_box(
-        draw, left + (box_w + gap), box_y, box_w, box_h, "내전 전적",
-        f"{record['wins']}승 {record['losses']}패",
-        WIN_COLOR if record["wins"] >= record["losses"] and total_games else TEXT,
-        rate_sub, panel=panel, edge=panel_edge, sub_color=sub_color,
-    )
-    _stat_box(
-        draw, left + (box_w + gap) * 2, box_y, box_w, box_h, "최고 연승",
-        f"{record['best_streak']}", TEXT, data.get("streak_now", ""),
-        panel=panel, edge=panel_edge, sub_color=sub_color,
-    )
-    agwi = data.get("agwi")
-    _stat_box(
-        draw, left + (box_w + gap) * 3, box_y, box_w, box_h, "이번 주 악귀력",
-        f"{agwi:,.0f}" if agwi else "-", accent,
-        data.get("agwi_grade", "") if agwi else "/전적 을 돌려주세요",
-        panel=panel, edge=panel_edge, sub_color=sub_color,
-    )
-
-    # ── 통계 2번째 줄 (2026-11-15) ───────────────────────────
-    # 🚨 값이 없는 사람(통화·낚시 0)도 칸은 그려요. 줄마다 칸 수가 달라지면 카드끼리
-    #    비교할 때 자리가 엇갈려요. 대신 값 자리에 "-"와 시작 안내를 적어요.
-    row2_y = box_y + box_h + gap
-    voice = data.get("voice") or {}
-    v_level = int(voice.get("level") or 0)
-    v_left = max(0, int(voice.get("need") or 0) - int(voice.get("into") or 0))
-    if voice.get("minutes"):
-        v_value, v_sub = f"Lv.{v_level}", f"Lv.{v_level + 1}까지 {_short_minutes(v_left)}"
+    if not valorant:
+        draw.text(((col_l + col_r) // 2, (vy0 + vy1) // 2 + 8), "/전적 을 한 번 돌리면 여기에 전적이 나와요",
+                  font=_font("regular", 20), fill=sub_color, anchor="mm")
     else:
-        v_value, v_sub = "-", "통화하면 쌓여요"
-    _stat_box(draw, left, row2_y, box_w, box_h, "음성 레벨", v_value, VOICE_COLOR, v_sub,
-              panel=panel, edge=panel_edge, sub_color=sub_color)
+        # 많이 한 요원 (최대 3명) — 그림은 미리 구워 둔 assets/valorant/agents (API 호출 0)
+        agents = [a for a in (valorant.get("agents") or []) if a][:3]
+        sx = col_l + 18
+        if agents:
+            from utils import stat_art       # 지연 import — stat_art가 이 모듈을 import해요
+            icon = 54
+            for i, name in enumerate(agents):
+                ix, iy = col_l + 18 + i * (icon + 8), vy0 + 50
+                im = stat_art.agent_icon(name, icon)
+                draw.rounded_rectangle((ix, iy, ix + icon, iy + icon), radius=12, fill=(32, 36, 56),
+                                       outline=accent if i == 0 else panel_edge, width=2 if i == 0 else 1)
+                if im is not None:
+                    mask = Image.new("L", (icon, icon), 0)
+                    ImageDraw.Draw(mask).rounded_rectangle((0, 0, icon - 1, icon - 1), radius=12, fill=255)
+                    alpha = Image.composite(im.getchannel("A"), Image.new("L", im.size, 0), mask)
+                    image.paste(im, (ix, iy), alpha)
+            draw.text((col_l + 18, vy0 + 112), "많이 한 요원", font=_font("regular", 15), fill=sub_color)
+            sx = col_l + 18 + 3 * (icon + 8) + 12
 
+        cells = []
+        if valorant.get("kd") is not None:
+            kd = float(valorant["kd"])
+            cells.append(("K/D", f"{kd:.2f}", WIN_COLOR if kd >= 1 else LOSE_COLOR, ""))
+        if valorant.get("winRate") is not None:
+            wr = float(valorant["winRate"])
+            wl = (f"{valorant['wins']}승 {valorant['losses']}패"
+                  if valorant.get("wins") is not None and valorant.get("losses") is not None else "")
+            cells.append(("승률", f"{wr:.0f}%", WIN_COLOR if wr >= 50 else LOSE_COLOR, wl))
+        if valorant.get("hs") is not None:
+            cells.append(("HS", f"{float(valorant['hs']):.0f}%", TEXT, ""))
+        if valorant.get("adr"):
+            cells.append(("ADR", f"{float(valorant['adr']):.0f}", TEXT, ""))
+        if cells:
+            cw = (col_r - 18 - sx) // len(cells)
+            for i, (label, value, color, sub) in enumerate(cells):
+                cx = sx + i * cw
+                draw.text((cx, vy0 + 50), label, font=_font("regular", 17), fill=TEXT_SUB)
+                vfont = _font("bold", 32)
+                draw.text((cx, vy0 + 72), _fit_text(draw, value, vfont, cw - 6), font=vfont, fill=color)
+                if sub:
+                    sfont = _font("regular", 15)
+                    draw.text((cx, vy0 + 112), _fit_text(draw, sub, sfont, cw - 4), font=sfont, fill=sub_color)
+
+        # 최근 경기 승패 줄 (왼쪽이 가장 최근)
+        recent = list(valorant.get("recent") or [])[:10]
+        ry = vy0 + 146
+        if recent:
+            draw.text((col_l + 18, ry + 6), "최근", font=_font("regular", 16), fill=TEXT_SUB)
+            bx = col_l + 70
+            for won in recent:
+                draw.rounded_rectangle((bx, ry, bx + 34, ry + 30), radius=7,
+                                       fill=WIN_COLOR if won else LOSE_COLOR)
+                draw.text((bx + 17, ry + 15), "승" if won else "패", font=_font("bold", 15),
+                          fill=(16, 20, 30), anchor="mm")
+                bx += 34 + 7
+        else:
+            draw.text((col_l + 18, ry + 6), "/전적 을 다시 돌리면 요원 · 최근 경기도 보여요",
+                      font=_font("regular", 16), fill=sub_color)
+
+    # ── 작은 칩 6개 (2줄 × 3칸) ─────────────────────────────
+    voice = data.get("voice") or {}
     fishing = data.get("fishing") or {}
     caught = int(fishing.get("caught") or 0)
-    best = fishing.get("best") or {}
-    if best.get("name"):
-        f_sub = f"최대 {best['name']}" + (f" {best['size']}cm" if best.get("size") else "")
-    else:
-        f_sub = "/낚시 로 시작" if not caught else ""
-    _stat_box(draw, left + (box_w + gap), row2_y, box_w, box_h, "낚시",
-              f"{caught:,}마리" if caught else "-", FISH_COLOR, f_sub,
-              panel=panel, edge=panel_edge, sub_color=sub_color)
-
-    missions = int(data.get("mission_total") or 0)
-    _stat_box(draw, left + (box_w + gap) * 2, row2_y, box_w, box_h, "누적 미션",
-              f"{missions:,}개" if missions else "-", TEXT, "/미션 으로 확인",
-              panel=panel, edge=panel_edge, sub_color=sub_color)
-
+    agwi = data.get("agwi")
     streak = int(data.get("attendance_streak") or 0)
+    missions = int(data.get("mission_total") or 0)
     attend_total = int(data.get("attendance") or 0)
-    _stat_box(draw, left + (box_w + gap) * 3, row2_y, box_w, box_h, "연속 출석",
-              f"{streak}일" if streak else "-", GOLD,
-              f"누적 {attend_total:,}회" if attend_total else "/출석 으로 시작",
-              panel=panel, edge=panel_edge, sub_color=sub_color)
+    chips = [
+        ("악귀코인", f"{data['coin']:,}", GOLD, ""),
+        ("이번 주 악귀력", f"{agwi:,.0f}" if agwi else "-", accent,
+         (data.get("agwi_grade") or "") if agwi else ""),
+        ("음성 레벨", f"Lv.{int(voice.get('level') or 0)}" if voice.get("minutes") else "-", VOICE_COLOR, ""),
+        ("낚시", f"{caught:,}마리" if caught else "-", FISH_COLOR, ""),
+        ("연속 출석", f"{streak}일" if streak else "-", GOLD, f"누적 {attend_total:,}회" if attend_total else ""),
+        ("누적 미션", f"{missions:,}개" if missions else "-", TEXT, ""),
+    ]
+    chip_gap, chip_h = 10, 58
+    chip_w = (col_r - col_l - chip_gap * 2) // 3
+    for i, (label, value, color, sub) in enumerate(chips):
+        cx = col_l + (i % 3) * (chip_w + chip_gap)
+        cy = 418 + (i // 3) * (chip_h + chip_gap)
+        _rounded_panel(draw, (cx, cy, cx + chip_w, cy + chip_h), radius=12, fill=panel, outline=panel_edge)
+        draw.text((cx + 14, cy + 8), label, font=_font("regular", 15), fill=TEXT_SUB)
+        vfont = _font("bold", 22)
+        draw.text((cx + 14, cy + 28), value, font=vfont, fill=color)
+        if sub:
+            sx2 = cx + 14 + draw.textlength(value, font=vfont) + 8
+            sfont = _font("regular", 14)
+            draw.text((sx2, cy + 35), _fit_text(draw, sub, sfont, max(0, int(cx + chip_w - 10 - sx2))),
+                      font=sfont, fill=sub_color)
 
-    # ── 업적 진행 ────────────────────────────────────────────
-    ach_y = row2_y + box_h + 24
-    _rounded_panel(draw, (left, ach_y, CARD_WIDTH - 44, ach_y + 92),
-                   fill=panel, outline=panel_edge)
+    # ── 업적 (얇은 막대) ─────────────────────────────────────
+    ay0 = 554
+    _rounded_panel(draw, (col_l, ay0, col_r, ay0 + 44), radius=12, fill=panel, outline=panel_edge)
     unlocked, total = data["achievements"], data["achievements_total"]
-    draw.text((left + 18, ach_y + 16), "업적", font=_font("regular", 19), fill=TEXT_SUB)
-    draw.text(
-        (left + 18, ach_y + 42), f"{unlocked} / {total}",
-        font=_font("bold", 30), fill=TEXT,
-    )
+    draw.text((col_l + 14, ay0 + 22), "업적", font=_font("regular", 16), fill=TEXT_SUB, anchor="lm")
+    count_text = f"{unlocked}/{total}"
+    cfont = _font("bold", 20)
+    draw.text((col_l + 56, ay0 + 22), count_text, font=cfont, fill=TEXT, anchor="lm")
     percent = unlocked / total * 100 if total else 0
-    percent_font = _font("bold", 22)
-    percent_text = f"{percent:.0f}%"
-    draw.text(
-        (CARD_WIDTH - 62 - draw.textlength(percent_text, font=percent_font), ach_y + 22),
-        percent_text, font=percent_font, fill=GOLD,
-    )
-    _progress_bar(draw, left + 160, ach_y + 56, CARD_WIDTH - 44 - left - 160 - 18, 16,
-                  percent / 100, track=panel_edge)
+    ptext = f"{percent:.0f}%"
+    pfont = _font("bold", 18)
+    draw.text((col_r - 14, ay0 + 22), ptext, font=pfont, fill=GOLD, anchor="rm")
+    bar_x = col_l + 56 + int(draw.textlength(count_text, font=cfont)) + 16
+    bar_r = col_r - 14 - int(draw.textlength(ptext, font=pfont)) - 14
+    _progress_bar(draw, bar_x, ay0 + 16, max(10, bar_r - bar_x), 12, percent / 100, track=panel_edge)
 
     # (하단 출석 한 줄은 2026-11-15에 2번째 줄 '연속 출석' 칸으로 옮겼어요.)
 

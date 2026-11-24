@@ -164,6 +164,10 @@ async def collect(member: discord.Member | discord.User, *, evaluate_achievement
         "title": title_name,
         "title_color": title_color,
         "tier": tier_name,
+        # 🎴 색 테마 카드 오른쪽의 큰 티어 엠블럼(2026-11-24). 역할 번호 + 2 = 라이엇 tier id
+        #    (`cogs.rank.tier_index_from_tier_id`의 반대).
+        "tier_id": (lambda i: i + 2 if i is not None else None)(
+            tier_roles.member_tier_index(guild_member) if guild_member else None),
         "accent_color": accent,
         # 카드 배경 테마 (`/악귀상점`에서 사서 고른 것). 모르는 이름이면 카드가 기본으로 그려요.
         "theme": theme,

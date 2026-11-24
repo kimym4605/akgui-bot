@@ -884,6 +884,14 @@ class Rank(commands.Cog):
                     "winRate": round(stats["win_rate"], 1),
                     "hs": round(stats["hs_percent"], 1),
                     "matches": stats["matches_counted"],
+                    # 🎴 2026-11-24 프로필 카드 '발로란트 전적' 칸용 — 이미 계산된 값만 더 적어요.
+                    "wins": stats.get("wins", 0),
+                    "losses": max(0, stats["matches_counted"] - stats.get("wins", 0)),
+                    "adr": round(stats.get("adr") or 0, 1),
+                    "acs": round(stats.get("acs") or 0),
+                    "tierId": stats.get("tier_id"),
+                    "agents": [name for name, _ in (stats.get("agents_ranked") or [])][:3],
+                    "recent": [bool(won) for won, _ in (stats.get("recent") or [])][:10],
                 },
             )
 
