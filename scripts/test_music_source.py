@@ -82,9 +82,10 @@ made = []
 
 
 class FakeOpus(FakeInner):
-    def __init__(self, url, *, bitrate=None, before_options=None, options=None):
+    def __init__(self, src, *, pipe=False, bitrate=None, before_options=None, options=None):
         super().__init__(n=1)
-        made.append({"url": url, "bitrate": bitrate, "before": before_options, "options": options})
+        made.append({"src": src, "pipe": pipe, "bitrate": bitrate,
+                     "before": before_options or "", "options": options})
 
 
 music.discord.FFmpegOpusAudio = FakeOpus
@@ -133,15 +134,17 @@ async def run():
     check("ffmpeg가 채널 음질(256)로 압축", m["bitrate"] == 256)
     check("음량은 ffmpeg 필터", "-af volume=1.50" in m["options"], m["options"])
     check("처음부터면 -ss 없음", "-ss" not in m["before"])
-    check("재연결 옵션 유지", "-reconnect 1" in m["before"])
+    check("https는 구간 받기(pipe)로", m["pipe"] and isinstance(m["src"], music.ChunkedHTTPReader)
+          and m["src"].url == "http://stream/1")
     check("state.source 기억", state.source is guild.voice_client.played[-1])
+    check("소스가 reader를 들고 있음(정리용)", state.source.reader is m["src"])
 
     # /음량 변경 흉내: 지금 위치에서 restart_at → _play_next가 같은 곡을 이어 틀어요
     state.source.frames = 3000          # 60초 지점
     state.restart_at = state.source.position
     await cog._play_next(guild)
     m = made[-1]
-    check("이어 틀기는 같은 주소", m["url"] == "http://stream/1")
+    check("이어 틀기는 같은 주소", m["src"].url == "http://stream/1")
     check("이어 틀기는 그 위치부터", "-ss 60.00" in m["before"], m["before"])
     check("이어 틀기 뒤 위치도 60초부터", abs(state.source.position - 60.0) < 1e-9)
     check("대기열은 그대로", list(state.queue) == [t2] and state.current is t1)
@@ -153,8 +156,67 @@ async def run():
     await cog._play_next(guild)
     check("한 곡 반복 중 이어 틀기도 대기열 그대로", list(state.queue) == [t2])
 
+    state.stream_protocol = "m3u8_native"
+    cog._start_source(guild, state, t1, "http://stream/hls.m3u8")
+    m = made[-1]
+    check("m3u8은 ffmpeg가 직접(재연결 옵션)", not m["pipe"] and m["src"] == "http://stream/hls.m3u8"
+          and "-reconnect 1" in m["before"])
+    check("m3u8은 reader 없음", state.source.reader is None)
+
 
 asyncio.run(run())
+
+
+print("[3] 구간(Range) 받기 — 로컬 HTTP 서버")
+import http.server
+import threading
+
+BLOB = bytes(range(256)) * 4000 + b"END"     # 1,024,003바이트
+hits = []
+
+
+class RangeHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        rng = self.headers.get("Range", "")
+        hits.append((rng, self.headers.get("X-Test")))
+        a, b = rng.replace("bytes=", "").split("-")
+        a, b = int(a), min(int(b), len(BLOB) - 1)
+        if a >= len(BLOB):
+            self.send_response(416); self.end_headers(); return
+        body = BLOB[a:b + 1]
+        self.send_response(206)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RangeHandler)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+url = f"http://127.0.0.1:{srv.server_address[1]}/a"
+
+r = music.ChunkedHTTPReader(url, {"X-Test": "ok", "Range": "bytes=999-"}, chunk=300_000)
+got = bytearray()
+while True:
+    piece = r.read(8192)
+    if not piece:
+        break
+    got += piece
+check("나눠 받아도 원본과 똑같음", bytes(got) == BLOB, f"{len(got)} vs {len(BLOB)}")
+check("2MB 대신 30만씩 4번 요청", len(hits) == 4, str([h[0] for h in hits]))
+check("첫 요청은 0부터", hits[0][0] == "bytes=0-299999")
+check("yt-dlp 헤더 전달 · 원래 Range는 버림", all(h[1] == "ok" for h in hits))
+
+hits.clear()
+r = music.ChunkedHTTPReader(url, {}, chunk=256)
+r.read(10); r.close()
+check("close 뒤엔 빈 값(다음 곡으로 넘어갈 때 멈춤)", r.read(10) == b"")
+
+r = music.ChunkedHTTPReader(f"http://127.0.0.1:{srv.server_address[1]}/a", {}, chunk=len(BLOB))
+check("딱 맞게 끝나면 416에서 멈춤", len(r.read(-1)) == len(BLOB) and r.read(10) == b"")
+srv.shutdown()
 
 print()
 if failed:

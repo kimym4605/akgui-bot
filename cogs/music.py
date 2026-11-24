@@ -23,6 +23,7 @@
 """
 import logging
 import asyncio
+import io
 import os
 import random
 from collections import deque
@@ -77,6 +78,85 @@ STALL_SECONDS = 0.3           # 이보다 오래 소리 조각을 못 보냈으�
 FRAME_SECONDS = 0.02          # 디스코드 음성 한 조각 = 20ms
 
 
+# ============================================================
+# 🌐 2026-11-25 (v233 직후) 실측: 끊김 로그가 **곡 시작부터 1~2초마다 "유튜브 전송이 늦음"**
+#   (0.6~2.1초씩, 🧠 봇 바쁨은 0번). ffmpeg가 googlevideo 주소를 **연결 하나로 길게** 받으면
+#   유튜브가 그 연결을 재생 속도 근처로 늦춰서, 버퍼를 아무리 넓혀도 채울 게 안 들어와요.
+#   → 봇이 직접 **2MB씩 Range 요청을 나눠** 받아 ffmpeg 표준입력에 넣어요(yt-dlp가 쓰는 방식).
+#   새 요청마다 처음 속도가 빨라서 재생보다 한참 앞서 받아둬요.
+# ============================================================
+CHUNK_BYTES = 2 * 1024 * 1024
+CHUNK_RETRIES = 3
+
+
+class ChunkedHTTPReader(io.RawIOBase):
+    """유튜브 스트림 주소를 구간(Range)으로 나눠 받는 읽기 객체. discord.py의 파이프 쓰기 스레드가
+    `read()`를 불러요(이벤트 루프가 아니라서 막혀도 괜찮아요)."""
+
+    def __init__(self, url: str, headers: dict | None = None, chunk: int = CHUNK_BYTES):
+        self.url = url
+        self.headers = {k: v for k, v in (headers or {}).items() if k.lower() != "range"}
+        self.chunk = chunk
+        self.pos = 0
+        self.buf = b""
+        self.eof = False
+        self._closed = False
+
+    def readable(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        self._closed = True
+        super().close()
+
+    def _fetch(self) -> bytes:
+        import time
+        import urllib.error
+        import urllib.request
+        end = self.pos + self.chunk - 1
+        last_exc: Exception | None = None
+        for attempt in range(CHUNK_RETRIES):
+            if self._closed:
+                return b""
+            req = urllib.request.Request(
+                self.url, headers={**self.headers, "Range": f"bytes={self.pos}-{end}"})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = resp.read()
+                    if resp.status == 200:
+                        # 서버가 Range를 무시하고 통째로 줬어요 — 이게 전부예요.
+                        self.eof = True
+                    elif len(data) < self.chunk:
+                        self.eof = True
+                    return data
+            except urllib.error.HTTPError as e:
+                if e.code == 416:          # 끝을 넘겨 요청 = 다 받았어요
+                    self.eof = True
+                    return b""
+                last_exc = e
+            except Exception as e:  # noqa: BLE001 — 끊긴 연결은 잠깐 쉬고 다시
+                last_exc = e
+            time.sleep(0.5 * (attempt + 1))
+        log.warning(f"🎤 스트림 구간 받기 실패({self.pos}바이트 지점): {last_exc}")
+        self.eof = True
+        return b""
+
+    def read(self, n: int = -1) -> bytes:
+        if self._closed:
+            return b""
+        while not self.buf and not self.eof:
+            got = self._fetch()
+            self.pos += len(got)
+            self.buf = got
+            if not got:
+                break
+        if n is None or n < 0:
+            out, self.buf = self.buf, b""
+        else:
+            out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+
 class TimedOpusSource(discord.AudioSource):
     """FFmpegOpusAudio를 감싸서 ① 재생 위치를 세고 ② 끊김을 원인별로 기록해요.
 
@@ -84,8 +164,10 @@ class TimedOpusSource(discord.AudioSource):
     - 🧠 **봇이 바쁨**: read를 부르는 간격 자체가 벌어짐 → 재생 스레드가 차례를 못 받음
     """
 
-    def __init__(self, inner: discord.FFmpegOpusAudio, start: float = 0.0, label: str = ""):
+    def __init__(self, inner: discord.FFmpegOpusAudio, start: float = 0.0, label: str = "",
+                 reader: "ChunkedHTTPReader | None" = None):
         self.inner = inner
+        self.reader = reader
         self.start = start
         self.label = label
         self.frames = 0
@@ -118,7 +200,8 @@ class TimedOpusSource(discord.AudioSource):
                 self._note("busy", gap)
         data = self.inner.read()
         took = time.perf_counter() - t0
-        if took > STALL_SECONDS:
+        # 첫 조각 전은 ffmpeg가 뜨고 처음 받는 시간이라 끊김이 아니에요(들리는 소리도 없어요).
+        if took > STALL_SECONDS and self.frames > 0:
             self._note("net", took)
         self._last = time.perf_counter()
         if data:
@@ -138,6 +221,8 @@ class TimedOpusSource(discord.AudioSource):
                 f"최장 {self.worst:.2f}초 · {self.position:.0f}초 재생 · {self.label}")
 
     def cleanup(self) -> None:
+        if self.reader is not None:
+            self.reader.close()      # 받던 구간 요청을 멈춰요(다음 곡으로 넘어갈 때)
         self.inner.cleanup()
 
 IDLE_LEAVE_SECONDS = 300  # 대기열이 비고 이 시간 동안 다음 곡이 없으면 자동으로 나가요.
@@ -286,6 +371,8 @@ class GuildMusicState:
     skip_repeat_once: bool = False
     # 🔊 지금 곡의 스트림 주소·소스 — /음량을 바꾸면 이 주소로 그 위치부터 다시 틀어요.
     stream_url: str | None = None
+    stream_headers: dict = field(default_factory=dict)   # yt-dlp가 준 요청 헤더(구간 받기에 써요)
+    stream_protocol: str = "https"                       # http/https만 구간 받기, m3u8 등은 ffmpeg 직접
     source: "TimedOpusSource | None" = None
     restart_at: float | None = None
 
@@ -429,6 +516,8 @@ class Music(commands.Cog):
             try:
                 info = await loop.run_in_executor(None, _extract_sync, track.webpage_url)
                 stream_url = info["url"]
+                state.stream_headers = dict(info.get("http_headers") or {})
+                state.stream_protocol = str(info.get("protocol") or "https")
                 break
             except Exception as e:  # noqa: BLE001
                 if state.text_channel is not None:
@@ -454,12 +543,22 @@ class Music(commands.Cog):
         #    2026-11-25부터는 이 값으로 **ffmpeg가** 압축해요(봇은 다 된 조각을 보내기만).
         channel_kbps = getattr(voice_client.channel, "bitrate", 128_000) // 1000
         bitrate = max(64, min(channel_kbps, 512))
-        before = FFMPEG_BEFORE_OPTIONS + (f" -ss {start:.2f}" if start > 0 else "")
+        # 🌐 ffmpeg는 이제 주소를 직접 받지 않고 표준입력(pipe)으로 받아요 → -reconnect 옵션은 안 써요
+        #    (끊긴 구간은 ChunkedHTTPReader가 다시 요청해요). 파이프는 되감기가 안 돼서 -ss는
+        #    ffmpeg가 그 지점까지 읽고 버리는 방식이에요(구간 받기가 빨라서 몇 초 안 걸려요).
         options = f"{FFMPEG_OPTIONS} -af volume={state.volume:.2f}"
-        source = TimedOpusSource(
-            discord.FFmpegOpusAudio(stream_url, bitrate=bitrate, before_options=before, options=options),
-            start=start, label=track.title[:40],
-        )
+        seek = f"-ss {start:.2f}" if start > 0 else ""
+        if state.stream_protocol in ("http", "https"):
+            reader = ChunkedHTTPReader(stream_url, state.stream_headers)
+            inner = discord.FFmpegOpusAudio(reader, pipe=True, bitrate=bitrate,
+                                            before_options=seek or None, options=options)
+        else:
+            # m3u8(HLS) 같은 건 여러 파일을 따라가야 해서 ffmpeg가 직접 받아요(예전 방식).
+            reader = None
+            inner = discord.FFmpegOpusAudio(stream_url, bitrate=bitrate,
+                                            before_options=f"{FFMPEG_BEFORE_OPTIONS} {seek}".strip(),
+                                            options=options)
+        source = TimedOpusSource(inner, start=start, label=track.title[:40], reader=reader)
         state.source = source
 
         def _after(error):
