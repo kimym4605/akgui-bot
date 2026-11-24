@@ -56,6 +56,9 @@ check("한국어 스킬 이름", om["abilities"][1]["name"] == "어둠의 장막
 check("연막은 원(반경)", om["abilities"][1]["shape"]["kind"] == "circle" and om["abilities"][1]["shape"]["r"] > 0)
 check("모양 없는 스킬은 아이콘", om["abilities"][0]["shape"]["kind"] == "icon")
 check("한국어 역할 이름", om["roleName"] == "전략가")
+check("오멘 연막에 사거리(요원 기준)", om["abilities"][1]["shape"].get("range") == tc.RANGES["Dark Cover"])
+check("사거리 없는 스킬엔 안 붙음", "range" not in om["abilities"][0]["shape"])
+check("공용 모양 표를 안 건드림(복사본)", "range" not in tc.SHAPES["Dark Cover"])
 
 print("[2] 저장 자료 검사")
 ok = tc.clean_data({"side": "def", "scenes": [{"items": [

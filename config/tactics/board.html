@@ -281,6 +281,19 @@ function fitLine(a, b, { fixed = 0, max = 0 } = {}) {
   const want = fixed ? fixed : (max && len > max ? max : len);
   return [a[0] + (dx / len) * want, a[1] + (dy / len) * want];
 }
+// 사거리: 중심 c에서 r(0~1 좌표) 밖이면 경계로 당겨요.
+function clampRange(c, p, r) {
+  const d = dist(c, p);
+  if (!r || d <= r) return p;
+  return [+(c[0] + (p[0] - c[0]) * r / d).toFixed(4), +(c[1] + (p[1] - c[1]) * r / d).toFixed(4)];
+}
+// 여러 기준점 중 p에 가장 가까운 것 기준으로 사거리 맞추기. 기준점이 없으면 그대로.
+function clampToNearest(anchors, p, r) {
+  if (!anchors.length || !r) return p;
+  let best = anchors[0];
+  for (const a of anchors) if (dist(a, p) < dist(best, p)) best = a;
+  return clampRange(best, p, r);
+}
 function midOf(it) {
   if (it.pts && it.pts.length > 1) { const p = it.pts[Math.floor((it.pts.length - 1) / 2)]; return [X(p[0]), Y(p[1])]; }
   return [(X(it.u) + X(it.u2)) / 2, (Y(it.v) + Y(it.v2)) / 2];
@@ -381,8 +394,43 @@ function rank(it) {
   if (it.type === "ability") return ((abilityOf(it) || {}).shape || {}).kind === "circle" ? 0 : 1;
   return it.type === "arrow" ? 2 : 3;
 }
+// ---------------------------------------------------------------- 사거리 (요원 위치 기준)
+function rangeOf(agentId, slot) {
+  const ab = ((AG[agentId] || {}).abilities || []).find((x) => x.slot === slot);
+  return ((ab || {}).shape || {}).range || 0;
+}
+function anchorsOf(agentId, tm) {
+  return items().filter((it) => it.type === "agent" && it.agent === agentId && it.team === tm).map((it) => [it.u, it.v]);
+}
+// 스킬 항목의 놓일 자리를 사거리 안으로. 던진 경로가 있으면 떨어지는 끝점만 맞춰요.
+function fitRange(it) {
+  if (it.type !== "ability") return it;
+  const r = rangeOf(it.agent, it.slot) * (MAP.unit || 0.007);
+  const anchors = anchorsOf(it.agent, it.team);
+  if (!r || !anchors.length) return it;
+  if (it.u2 == null) { [it.u, it.v] = clampToNearest(anchors, [it.u, it.v], r); return it; }
+  const end = clampToNearest(anchors, [it.u2, it.v2], r);
+  if (end[0] !== it.u2 || end[1] !== it.v2) {
+    [it.u2, it.v2] = end;
+    if (it.pts) it.pts[it.pts.length - 1] = end;
+  }
+  return it;
+}
+function drawRanges(g) {
+  if (MODE !== "edit" || tool !== "ability" || !curAbility || !curAgent) return;
+  const m = (curAbility.shape || {}).range;
+  if (!m) return;
+  const r = m * (MAP.unit || 0.007) * 1000;
+  for (const [u, v] of anchorsOf(curAgent.id, team)) {
+    el("circle", { cx: X(u), cy: Y(v), r, fill: "rgba(245,197,24,.06)", stroke: "#f5c518", "stroke-width": 2.5,
+      "stroke-dasharray": "10 7", "pointer-events": "none" }, g);
+    label(g, X(u) + r * 0.71 + 4, Y(v) - r * 0.71 - 4, `사거리 약 ${m}m`);
+  }
+}
+
 function render() {
   const g = $("g-items"); g.innerHTML = ""; clipN = 0;
+  drawRanges(g);
   const order = items().map((it, i) => [it, i]).sort((a, b) => rank(a[0]) - rank(b[0]));
   for (const [it, i] of order) drawItem(g, it, i);
   if (ruler) drawRuler(g, ruler.a, ruler.b);
@@ -513,8 +561,9 @@ function shapeTip(sh) {
   if (!sh) return "";
   if (sh.kind === "path") return ` (끌어서 곡선${sh.max ? ` · 최대 약 ${sh.max}m` : ""})`;
   if (sh.kind === "line") return sh.fixed ? ` (끌어서 방향 · 약 ${sh.fixed}m)` : ` (끌어서 선${sh.max ? ` · 최대 약 ${sh.max}m` : ""})`;
-  if (sh.kind === "circle") return ` (반경 약 ${sh.r}m)`;
-  return "";
+  const rng = sh.range ? ` · 사거리 약 ${sh.range}m` : "";
+  if (sh.kind === "circle") return ` (반경 약 ${sh.r}m${rng})`;
+  return rng ? ` (${rng.slice(3)})` : "";
 }
 function renderAbilities() {
   $("agent-panel").hidden = !curAgent;
@@ -547,7 +596,12 @@ const HINT = {
 function setTool(t) {
   tool = t;
   for (const [id, k] of [["t-select", "select"], ["t-arrow", "arrow"], ["t-text", "text"], ["t-ruler", "ruler"]]) $(id).classList.toggle("on", tool === k);
-  $("tool-hint").textContent = HINT[t] || "";
+  let hint = HINT[t] || "";
+  const rng = t === "ability" && curAbility && (curAbility.shape || {}).range;
+  if (rng) hint = anchorsOf(curAgent.id, team).length
+    ? `${curAgent.name}에게서 사거리 약 ${rng}m 안에만 놓여요(노란 점선 원). ` + hint
+    : `💡 ${curAgent.name}을(를) 먼저 맵에 놓으면 사거리(약 ${rng}m) 안에서만 놓여요. ` + hint;
+  $("tool-hint").textContent = hint;
   if (t !== "ruler") ruler = null;
   renderAbilities(); render();
 }
@@ -555,6 +609,7 @@ function setTeam(t) {
   team = t;
   $("team-ally").classList.toggle("on", t === "ally");
   $("team-enemy").classList.toggle("on", t === "enemy");
+  if (tool === "ability") setTool("ability");   // 사거리 원·안내를 그 팀 요원 기준으로 다시
 }
 
 function snap() { return JSON.stringify({ scenes, cur }); }
@@ -662,6 +717,7 @@ function onMove(e) {
     it.u = +(o.u + du).toFixed(4); it.v = +(o.v + dv).toFixed(4);
     if (o.u2 != null) { it.u2 = +(o.u2 + du).toFixed(4); it.v2 = +(o.v2 + dv).toFixed(4); }
     if (o.pts) it.pts = o.pts.map(([u, v]) => [+(u + du).toFixed(4), +(v + dv).toFixed(4)]);
+    if (it.u2 == null) fitRange(it);     // 옮겨도 요원 사거리 안 (던진 경로는 통째로 옮기니 그대로)
     render(); return;
   }
   const last = drag.pts[drag.pts.length - 1];
@@ -711,13 +767,13 @@ function newDrawnItem(d, P, final) {
     if (pts.length < 2) return null;
     return { ...base, pts, u: pts[0][0], v: pts[0][1], u2: pts[pts.length - 1][0], v2: pts[pts.length - 1][1] };
   }
-  // 아이콘·원: 던지기
-  if (!moved) return final ? { ...base, u: a[0], v: a[1] } : null;
+  // 아이콘·원: 던지기 — 떨어지는 곳은 요원 사거리 안으로(fitRange)
+  if (!moved) return final ? fitRange({ ...base, u: a[0], v: a[1] }) : null;
   let pts = d.pts.concat([P]);
   if (final) pts = finishPts(pts);
   const it = { ...base, u: pts[0][0], v: pts[0][1], u2: pts[pts.length - 1][0], v2: pts[pts.length - 1][1] };
-  if (pts.length > 2) it.pts = pts;
-  return it;
+  if (pts.length > 2) it.pts = pts.map((p) => p.slice());
+  return fitRange(it);
 }
 
 // ---------------------------------------------------------------- 저장 · 올리기

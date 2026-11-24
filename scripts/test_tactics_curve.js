@@ -5,12 +5,12 @@ const fs = require("fs");
 const path = require("path");
 const html = fs.readFileSync(path.join(__dirname, "..", "config", "tactics", "board.html"), "utf8");
 const a = html.indexOf("// ---------------------------------------------------------------- 곡선");
-const b = html.indexOf("function midOf(");
+const b = html.indexOf("function midOf(");   // clampRange·clampToNearest도 이 구간 안에 있어요
 if (a < 0 || b < 0) { console.log("❌ 곡선 구간을 못 찾음"); process.exit(1); }
 const X = (u) => u * 1000, Y = (v) => v * 1000;
 const dist = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
 const lib = new Function("X", "Y", "dist", html.slice(a, b) +
-  "; return { smoothD, simplify, finishPts, clampPath, pathLen, fitLine };")(X, Y, dist);
+  "; return { smoothD, simplify, finishPts, clampPath, pathLen, fitLine, clampRange, clampToNearest };")(X, Y, dist);
 
 let failed = 0;
 const check = (name, ok) => { console.log((ok ? "  ✅ " : "  ❌ ") + name); if (!ok) failed++; };
@@ -54,6 +54,18 @@ const short = lib.fitLine([0.1, 0.1], [0.2, 0.1], { max: 0.3 });
 check("최대 안이면 끈 만큼", Math.abs(short[0] - 0.2) < 1e-9);
 const same = lib.fitLine([0.1, 0.1], [0.1, 0.1], { fixed: 0.05 });
 check("제자리 누름도 고정 길이(오른쪽)", Math.abs(same[0] - 0.15) < 1e-9);
+
+// 🎯 요원 사거리 (서버 피드백)
+const inside = lib.clampRange([0.5, 0.5], [0.55, 0.5], 0.1);
+check("사거리 안이면 그대로", inside[0] === 0.55 && inside[1] === 0.5);
+const out = lib.clampRange([0.5, 0.5], [0.9, 0.5], 0.1);
+check("사거리 밖이면 경계로", Math.abs(out[0] - 0.6) < 1e-9 && Math.abs(out[1] - 0.5) < 1e-9);
+const diag = lib.clampRange([0.5, 0.5], [0.8, 0.9], 0.1);
+check("방향은 그대로(대각선)", Math.abs(dist([0.5, 0.5], diag) - 0.1) < 1e-3 && diag[0] > 0.5 && diag[1] > 0.5);
+check("사거리 0이면 제한 없음", lib.clampRange([0.5, 0.5], [0.9, 0.9], 0)[0] === 0.9);
+const near = lib.clampToNearest([[0.1, 0.1], [0.8, 0.8]], [0.95, 0.8], 0.1);
+check("요원이 여럿이면 가까운 쪽 기준", Math.abs(near[0] - 0.9) < 1e-9);
+check("요원이 없으면 그대로", lib.clampToNearest([], [0.95, 0.8], 0.1)[0] === 0.95);
 
 console.log(failed ? `\n❌ 실패 ${failed}개` : "\n✅ 곡선 함수 테스트 전부 통과");
 process.exit(failed ? 1 : 0);

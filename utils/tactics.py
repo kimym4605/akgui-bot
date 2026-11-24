@@ -93,6 +93,13 @@ SHAPES: dict[str, dict] = {
     "Fault Line": {"kind": "line", "style": "zone", "max": 45},
     "Trapwire": {"kind": "line", "style": "wall", "max": 15},
 }
+# 🎯 사거리(m, 대략값) — 그 요원이 맵에 놓여 있으면 **요원에서 이 거리 안에만** 놓여요(2026-11-25 서버 피드백).
+# 던지는 스킬(몰리·섬광·화살 등)은 힘으로 거리가 정해져서 넣지 않았어요. 아스트라·사이퍼처럼 맵 전체는 없음.
+# 🚨 확실하지 않은 값이에요 — 서버에서 틀렸다고 하면 여기 숫자만 고치면 돼요.
+RANGES: dict[str, float] = {
+    "Dark Cover": 50, "Sky Smoke": 50, "Ruse": 40,
+    "Nanoswarm": 40, "ALARMBOT": 40, "TURRET": 40,
+}
 # 나머지 스킬(아이콘·원)은 **톡 누르면 놓기, 끌면 던진 경로**(튕김까지 곡선)를 그리고 끝에 떨어져요.
 # 그때 항목은 u,v = 던진 곳, u2,v2 = 떨어진 곳, pts = 경로예요.
 
@@ -161,9 +168,11 @@ def agent_entries(en: list[dict], ko: list[dict]) -> list[dict]:
             if slot not in SLOT_KEY:
                 continue
             kab = ko_ab.get(slot, ab)
+            shape = dict(SHAPES.get(ab["displayName"], {"kind": "icon"}))
+            if ab["displayName"] in RANGES:
+                shape["range"] = RANGES[ab["displayName"]]
             abilities.append({"slot": SLOT_KEY[slot], "name": kab.get("displayName") or ab["displayName"],
-                              "icon": ab.get("displayIcon"),
-                              "shape": SHAPES.get(ab["displayName"], {"kind": "icon"})})
+                              "icon": ab.get("displayIcon"), "shape": shape})
         abilities.sort(key=lambda x: "QECX".index(x["slot"]))
         role = (a.get("role") or {}).get("displayName") or ""
         out.append({"id": a["uuid"], "name": k["displayName"], "role": role,
