@@ -79,6 +79,8 @@ VIEW_TIMEOUT = 14 * 60                 # 문제 화면. 상호작용 토큰(15�
 BANNER_FILE = "panel_banner.png"
 ABILITY_FILE = "ability.png"
 BOARD_FILE = "agent_board.png"
+# 맵 확대 그림 기억 개수. 한 벌(7장)이 300KB 안팎이라 16벌이면 5MB쯤이에요(봇 메모리 512MB).
+MAP_SHOT_CACHE = 16
 MAP_FILE = "map.jpg"
 
 NEW_DAY_AT = datetime.time(hour=0, minute=0, second=5, tzinfo=KST)
@@ -130,7 +132,7 @@ def _wrong_guesses(kind: str, part: dict) -> list[str]:
 # ------------------------------------------------------------------
 # 화면 (embed) — 전부 순수 함수예요. DB를 읽지 않고 받은 문서로만 그려요.
 # ------------------------------------------------------------------
-def panel_embed(day: dict, yesterday: dict | None, *, with_banner: bool = True) -> discord.Embed:
+def panel_embed(day: dict, yesterday: dict | None = None, *, with_banner: bool = True) -> discord.Embed:
     settings = balodle_data.SETTINGS
     limits = {logic.max_attempts(k, settings) for k in KINDS}
     chance = f"문제마다 기회는 {limits.pop()}번" if len(limits) == 1 else "문제마다 기회가 정해져 있고"
@@ -142,11 +144,9 @@ def panel_embed(day: dict, yesterday: dict | None, *, with_banner: bool = True) 
         "오늘 푼 사람  " + " · ".join(
             f"{KIND_META[k][0]} {int(finished.get(k) or 0)}명" for k in KINDS),
     ]
-    if yesterday:
-        ab = balodle_data.ABILITIES.get(yesterday.get("ability")) or {}
-        lines.append(
-            f"어제 정답  🕵️ ||{balodle_data.agent_name(yesterday.get('agent'))}|| · "
-            f"✨ ||{ab.get('ko', '?')}|| · 🗺️ ||{yesterday.get('map', '?')}||")
+    # 🎯 2026-11-24부터 정답이 사람마다 달라서 '어제 정답' 줄은 없어요(`yesterday`는 안 써요).
+    lines += ["", "🎯 **사람마다 정답이 달라요** — 정답을 알려 줘도 소용없어요.",
+              "🔁 오늘 문제를 끝내면 **연습 문제**를 계속 풀 수 있어요 (코인 없음)."]
     lines.append("-# 매일 0시에 새 문제가 나와요.")
     embed = discord.Embed(title=f"🧩 오늘의 발로들 #{day.get('no', 1)}",
                           description="\n".join(lines), color=COLOR_PANEL)
@@ -338,9 +338,12 @@ class ProblemView(discord.ui.View):
     """문제 하나의 화면. 사람마다 따로 만드는 뷰라 `self`에 누구의 어떤 문제인지 담아도 돼요
     (영속 뷰인 패널과 달라요)."""
 
-    def __init__(self, cog: "Balodle", uid: int, kind: str, day_iso: str, guessed=()):
+    def __init__(self, cog: "Balodle", uid: int, kind: str, day_iso: str, guessed=(),
+                 practice: dict | None = None):
         super().__init__(timeout=VIEW_TIMEOUT)
         self.cog, self.uid, self.kind, self.day_iso = cog, uid, kind, day_iso
+        # 🔁 연습 문제면 {"day": 정답이 든 가짜 그날 문서, "part": 풀이} — **DB에 안 남아요**.
+        self.practice = practice
         # 화면 시간이 지났을 때 이 상호작용의 토큰으로 안내를 남겨요(가장 최근 것).
         self.anchor: discord.Interaction | None = None
         self.add_item(MapSelect(guessed) if kind == "map" else GuessButton())
@@ -348,12 +351,28 @@ class ProblemView(discord.ui.View):
     async def on_timeout(self):
         if self.anchor is None:
             return
+        text = ("⏰ 화면이 오래돼서 닫혔어요. 연습 문제는 저장되지 않아요 — 패널에서 다시 열어 주세요."
+                if self.practice is not None
+                else "⏰ 화면이 오래돼서 닫혔어요. 패널에서 다시 눌러 주세요. 넣은 답은 그대로 있어요.")
         try:
-            await self.anchor.edit_original_response(
-                content="⏰ 화면이 오래돼서 닫혔어요. 패널에서 다시 눌러 주세요. 넣은 답은 그대로 있어요.",
-                view=None)
+            await self.anchor.edit_original_response(content=text, view=None)
         except discord.HTTPException:
             pass                              # 토큰이 이미 죽었어요. 넣은 답은 DB에 있어요.
+
+
+class PracticeView(discord.ui.View):
+    """끝난 화면 아래 🔁 연습 문제 버튼 (2026-11-24). 사람마다 따로 만드는 일반 뷰예요."""
+
+    def __init__(self, cog: "Balodle", uid: int, kind: str):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self.cog, self.uid, self.kind = cog, uid, kind
+
+    @discord.ui.button(label="연습 문제", emoji="🔁", style=discord.ButtonStyle.secondary)
+    async def again(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ack(interaction):        # 화면을 그대로 두고 받아요 → edit_original_response
+            return
+        self.stop()
+        await self.cog.start_practice(interaction, self.uid, self.kind)
 
 
 # ------------------------------------------------------------------
@@ -361,6 +380,19 @@ class ProblemView(discord.ui.View):
 # ------------------------------------------------------------------
 def _cog(interaction: discord.Interaction) -> "Balodle | None":
     return interaction.client.get_cog("Balodle")
+
+
+ANSWER_KEYS = ("agent", "ability", "map", "map_variant", "map_focus")
+
+
+def merge_answers(day: dict, play: dict | None) -> dict:
+    """그날 문서 + 그 사람의 정답 → 화면·채점이 읽는 '그 사람의 그날 문서'.
+
+    채점·비교·결과 칸 함수는 전부 `day["agent"]`처럼 그날 문서에서 정답을 읽어요. 정답을 사람별로
+    옮기면서(2026-11-24) 그 함수들을 고치지 않으려고 여기서 덮어써요. `answers`가 없는 옛 풀이는
+    그날 문서(공통 정답)를 그대로 써요."""
+    answers = (play or {}).get("answers") or {}
+    return {**day, **{k: answers[k] for k in ANSWER_KEYS if k in answers}}
 
 
 class BalodlePanelView(discord.ui.View):
@@ -454,7 +486,7 @@ class Balodle(commands.Cog):
         self.bot = bot
         self._day_lock = asyncio.Lock()
         self._shot_lock = asyncio.Lock()
-        self._map_shots: dict[str, list[bytes]] = {}     # 날짜 → 확대 그림 7장 (최근 이틀만)
+        self._map_shots: dict[tuple, list[bytes]] = {}   # (맵, 종류, 중심) → 확대 그림 7장 (최근 것만)
         self._panel_sig: tuple | None = None             # 마지막으로 패널에 그린 (날짜, 푼 사람 수)
         self.new_day_loop.start()
         self.notify_loop.start()
@@ -479,37 +511,84 @@ class Balodle(commands.Cog):
             day = await balodle_store.get_day(day_iso)
             if day:
                 return day
+            # 🎯 2026-11-24부터 그날 문서엔 **정답이 없어요** — 번호·카운터만. 정답은 사람별(`user_day`).
             settings = balodle_data.SETTINGS
-            recent = await balodle_store.recent_answers(day_iso, settings.get("no_repeat_days") or {})
-            rng = random.Random()
-            map_name = logic.pick_answer(balodle_data.map_candidates(), recent["map"], rng)
-            focus = [0.5, 0.5]
-            if map_name:
-                focus = await asyncio.to_thread(balodle_art.pick_focus, map_name)
-            doc = {
-                "no": logic.puzzle_no(day_iso, settings["start_date"]),
-                "agent": logic.pick_answer(balodle_data.agent_candidates(), recent["agent"], rng),
-                "ability": logic.pick_answer(balodle_data.ability_candidates(), recent["ability"], rng),
-                "map": map_name,
-                "map_focus": focus,
-            }
+            doc = {"no": logic.puzzle_no(day_iso, settings["start_date"])}
             day = await balodle_store.get_or_create_day(day_iso, doc)
-            log.info("🧩 발로들 #%s (%s) 문제를 만들었어요", day.get("no"), day_iso)
+            log.info("🧩 발로들 #%s (%s) 날을 열었어요", day.get("no"), day_iso)
             return day
 
+    async def new_answers(self, recent: dict, kinds=KINDS, rng: random.Random | None = None) -> dict:
+        """정답 뽑기. `recent`의 답은 피해요(피하면 남는 게 없을 땐 전체에서). 맵은 그림 종류와
+        확대 중심까지 정해요(밋밋한 하늘·벽을 피하는 계산이라 스레드에서)."""
+        rng = rng or random.Random()
+        out = {}
+        if "agent" in kinds:
+            out["agent"] = logic.pick_answer(balodle_data.agent_candidates(), recent.get("agent"), rng)
+        if "ability" in kinds:
+            out["ability"] = logic.pick_answer(balodle_data.ability_candidates(), recent.get("ability"), rng)
+        if "map" in kinds:
+            name = logic.pick_answer(balodle_data.map_candidates(), recent.get("map"), rng)
+            out["map"] = name
+            if name:
+                variant = rng.choice(balodle_data.map_variants(name) or [""])
+                out["map_variant"] = variant
+                out["map_focus"] = await asyncio.to_thread(
+                    balodle_art.pick_focus, name, None, rng, variant)
+        return out
+
+    async def user_day(self, day: dict, uid: int) -> dict:
+        """그 사람의 그날 문서(그날 문서 + 그 사람 정답). 정답이 없으면 지금 뽑아 적어요.
+
+        11/24 공통 문제를 **이미 열어 둔 사람**은 그 문제를 그대로 이어 풀어요(도중에 정답이 바뀌면
+        넣어 둔 답이 엉뚱해져요)."""
+        play = await balodle_store.get_play(day["_id"], uid) or {}
+        if not play.get("answers"):
+            opened = any((play.get(k) or {}).get("opened_at") for k in KINDS)
+            if opened and day.get("agent"):
+                answers = {k: day[k] for k in ANSWER_KEYS if k in day}
+            else:
+                recent = await balodle_store.recent_user_answers(
+                    uid, day["_id"], balodle_data.SETTINGS.get("no_repeat_days") or {})
+                answers = await self.new_answers(recent)
+            play = await balodle_store.set_answers(day["_id"], uid, answers)
+        return merge_answers(day, play)
+
     async def map_shots(self, day: dict) -> list[bytes]:
-        """그날 맵 문제의 확대 그림 7장. 처음 한 번만 굽고 메모리에 둬요(장당 수십 KB)."""
-        key = day["_id"]
+        """맵 문제의 확대 그림 7장. 처음 한 번만 굽고 메모리에 둬요(장당 수십 KB).
+
+        사람마다 맵·그림 종류·확대 중심이 달라서 (맵, 종류, 중심)으로 기억해요. 최근 것만 남겨요."""
+        focus = tuple(day.get("map_focus") or (0.5, 0.5))
+        key = (day["map"], day.get("map_variant") or "", focus)
         if key in self._map_shots:
+            self._map_shots[key] = self._map_shots.pop(key)   # 최근에 쓴 걸 뒤로
             return self._map_shots[key]
         async with self._shot_lock:
             if key not in self._map_shots:
                 shots = await asyncio.to_thread(
-                    balodle_art.map_steps, day["map"], day.get("map_focus") or [0.5, 0.5])
+                    balodle_art.map_steps, day["map"], list(focus), None, key[1])
                 self._map_shots[key] = shots
-                for old in sorted(self._map_shots)[:-2]:      # 최근 이틀 치만 남겨요
-                    self._map_shots.pop(old, None)
+                while len(self._map_shots) > MAP_SHOT_CACHE:
+                    self._map_shots.pop(next(iter(self._map_shots)))
         return self._map_shots[key]
+
+    async def start_practice(self, interaction: discord.Interaction, uid: int, kind: str) -> None:
+        """🔁 연습 문제 — 정답은 이 화면(뷰)에만 있어요. 코인·카운터·연속·기록 모두 없어요."""
+        today = logic.today_iso()
+        day = await self.ensure_day(today)
+        mine = await self.user_day(day, uid)
+        avoid = {kind: {mine.get(kind)}} if mine.get(kind) else {}
+        answers = await self.new_answers(avoid, kinds=(kind,))
+        if not answers.get(kind):
+            await interaction.edit_original_response(content="연습 문제를 준비하지 못했어요.", view=None)
+            return
+        practice = {"day": {"_id": today, "no": day.get("no", 1), **answers},
+                    "part": {"status": "playing", "guesses": []}}
+        embed, files, view = await self._screen(uid, kind, practice["day"], practice["part"], None,
+                                                practice=practice)
+        if view is not None:
+            view.anchor = interaction
+        await interaction.edit_original_response(content=None, embed=embed, attachments=files, view=view)
 
     # -------------------------- 문제 화면 --------------------------
     async def _board_png(self, kind: str, day: dict, part: dict) -> bytes | None:
@@ -543,8 +622,12 @@ class Balodle(commands.Cog):
             log.warning("🧩 발로들 %s 그림을 못 그렸어요 — 글로 보여줘요", kind, exc_info=True)
             return None
 
-    async def _screen(self, uid: int, kind: str, day: dict, part: dict, outcome: dict | None):
-        """(embed, 첨부 파일들, 뷰 또는 None). 상태에 따라 푸는 화면·끝난 화면을 골라요."""
+    async def _screen(self, uid: int, kind: str, day: dict, part: dict, outcome: dict | None,
+                      *, practice: dict | None = None):
+        """(embed, 첨부 파일들, 뷰 또는 None). 상태에 따라 푸는 화면·끝난 화면을 골라요.
+
+        `day`는 **그 사람의 그날 문서**(`user_day`/`merge_answers`)예요 — 정답이 들어 있어요.
+        끝난 화면에는 🔁 연습 문제 버튼이 붙어요."""
         playing = part.get("status") == "playing"
         art = None
         if kind == "agent" or (kind == "ability" and (playing or outcome is not None)):
@@ -571,22 +654,28 @@ class Balodle(commands.Cog):
             files.append(discord.File(io.BytesIO(shots[index]), filename=MAP_FILE))
             embed.set_image(url=f"attachment://{MAP_FILE}")
 
-        view = None
+        if practice is not None:
+            embed.set_footer(text="🔁 연습 문제 · 코인과 연속 기록은 없어요")
+
         if playing:
             view = ProblemView(self, uid, kind, day["_id"],
-                               guessed=part.get("guesses") if kind == "map" else ())
+                               guessed=part.get("guesses") if kind == "map" else (),
+                               practice=practice)
+        else:
+            view = PracticeView(self, uid, kind)
         return embed, files, view
 
     async def send_problem(self, interaction: discord.Interaction, kind: str) -> None:
         """패널 버튼에서 불려요(이미 `ack`된 뒤). 새 ephemeral 화면을 띄워요."""
-        day = await self.ensure_day(logic.today_iso())
+        uid = interaction.user.id
+        day = await self.user_day(await self.ensure_day(logic.today_iso()), uid)
         if not day.get(kind):
             await interaction.followup.send("오늘 이 문제는 준비하지 못했어요. 운영진에게 알려 주세요.",
                                             ephemeral=True)
             return
-        play = await balodle_store.open_play(day["_id"], interaction.user.id, kind)
+        play = await balodle_store.open_play(day["_id"], uid, kind)
         part = play.get(kind) or {}
-        embed, files, view = await self._screen(interaction.user.id, kind, day, part, None)
+        embed, files, view = await self._screen(uid, kind, day, part, None)
         kwargs = {"embed": embed, "files": files, "ephemeral": True}
         if view is not None:
             kwargs["view"] = view
@@ -596,7 +685,8 @@ class Balodle(commands.Cog):
     async def _redraw(self, interaction: discord.Interaction, old_view: ProblemView, day: dict,
                       part: dict, *, notice: str | None = None, outcome: dict | None = None) -> None:
         """같은 화면을 고쳐 그려요(입력창 제출·맵 선택 뒤)."""
-        embed, files, view = await self._screen(old_view.uid, old_view.kind, day, part, outcome)
+        embed, files, view = await self._screen(old_view.uid, old_view.kind, day, part, outcome,
+                                                practice=old_view.practice)
         if view is not None:
             view.anchor = interaction
         old_view.stop()                       # 옛 뷰의 시간 초과 안내가 새 화면을 덮지 않게
@@ -606,9 +696,14 @@ class Balodle(commands.Cog):
     async def handle_guess(self, interaction: discord.Interaction, view: ProblemView, raw: str) -> None:
         """답 하나를 채점해요. 호출한 쪽(입력창·선택 메뉴)이 이미 `ack`했어요."""
         uid, kind, day_iso = interaction.user.id, view.kind, view.day_iso
-        day = await balodle_store.get_day(day_iso)
-        play = await balodle_store.get_play(day_iso, uid)
-        part = (play or {}).get(kind) or {}
+        if view.practice is not None:
+            day, part = view.practice["day"], view.practice["part"]
+        else:
+            day = await balodle_store.get_day(day_iso)
+            play = await balodle_store.get_play(day_iso, uid)
+            part = (play or {}).get(kind) or {}
+            if day:
+                day = merge_answers(day, play)
         if not day or not part:
             await interaction.edit_original_response(
                 content="문제를 찾지 못했어요. 패널에서 다시 눌러 주세요.", view=None)
@@ -642,6 +737,16 @@ class Balodle(commands.Cog):
         attempts = count + 1
         correct = logic.is_correct(kind, guess, day, balodle_data.ABILITIES)
         finish = "solved" if correct else ("failed" if attempts >= logic.max_attempts(kind, settings) else None)
+        if view.practice is not None:
+            # 🔁 연습: 화면에 든 상태만 바꿔요. 코인·카운터·기록·채널 결과 전부 없어요.
+            part["guesses"] = [*(part.get("guesses") or []), guess]
+            outcome = None
+            if finish:
+                part["status"] = finish
+                outcome = {"coin": 0, "coin_failed": False, "rank": None,
+                           "streak": 0, "bumped": False, "new_titles": []}
+            await self._redraw(interaction, view, day, part, outcome=outcome)
+            return
         coin = logic.reward(attempts, correct, settings) if finish else 0
         updated = await balodle_store.submit_guess(
             day_iso, uid, kind, guess, count, finish=finish, reward=coin)
@@ -654,7 +759,8 @@ class Balodle(commands.Cog):
         outcome = None
         if finish:
             # 🚨 여기까지 온 요청만 카운터를 올리고 코인을 줘요 → 두 번 지급되지 않아요.
-            outcome, day, updated = await self._finish(day_iso, uid, kind, correct, attempts, coin, updated)
+            outcome, counted, updated = await self._finish(day_iso, uid, kind, correct, attempts, coin, updated)
+            day = merge_answers(counted or day, updated)       # 카운터가 오른 문서 + 내 정답
         await self._redraw(interaction, view, day, updated.get(kind) or {}, outcome=outcome)
 
     async def _finish(self, day_iso: str, uid: int, kind: str, correct: bool, attempts: int,
@@ -693,7 +799,8 @@ class Balodle(commands.Cog):
 
         play = await balodle_store.get_play(day_iso, uid) or play
         try:
-            await self._share(day, play, uid, outcome["streak"])
+            # 결과 칸(🟩🟨⬛)은 **그 사람의 정답**과 비교해야 해요.
+            await self._share(merge_answers(day, play), play, uid, outcome["streak"])
         except Exception:  # noqa: BLE001 — 채널에 못 올려도 풀이는 끝난 거예요
             log.warning("🧩 발로들 결과를 채널에 올리지 못했어요 (user=%s)", uid, exc_info=True)
         return outcome, day, play
@@ -724,7 +831,7 @@ class Balodle(commands.Cog):
         return channel if isinstance(channel, discord.TextChannel) else None
 
     async def refresh_panel(self, *, force: bool = False) -> None:
-        """패널의 번호·푼 사람 수·어제 정답을 고쳐요. 바뀐 게 없으면 아무것도 안 해요."""
+        """패널의 번호·푼 사람 수를 고쳐요. 바뀐 게 없으면 아무것도 안 해요."""
         panel = settings_store.get_setting(KEY_PANEL) or {}
         channel = self._panel_channel()
         if channel is None or not panel.get("message"):
@@ -735,10 +842,9 @@ class Balodle(commands.Cog):
         sig = (today, tuple(counts[k] for k in KINDS))
         if not force and sig == self._panel_sig:
             return
-        yesterday = await balodle_store.get_day(logic.day_before(today))
         try:
             await channel.get_partial_message(int(panel["message"])).edit(
-                embed=panel_embed(day, yesterday))
+                embed=panel_embed(day))
             self._panel_sig = sig
         except discord.NotFound:
             log.warning("🧩 발로들 패널 메시지가 없어요 — `/발로들패널`로 다시 올려 주세요")
@@ -816,9 +922,8 @@ class Balodle(commands.Cog):
 
         today = logic.today_iso()
         day = await self.ensure_day(today)
-        yesterday = await balodle_store.get_day(logic.day_before(today))
         old = settings_store.get_setting(KEY_PANEL) or {}
-        kwargs = {"embed": panel_embed(day, yesterday), "view": BalodlePanelView()}
+        kwargs = {"embed": panel_embed(day), "view": BalodlePanelView()}
         banner = _banner_file()
         if banner is not None:
             kwargs["file"] = banner
@@ -853,18 +958,15 @@ class Balodle(commands.Cog):
             return
         today = logic.today_iso()
         day = await self.ensure_day(today)
-        yesterday = await balodle_store.get_day(logic.day_before(today))
         await interaction.followup.send(
-            embed=panel_embed(day, yesterday, with_banner=False),
+            embed=panel_embed(day, with_banner=False),
             view=BalodlePanelView(), ephemeral=True)
 
     # -------------------------- 루프 --------------------------
     @tasks.loop(time=NEW_DAY_AT)
     async def new_day_loop(self):
-        """0시: 오늘 문제 만들기 + 맵 그림 굽기 + 패널의 번호·어제 정답 갱신."""
-        day = await self.ensure_day(logic.today_iso())
-        if day.get("map"):
-            await self.map_shots(day)
+        """0시: 오늘 날 열기 + 패널 번호 갱신. (맵 그림은 사람마다 달라서 열 때 구워요)"""
+        await self.ensure_day(logic.today_iso())
         await self.refresh_panel(force=True)
 
     @new_day_loop.before_loop

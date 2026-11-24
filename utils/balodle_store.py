@@ -152,6 +152,52 @@ def _set_play_fields_sync(day_iso: str, user_id, fields: dict) -> None:
 
 
 # ------------------------------------------------------------------
+# 🎯 사람별 정답 (2026-11-24) — `balodle_plays.answers`
+#
+# 원래는 그날 문제(`balodle_days`)를 서버 전원이 같이 풀었어요. 그러니 먼저 푼 사람이 정답을
+# 말해 버리고, 결과 칸도 다 비슷했어요. 이제 **그날 처음 문제를 열 때** 그 사람 몫의 정답을
+# 뽑아 풀이 문서에 적어요. `balodle_days`는 번호·카운터(푼 사람 수)만 맡아요.
+#
+#     answers: {agent, ability, map, map_variant, map_focus}
+#
+# 동시성: '문서 보장' 뒤 `answers`가 **없을 때만** 써요 → 두 요청이 동시에 와도 먼저 쓴 게 남고,
+# 둘 다 남은 것을 다시 읽어요(`_open_play_sync`와 같은 이유로 upsert 한 방으로 쓰지 않아요).
+# ------------------------------------------------------------------
+def _set_answers_sync(day_iso: str, user_id, answers: dict) -> dict:
+    pid = _play_id(day_iso, user_id)
+    try:
+        _plays.update_one(
+            {"_id": pid}, {"$setOnInsert": {"date": day_iso, "uid": _uid(user_id)}}, upsert=True)
+    except DuplicateKeyError:
+        pass
+    _plays.update_one({"_id": pid, "answers": {"$exists": False}}, {"$set": {"answers": answers}})
+    return _plays.find_one({"_id": pid}) or {}
+
+
+def _recent_user_answers_sync(user_id, day_iso: str, days_by_kind: dict) -> dict:
+    """그 사람이 최근에 받은 정답 — `{kind: {답…}}`. 반복 금지를 **사람별로** 걸어요.
+
+    `answers`가 없는 옛 풀이(11/24 공통 문제 시절)는 그날 문서의 정답을 그 사람 것으로 봐요."""
+    longest = max([int(v) for v in days_by_kind.values()] or [0])
+    recent = {k: set() for k in KINDS}
+    if longest <= 0:
+        return recent
+    today = date.fromisoformat(day_iso)
+    since = (today - timedelta(days=longest)).isoformat()
+    plays = list(_plays.find({"uid": _uid(user_id), "date": {"$gte": since, "$lt": day_iso}},
+                             {"date": 1, "answers": 1}))
+    legacy = [p["date"] for p in plays if not p.get("answers")]
+    shared = {d["_id"]: d for d in _days.find({"_id": {"$in": legacy}})} if legacy else {}
+    for play in plays:
+        answers = play.get("answers") or shared.get(play["date"]) or {}
+        age = (today - date.fromisoformat(play["date"])).days
+        for kind in KINDS:
+            if age <= int(days_by_kind.get(kind, 0)) and answers.get(kind):
+                recent[kind].add(answers[kind])
+    return recent
+
+
+# ------------------------------------------------------------------
 # 사람별 누적 (balodle_users)
 # ------------------------------------------------------------------
 def _get_user_sync(user_id) -> dict:
@@ -219,6 +265,7 @@ def _set_notify_sync(user_id, on: bool) -> None:
 def _ensure_indexes_sync() -> None:
     _plays.create_index("date")
     _plays.create_index("uid")
+    _plays.create_index([("uid", 1), ("date", 1)])     # 사람별 최근 정답 (2026-11-24)
 
 
 # ------------------------------------------------------------------
@@ -258,6 +305,15 @@ async def submit_guess(day_iso: str, user_id, kind: str, guess: str, count_befor
                        finish: str | None = None, reward: int = 0) -> dict | None:
     return await asyncio.to_thread(
         _submit_guess_sync, day_iso, user_id, kind, guess, count_before, finish, reward)
+
+
+async def set_answers(day_iso: str, user_id, answers: dict) -> dict:
+    """그 사람의 그날 정답을 적어요(이미 있으면 그대로). 적은 뒤의 풀이 문서를 돌려줘요."""
+    return await asyncio.to_thread(_set_answers_sync, day_iso, user_id, answers)
+
+
+async def recent_user_answers(user_id, day_iso: str, days_by_kind: dict) -> dict:
+    return await asyncio.to_thread(_recent_user_answers_sync, user_id, day_iso, days_by_kind)
 
 
 async def set_rank(day_iso: str, user_id, kind: str, rank: int) -> None:

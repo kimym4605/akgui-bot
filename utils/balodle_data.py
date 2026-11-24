@@ -94,8 +94,18 @@ def ability_icon_path(key: str) -> str:
     return os.path.join(ASSET_DIR, "abilities", (ABILITIES.get(key) or {}).get("icon", "_"))
 
 
-def map_path(name: str) -> str:
-    return os.path.join(ASSET_DIR, "maps", f"{_MAP_KEY.get(name, '_')}.webp")
+# 🗺️ 맵 그림 종류 (2026-11-24). "" = 하늘에서 본 로딩 화면, "_scene" = 맵 안 눈높이 장면.
+#    맵마다 한 장뿐이라 금방 외워져서 늘렸어요. 장면 그림이 없는 맵(헤이븐)은 로딩 화면만 써요.
+MAP_VARIANTS = ("", "_scene")
+
+
+def map_path(name: str, variant: str = "") -> str:
+    return os.path.join(ASSET_DIR, "maps", f"{_MAP_KEY.get(name, '_')}{variant}.webp")
+
+
+def map_variants(name: str) -> list[str]:
+    """그 맵에서 실제로 파일이 있는 그림 종류."""
+    return [v for v in MAP_VARIANTS if os.path.exists(map_path(name, v))]
 
 
 def ui_path(name: str) -> str:

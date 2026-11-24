@@ -63,7 +63,8 @@ def ability_card(key: str) -> bytes:
     return out.getvalue()
 
 
-def pick_focus(map_name: str, zoom_steps=None, rng: random.Random | None = None) -> list[float]:
+def pick_focus(map_name: str, zoom_steps=None, rng: random.Random | None = None,
+               variant: str = "") -> list[float]:
     """확대 중심점 `[x, y]`(그림 너비·높이 대비 0~1).
 
     후보 20개 중 **첫 확대 단계로 잘랐을 때 밝기 표준편차가 가장 큰 곳**을 골라요. 하늘·벽처럼
@@ -71,7 +72,7 @@ def pick_focus(map_name: str, zoom_steps=None, rng: random.Random | None = None)
     zoom_steps = zoom_steps or balodle_data.SETTINGS["zoom_steps"]
     rng = rng or random.Random()
     try:
-        with Image.open(balodle_data.map_path(map_name)) as src:
+        with Image.open(balodle_data.map_path(map_name, variant)) as src:
             gray = src.convert("L")
     except OSError:
         return [0.5, 0.5]
@@ -97,7 +98,7 @@ def _framed(view: Image.Image, frame: Image.Image | None) -> bytes:
     return out.getvalue()
 
 
-def map_steps(map_name: str, focus, zoom_steps=None) -> list[bytes]:
+def map_steps(map_name: str, focus, zoom_steps=None, variant: str = "") -> list[bytes]:
     """확대 단계별 JPEG `len(zoom_steps)`장 + 마지막에 전체 그림 1장.
 
     `[0]`이 가장 크게 확대한 것(첫 문제 화면), `[-1]`이 전체(끝난 화면)예요."""
@@ -109,7 +110,7 @@ def map_steps(map_name: str, focus, zoom_steps=None) -> list[bytes]:
             frame = src.convert("RGBA").resize(FRAME_SIZE, Image.LANCZOS)
 
     shots = []
-    with Image.open(balodle_data.map_path(map_name)) as src:   # 🚨 여기서만 원본을 열어요
+    with Image.open(balodle_data.map_path(map_name, variant)) as src:   # 🚨 여기서만 원본을 열어요
         full = src.convert("RGB")
         for step in range(len(zoom_steps) + 1):
             box = balodle_logic.zoom_box(step, focus, full.size, zoom_steps)

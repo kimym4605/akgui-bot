@@ -312,10 +312,21 @@ e = balodle.already_embed("agent", DAY, PLAY["agent"])
 check("이미 푼 문제 화면", e.title == "✅ 오늘 요원 문제는 이미 풀었어요" and "다음 문제까지" in e.description
       and "제트" not in e.description)
 e = balodle.panel_embed(DAY, {"agent": "sova", "ability": "jett:E", "map": "바인드"})
-check("패널: 번호 · 푼 사람 수 · 어제 정답은 가림", e.title == "🧩 오늘의 발로들 #12"
-      and "🕵️ 8명 · ✨ 5명 · 🗺️ 7명" in e.description and "||소바||" in e.description
-      and "||바인드||" in e.description and "기회는 6번" in e.description, e.description)
-check("패널: 첫날은 어제 정답 줄이 없다", "어제 정답" not in balodle.panel_embed(DAY, None).description)
+# 2026-11-24: 정답이 사람마다 달라서 '어제 정답' 줄은 없어요. 대신 사람마다 다르다는 안내와 연습 안내.
+check("패널: 번호 · 푼 사람 수 · 사람마다 다른 정답 · 연습 안내 (어제 정답 없음)",
+      e.title == "🧩 오늘의 발로들 #12"
+      and "🕵️ 8명 · ✨ 5명 · 🗺️ 7명" in e.description and "어제 정답" not in e.description
+      and "||소바||" not in e.description and "사람마다 정답이 달라요" in e.description
+      and "연습 문제" in e.description and "기회는 6번" in e.description, e.description)
+check("merge_answers: 그 사람 정답이 그날 문서를 덮는다",
+      balodle.merge_answers({"_id": "d", "no": 3, "agent": "jett"},
+                            {"answers": {"agent": "sova", "map": "펄"}}) == {"_id": "d", "no": 3,
+                                                                           "agent": "sova", "map": "펄"})
+check("merge_answers: 정답 없는 옛 풀이는 그날 문서 그대로",
+      balodle.merge_answers({"_id": "d", "agent": "jett"}, {"agent": {}}) == {"_id": "d", "agent": "jett"})
+check("맵 그림 종류: 어센트는 로딩 화면·장면 2종, 헤이븐은 로딩 화면만",
+      balodle_data.map_variants("어센트") == ["", "_scene"] and balodle_data.map_variants("헤이븐") == [""],
+      (balodle_data.map_variants("어센트"), balodle_data.map_variants("헤이븐")))
 e = balodle.stats_embed({"streak": 4, "best_streak": 9, "last_solved_day": "2026-11-24",
                          "titles": ["발로들 단골"],
                          "agent": {"played": 12, "solved": 9, "dist": {"1": 1, "2": 3, "3": 4, "4": 1, "x": 3}}},
@@ -591,6 +602,11 @@ async def db_checks():
     print("\n[13] 🚨 흐름 — 코인은 한 번만, 채널 결과 메시지는 한 사람에 하나")
     _wipe()
     await S.get_or_create_day(D1, doc)
+    # 🎯 정답은 사람별이에요(2026-11-24). 아래 흐름은 '정답 = 제트·제트 E·어센트'로 짜여 있어서
+    #    두 사람에게 그 정답을 미리 적어 둬요(안 적으면 문제를 열 때 무작위로 뽑혀요).
+    fixed = {"agent": "jett", "ability": "jett:E", "map": "어센트", "map_variant": "", "map_focus": [0.5, 0.5]}
+    for who in (U1, U2):
+        await S.set_answers(D1, who, fixed)
     paid = []
 
     async def fake_add(user_id, amount, *, reason=""):
@@ -644,7 +660,8 @@ async def db_checks():
     check("끝난 화면: 정답 · +2코인 · 오늘 1번째 · 연속", len(done) == 1
           and "2번 만에 맞혔어요. **+2코인**" in done[0]["embed"].description
           and "오늘 1번째로 맞혔어요." in done[0]["embed"].description
-          and "🔥 발로들 연속 **1일**" in done[0]["embed"].description and done[0]["view"] is None,
+          and "🔥 발로들 연속 **1일**" in done[0]["embed"].description
+          and isinstance(done[0]["view"], balodle.PracticeView),
           [x.edits[-1]["embed"].title for x in (a, b)])
     check("채널 결과 메시지 1개, 정답은 안 보이고 멘션 알림은 꺼짐", len(channel.messages) == 1
           and "제트" not in channel.messages[5000].content
@@ -656,9 +673,34 @@ async def db_checks():
 
     it = FakeInteraction(U1)
     await cog.send_problem(it, "agent")
-    check("끝낸 문제 버튼을 다시 누르면 '이미 풀었어요'",
+    check("끝낸 문제 버튼을 다시 누르면 '이미 풀었어요' + 🔁 연습 문제 버튼",
           it.followup.sent[0]["embed"].title == "✅ 오늘 요원 문제는 이미 풀었어요"
-          and "view" not in it.followup.sent[0])
+          and isinstance(it.followup.sent[0].get("view"), balodle.PracticeView))
+
+    # 🔁 연습 문제 — 코인·카운터·연속·채널 결과 전부 안 건드린다
+    day_before_practice = await S.get_day(D1)
+    paid_before, edits_before = len(paid), channel.messages[5000].edits
+    it = FakeInteraction(U1)
+    await cog.start_practice(it, U1, "agent")
+    pv = it.edits[-1]["view"]
+    check("연습 문제: 문제 화면 + 연습 표시, 오늘 내 정답(제트)은 피한다",
+          isinstance(pv, balodle.ProblemView) and pv.practice is not None
+          and pv.practice["day"]["agent"] != "jett"
+          and "연습 문제" in (it.edits[-1]["embed"].footer.text or ""), pv.practice and pv.practice["day"])
+    wrong = "jett" if pv.practice["day"]["agent"] != "jett" else "sova"
+    await cog.handle_guess(it, pv, AGENTS[wrong]["ko"])
+    await cog.handle_guess(it, pv, AGENTS[pv.practice["day"]["agent"]]["ko"])
+    last = it.edits[-1]
+    check("연습 문제: 맞히면 정답 화면 + 다시 🔁 버튼", last["embed"].title.startswith("🎉")
+          and "코인" not in last["embed"].description.split("\n")[0]
+          and isinstance(last["view"], balodle.PracticeView), last["embed"].description)
+    day_after = await S.get_day(D1)
+    check("🚨 연습은 코인·서버 카운터·채널 결과·풀이 문서를 안 건드린다",
+          len(paid) == paid_before and day_after["solved"] == day_before_practice["solved"]
+          and day_after["finished"] == day_before_practice["finished"]
+          and channel.messages[5000].edits == edits_before
+          and (await S.get_play(D1, U1))["agent"]["guesses"] == ["sova", "jett"],
+          (paid[paid_before:], day_after["solved"]))
 
     # 스킬 문제: 한 번에 맞힘 → 같은 채널 메시지에 줄이 더해진다
     it = FakeInteraction(U1)
@@ -684,7 +726,8 @@ async def db_checks():
         await cog.handle_guess(it, map_view, name)
     last = it.edits[-1]
     check("기회를 다 쓰면 실패 화면 + 정답 공개 + 전체 그림", last["embed"].title == "😵 아쉬워요"
-          and "정답은 **어센트**였어요." in last["embed"].description and last["view"] is None
+          and "정답은 **어센트**였어요." in last["embed"].description
+          and isinstance(last["view"], balodle.PracticeView)
           and len(last["attachments"]) == 1, last["embed"].description)
     check("실패는 코인이 없다", len(paid) == before)
     day = await S.get_day(D1)
@@ -703,6 +746,50 @@ async def db_checks():
     check("날짜가 바뀐 뒤에도 연 문제 날짜(어제)로 채점·보상",
           play["agent"]["status"] == "solved" and paid[-1] == (U2, 3, "발로들")
           and await S.get_play(D2, U2) is None, (play.get("agent"), paid[-1]))
+
+    # ---------------- [14] 사람별 정답 (2026-11-24) ----------------
+    print("\n[14] 🎯 사람별 정답 · 사람별 반복 금지 · 옛 공통 문제 이어 풀기")
+    U3, U4 = 900000000000000103, 900000000000000104
+    await S.get_or_create_day(D2, {"no": 2})                 # 새 방식의 날 = 그날 문서에 정답 없음
+    day2 = await S.get_day(D2)
+    check("새 날의 그날 문서엔 정답이 없다", "agent" not in day2 and "map" not in day2, day2)
+    mine = await cog.user_day(day2, U3)
+    again = await cog.user_day(await S.get_day(D2), U3)
+    check("처음 열면 정답 3개 + 맵 그림 종류·확대 중심을 뽑아 저장한다",
+          all(mine.get(k) for k in ("agent", "ability", "map")) and "map_variant" in mine
+          and len(mine.get("map_focus") or []) == 2, mine)
+    check("🚨 다시 열어도 정답이 바뀌지 않는다", {k: again.get(k) for k in balodle.ANSWER_KEYS}
+          == {k: mine.get(k) for k in balodle.ANSWER_KEYS})
+    many = [await cog.new_answers({}) for _ in range(6)]
+    check("사람마다 정답이 달라질 수 있다 (6번 뽑아 요원이 2종 이상)",
+          len({m["agent"] for m in many}) >= 2, [m["agent"] for m in many])
+    both = await asyncio.gather(S.set_answers(D2, U4, {"agent": "sova"}), S.set_answers(D2, U4, {"agent": "raze"}))
+    check("🚨 동시에 두 번 정답을 적어도 하나만 남는다",
+          both[0]["answers"] == both[1]["answers"] and _db["balodle_plays"].count_documents({"_id": f"{D2}:{U4}"}) == 1,
+          [b["answers"] for b in both])
+
+    # 사람별 반복 금지: U3가 D2에 받은 정답은 U3의 다음 날 '최근 답'에 들어가고, U4에겐 안 들어간다
+    days_by = {"agent": 14, "ability": 30, "map": 5}
+    r3 = await S.recent_user_answers(U3, "2031-01-13", days_by)
+    r4 = await S.recent_user_answers(U4, "2031-01-13", days_by)
+    check("최근 답은 사람별: 내가 받은 요원은 피하고, 남이 받은 건 상관없다",
+          mine["agent"] in r3["agent"] and r4["agent"] == {both[0]["answers"]["agent"]}
+          and (mine["agent"] == both[0]["answers"]["agent"] or mine["agent"] not in r4["agent"]),
+          (r3, r4))
+    check("옛 공통 문제 날(D1)의 정답도 그날 푼 사람의 '최근 답'에 들어간다",
+          "jett" in (await S.recent_user_answers(U2, D2, days_by))["agent"])
+
+    # 11/24처럼 공통 정답이 있는 날, 업데이트 전에 문제를 열어 둔 사람은 그 문제를 그대로 이어 푼다
+    legacy_day = "2031-01-20"
+    await S.get_or_create_day(legacy_day, doc)               # 옛 방식(정답 있음)
+    await S.open_play(legacy_day, U3, "agent")               # 업데이트 전에 열어 둠(answers 없음)
+    cont = await cog.user_day(await S.get_day(legacy_day), U3)
+    check("🚨 옛 공통 문제를 이미 연 사람은 정답이 그대로 (도중에 안 바뀜)",
+          (cont["agent"], cont["ability"], cont["map"]) == ("jett", "jett:E", "어센트"), cont)
+    fresh = await cog.user_day(await S.get_day(legacy_day), U4)
+    check("같은 날이라도 아직 안 연 사람은 자기 정답을 새로 받는다",
+          (await S.get_play(legacy_day, U4)).get("answers") is not None, fresh)
+
     L.today_iso = real_today
     _wipe()
 

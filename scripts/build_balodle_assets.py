@@ -45,6 +45,9 @@ SLOT_KEY = {"Grenade": "C", "Ability1": "Q", "Ability2": "E", "Ultimate": "X"}
 MANUAL_FIELDS = {"origin": "", "continent": "", "released": "", "gender": "", "aliases": []}
 MAP_SIZE = (1920, 1080)
 ICON_SIZE = 256
+SCENE_SUFFIX = "_scene"
+# 장면 그림이 그 맵 같지 않아 뺀 맵(2026-11-24 눈으로 확인). 확인되면 지워도 돼요.
+SCENE_SKIP = {"Haven"}
 
 
 def get(url: str) -> bytes:
@@ -146,21 +149,30 @@ def main():
     # 5대5 맵만 굽어요. 같은 이름이 두 번 오는 맵(사격장)이 있어 이름으로 한 번만 받아요.
     wanted = {en_name: ko_name for en_name, ko_name in valorant_maps.EN_TO_KO.items()
               if ko_name in valorant_maps.MAPS}
-    done = set()
+    done, scenes = set(), 0
     for m in get_json("maps"):
-        name, url = m.get("displayName"), m.get("splash")
-        if name not in wanted or name in done or not url:
+        name = m.get("displayName")
+        if name not in wanted or name in done or not m.get("splash"):
             continue
-        im = Image.open(io.BytesIO(get(url))).convert("RGB")
-        scale = max(MAP_SIZE[0] / im.width, MAP_SIZE[1] / im.height)
-        im = im.resize((round(im.width * scale), round(im.height * scale)), Image.LANCZOS)
-        x, y = (im.width - MAP_SIZE[0]) // 2, (im.height - MAP_SIZE[1]) // 2
-        path = os.path.join(ASSETS, "maps", f"{slug(name)}.webp")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        im.crop((x, y, x + MAP_SIZE[0], y + MAP_SIZE[1])).save(path, "WEBP", quality=86, method=6)
+        # 🗺️ splash = 하늘에서 본 로딩 화면(`<맵>.webp`), backgroundImage = 맵 안 눈높이 장면
+        #    (`<맵>_scene.webp`, 2026-11-24 추가 — 맵마다 그림이 한 장뿐이라 금방 외워졌어요).
+        #    stylized·premier 배경은 backgroundImage를 어둡게 칠한 것이라 받지 않아요.
+        for field, suffix in (("splash", ""), ("backgroundImage", SCENE_SUFFIX)):
+            url = m.get(field)
+            if not url or (suffix and name in SCENE_SKIP):
+                continue
+            im = Image.open(io.BytesIO(get(url))).convert("RGB")
+            scale = max(MAP_SIZE[0] / im.width, MAP_SIZE[1] / im.height)
+            im = im.resize((round(im.width * scale), round(im.height * scale)), Image.LANCZOS)
+            x, y = (im.width - MAP_SIZE[0]) // 2, (im.height - MAP_SIZE[1]) // 2
+            path = os.path.join(ASSETS, "maps", f"{slug(name)}{suffix}.webp")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            im.crop((x, y, x + MAP_SIZE[0], y + MAP_SIZE[1])).save(path, "WEBP", quality=86, method=6)
+            scenes += bool(suffix)
         done.add(name)
     missing = sorted(set(wanted) - done)
-    print(f"맵 {len(done)}개" + (f" · ⚠️ 못 받은 맵: {', '.join(missing)}" if missing else ""))
+    print(f"맵 {len(done)}개 · 장면 그림 {scenes}개"
+          + (f" · ⚠️ 못 받은 맵: {', '.join(missing)}" if missing else ""))
 
     total = sum(os.path.getsize(os.path.join(dp, fn)) for dp, _, fs in os.walk(ASSETS) for fn in fs)
     print(f"합계 {total / 1024:.0f}KB → {ASSETS}")
