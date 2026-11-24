@@ -33,7 +33,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from cogs.weekly_mvp import pick_mvp
-from utils import agwi_weekly_store, fishing_week, server_banner
+from utils import agwi_weekly_store, fishing_week, server_banner, server_goal
 from utils.fish_data import BY_KEY
 
 log = logging.getLogger(__name__)
@@ -85,8 +85,14 @@ async def update_banner(guild: discord.Guild, week: str) -> tuple[str, bytes | N
     if "BANNER" not in guild.features:
         return "이 서버는 배너를 쓸 수 없어요(부스트 2레벨 필요).", None
     slots = await collect(guild, week)
+    # 🤝 지난주 공동 목표 결과 한 줄(2026-11-25). 못 읽어도 배너는 그대로 걸어요.
+    try:
+        footer = server_goal.banner_line(await server_goal.summary(week))
+    except Exception:  # noqa: BLE001
+        log.warning("🖼️ 배너: 공동 목표 결과를 못 읽었어요", exc_info=True)
+        footer = None
     # 그림 그리기는 CPU 일이라 루프를 막지 않게 스레드로 보내요.
-    png = await asyncio.to_thread(server_banner.render, week, slots)
+    png = await asyncio.to_thread(server_banner.render, week, slots, footer)
     try:
         await guild.edit(banner=png, reason=f"주간 배너 {week}")
     except discord.Forbidden:

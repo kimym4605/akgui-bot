@@ -38,7 +38,9 @@ TARGET_COGS = ["attendance", "achievement", "team", "rank", "betting", "mission"
                # ✅ 2026-11-15 신설. 🖼️ 월요일마다 서버 배너에 MVP·낚시왕
                "weekly_banner",
                # ✅ 2026-11-24 신설. 🧩 발로들 (매일 퍼즐, 상설 패널)
-               "balodle"]
+               "balodle",
+               # ✅ 2026-11-25 신설. 🤝 서버 공동 목표 (상설 패널)
+               "server_goal"]
 NEW_COMMANDS = {"프로필", "업적", "내전전적", "주간랭킹", "내전시즌", "팀짜기", "팀보기",
                 "카드뽑기", "도감", "카드확률", "카드거래", "거래함", "낚시", "어항", "낚시도감", "물고기판매", "낚시왕",
                 "낚시확률", "도움", "서버리포트", "주간mvp", "배너갱신","건의", "건의처리", "건의목록", "음성레벨", "음성랭킹", "일정", "일정목록", "낚시대회",
@@ -51,6 +53,8 @@ NEW_COMMANDS = {"프로필", "업적", "내전전적", "주간랭킹", "내전�
                 "칭호아이콘",
                 # ✅ 2026-11-24 🧩 발로들
                 "발로들패널", "발로들",
+                # ✅ 2026-11-25 🤝 서버 공동 목표
+                "공동목표패널", "공동목표",
                 # 🚨 슬래시가 아니라 **메시지 우클릭 메뉴**예요(`app_commands.ContextMenu`).
                 #    `cog_load`에서 `bot.tree.add_command`를 빼먹으면 조용히 사라져요.
                 "건의로 등록"}
@@ -204,6 +208,7 @@ async def main():
         "🎣 낚시": ["akgui:fish:cast", "akgui:fish:cast_all"],
         "🧩 발로들": ["akgui:balodle:open:agent", "akgui:balodle:open:ability",
                    "akgui:balodle:open:map", "akgui:balodle:stats", "akgui:balodle:notify"],
+        "🤝 공동 목표": ["akgui:goal:me"],
     }
     for label, want in PANELS.items():
         missing = [c for c in want if c not in registered_ids]

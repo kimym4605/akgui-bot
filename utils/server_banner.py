@@ -117,8 +117,10 @@ def _fit_font(draw, text, start, max_w):
     return _font("bold", size)
 
 
-def render(week: str, slots: list[Slot]) -> bytes:
-    """배너 PNG 바이트. `slots`는 1~2개(빈 칸은 그리지 않아요)."""
+def render(week: str, slots: list[Slot], footer: str | None = None) -> bytes:
+    """배너 PNG 바이트. `slots`는 1~2개(빈 칸은 그리지 않아요).
+
+    `footer`: 맨 아래 한 줄(🤝 지난주 공동 목표 결과, 2026-11-25). 이모지는 못 그려요."""
     img = background_for(week).convert("RGBA")
     draw = ImageDraw.Draw(img)
 
@@ -139,6 +141,12 @@ def render(week: str, slots: list[Slot]) -> bytes:
             name_font = _fit_font(draw, slot.name, 50, col_w - 40)
             _center_text(draw, cx, 384, slot.name, name_font, WHITE)
             _center_text(draw, cx, 452, slot.line, _font("bold", 30), SOFT)
+
+    if footer:
+        text = _DRAWABLE.sub("", footer).strip()
+        if text:
+            _center_text(draw, SIZE[0] / 2, 498, text, _fit_font(draw, text, 28, SIZE[0] - 60),
+                         (134, 239, 172))
 
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="PNG", optimize=True)
