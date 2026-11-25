@@ -847,7 +847,7 @@ class Balodle(commands.Cog):
                 embed=panel_embed(day))
             self._panel_sig = sig
         except discord.NotFound:
-            log.warning("🧩 발로들 패널 메시지가 없어요 — `/발로들패널`로 다시 올려 주세요")
+            log.warning("🧩 발로들 패널 메시지가 없어요 — `/패널 종류:발로들`로 다시 올려 주세요")
             self._panel_sig = sig             # 없는 메시지를 10분마다 다시 찾지 않게
 
     # -------------------------- 알림 역할 --------------------------
@@ -905,10 +905,8 @@ class Balodle(commands.Cog):
         settings_store.set_setting(KEY_NOTIFY_MSG, {"id": message.id, "day": today})
 
     # -------------------------- 명령어 --------------------------
-    @app_commands.command(
-        name="발로들패널",
-        description="[서버 소유자 전용] 이 채널에 발로들 패널을 박아둬요 (결과·알림도 이 채널에 올라와요).",
-    )
+    # 🧭 슬래시 명령어가 아니에요 — `/패널 종류:발로들`(cogs/panels.py)이 이 함수를 불러요.
+    #    (전역 명령어 100개 한도 때문에 패널 명령어 7개를 하나로 합쳤어요, 2026-11-26)
     async def panel(self, interaction: discord.Interaction):
         if not await ack(interaction, ephemeral=True):
             return

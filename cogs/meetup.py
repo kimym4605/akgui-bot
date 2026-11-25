@@ -30,7 +30,7 @@ from discord.ext import commands
 
 from utils import adult_check, meetup_store
 from utils.interaction_ack import ack
-from utils.staff_check import restrict_to_staff
+from utils.staff_check import is_staff, staff_role_labels
 
 log = logging.getLogger("akgui")
 
@@ -210,12 +210,16 @@ class MeetupCog(commands.Cog):
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(
-        name="정모패널",
-        description="[운영진] 이 채널에 정모 참가 신청 버튼을 올려요.",
-    )
-    @restrict_to_staff("`/정모패널`")
+    # 🧭 슬래시 명령어가 아니에요 — `/패널 종류:정모`(cogs/panels.py)이 이 함수를 불러요.
+    #    (전역 명령어 100개 한도 때문에 패널 명령어 7개를 하나로 합쳤어요, 2026-11-26)
     async def panel(self, interaction: discord.Interaction):
+        # 🚨 운영진 검사는 여기서 해요. 예전엔 `@restrict_to_staff` 데코레이터였는데, 슬래시 명령어가
+        #    아니게 되면서 데코레이터는 아무것도 막지 못해요(명령어에만 붙는 검사라서).
+        if not is_staff(interaction.user):
+            log.info("🔒 정모 패널 사용을 막았어요(운영진 아님): user=%s", interaction.user)
+            await interaction.response.send_message(
+                f"🔒 정모 패널은 **{staff_role_labels(interaction.guild)}** 만 올릴 수 있어요.", ephemeral=True)
+            return
         if not await ack(interaction, ephemeral=True):
             return
         lines = ["## 🎿 겨울 정모 참가 신청", "",

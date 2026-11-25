@@ -687,8 +687,13 @@ check("패널 필드 값이 1024자 이하", not _too_long, str(_too_long))
 async def _panel_cmd():
     bot = dcommands.Bot(command_prefix="!", intents=discord.Intents.default())
     await bot.load_extension("cogs.akgui_shop")
+    await bot.load_extension("cogs.panels")
     names = {c.name for c in bot.tree.get_commands()}
-    check("/상점패널 등록됨", "상점패널" in names, str(sorted(names)))
+    # 🧭 2026-11-26: `/상점패널`은 `/패널 종류:악귀상점`으로 합쳤어요(전역 명령어 100개 한도).
+    from cogs import panels as _panels
+    _shop_cog = bot.get_cog("Panels").cog_for(_panels.PANELS["shop"].module)
+    check("/패널 등록됨 + 상점 패널이 상점 cog의 panel로 이어짐", "패널" in names and "상점패널" not in names
+          and _shop_cog is bot.get_cog("AkguiShop") and callable(getattr(_shop_cog, "panel", None)), str(sorted(names)))
 
 
 asyncio.run(_panel_cmd())

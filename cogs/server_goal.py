@@ -213,7 +213,7 @@ class ServerGoal(commands.Cog):
                 embed=panel_embed(week, counts, last), view=GoalPanelView())
             self._panel_sig = sig
         except discord.NotFound:
-            log.warning("🤝 공동 목표 패널 메시지가 없어요 — `/공동목표패널`로 다시 올려 주세요")
+            log.warning("🤝 공동 목표 패널 메시지가 없어요 — `/패널 종류:공동목표`로 다시 올려 주세요")
             self._panel_sig = sig
 
     async def tick(self) -> None:
@@ -223,10 +223,8 @@ class ServerGoal(commands.Cog):
         await self.refresh_panel(week, counts)
 
     # -------------------------- 명령어 --------------------------
-    @app_commands.command(
-        name="공동목표패널",
-        description="[서버 소유자 전용] 이 채널에 서버 공동 목표 패널을 박아둬요 (달성 글도 여기 올라와요).",
-    )
+    # 🧭 슬래시 명령어가 아니에요 — `/패널 종류:공동목표`(cogs/panels.py)이 이 함수를 불러요.
+    #    (전역 명령어 100개 한도 때문에 패널 명령어 7개를 하나로 합쳤어요, 2026-11-26)
     async def panel(self, interaction: discord.Interaction):
         if not await ack(interaction, ephemeral=True):
             return

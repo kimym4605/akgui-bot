@@ -240,9 +240,15 @@ check("RoomPanelView(self.engine, ROOM_KINDS, kinds)" in ptxt2,
       "🚨 패널 생성에 kinds를 **넘긴다** (안 넘기면 늘 전체가 올라간다)", ptxt2[-200:])
 check("panel_embed(ROOM_KINDS, kinds)" in ptxt2,
       "🚨 설명에도 kinds를 넘긴다 (버튼은 1개인데 설명만 4종이 되면 거짓이 된다)")
-check(any(isinstance(d, ast.Call) and "choices" in ast.unparse(d)
-          for d in (panel_cmd_fn.decorator_list if panel_cmd_fn else [])),
+# 🧭 2026-11-26: `/방패널`은 `/패널 종류:방`으로 합쳤어요. 선택지는 이제 `cogs/panels.py`의 `/패널`에 있어요.
+_panels_src = open(os.path.join(BOT_DIR, "cogs", "panels.py"), encoding="utf-8").read()
+_panels_fn = next((n for n in ast.walk(ast.parse(_panels_src))
+                   if isinstance(n, ast.AsyncFunctionDef) and n.name == "panel"), None)
+check(_panels_fn is not None and any(isinstance(d, ast.Call) and "choices" in ast.unparse(d)
+                                     for d in _panels_fn.decorator_list),
       "종류는 **선택지(choices)**로 받는다 — 글자로 받으면 오타가 바로 실패가 된다")
+check(_panels_fn is not None and "cog.panel(interaction, 방종류, 방종류2)" in ast.unparse(_panels_fn),
+      "🚨 /패널이 방 종류 두 개를 방 패널에 **넘긴다** (안 넘기면 늘 전체가 올라간다)")
 
 print("\n[9] /방패널은 서버 소유자 전용")
 panel_cmd = next((n for n in ast.walk(ast.parse(room_src))
@@ -308,8 +314,8 @@ check("fromkeys" in panel_txt, "중복을 거른다 (dict.fromkeys)")
 #    `종류2`에서 빼먹은 걸 못 잡아요(역방향 확인 D에서 드러났어요). 선택지가 없으면
 #    디스코드가 **자유 입력**으로 받아서, 오타가 조용히 "버튼 없는 패널"이 돼요.
 #    숫자나 이름을 박지 않으니 `종류3`을 더해도 자동으로 검사 대상이 돼요.
-_panel_fn = next(n for n in ast.walk(ast.parse(room_src_2))
-                 if isinstance(n, ast.AsyncFunctionDef) and n.name == "panel")
+#    🧭 2026-11-26부터는 `/패널`(cogs/panels.py)의 파라미터를 봐요 — 방 종류도 거기서 받아요.
+_panel_fn = _panels_fn
 _params = [a.arg for a in _panel_fn.args.args
            if a.arg not in ("self", "interaction")]
 _choice_kw = set()

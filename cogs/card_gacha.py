@@ -1118,12 +1118,10 @@ class CardGacha(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         await do_fuse(interaction, times=횟수)
 
-    @app_commands.command(
-        name="카드패널",
-        description="[서버 소유자 전용] 이 채널에 카드 패널을 박아둬요 (항상 떠 있어요).",
-    )
+    # 🧭 슬래시 명령어가 아니에요 — `/패널 종류:카드`(cogs/panels.py)이 이 함수를 불러요.
+    #    (전역 명령어 100개 한도 때문에 패널 명령어 7개를 하나로 합쳤어요, 2026-11-26)
     async def panel(self, interaction: discord.Interaction):
-        """🎴 상설 패널을 **지금 이 채널에** 올려요. (🎣 `/낚시패널`과 같은 방식이에요)
+        """🎴 상설 패널을 **지금 이 채널에** 올려요. (🎣 낚시 패널과 같은 방식이에요)
 
         ⚠️ `/채널설정`을 쓰지 않아요 — 이건 "명령어를 어디서 쓸 수 있나"가 아니라
            **메시지를 한 번 박는** 일이에요. 채널을 옮기고 싶으면 옛 메시지를 지우고

@@ -1000,6 +1000,12 @@ class Tactics(commands.Cog):
             view.add_item(action_button("이 채널에 패널 박기", "📌", discord.ButtonStyle.success, self.post_panel))
         await interaction.followup.send(embed=panel_embed(), view=view, ephemeral=True)
 
+    async def panel(self, interaction: discord.Interaction) -> None:
+        """`/패널 종류:작전판`(cogs/panels.py)이 불러요. 다른 cog의 `panel`처럼 응답까지 여기서 해요."""
+        if not await ack(interaction, ephemeral=True):
+            return
+        await self.post_panel(interaction)
+
     async def post_panel(self, interaction: discord.Interaction) -> None:
         """[서버 소유자 전용] 이 채널에 상설 패널을 올려요. 전에 올린 패널은 지워요."""
         if interaction.guild is None or interaction.user.id != interaction.guild.owner_id:
