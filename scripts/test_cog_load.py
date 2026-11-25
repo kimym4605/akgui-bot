@@ -57,8 +57,9 @@ NEW_COMMANDS = {"프로필", "업적", "내전전적", "주간랭킹", "내전�
                 "발로들패널", "발로들",
                 # ✅ 2026-11-25 🤝 서버 공동 목표
                 "공동목표패널", "공동목표",
-                # ✅ 2026-11-25 🗺️ 웹 전술판 (+ 같은 날 업그레이드: 패널·내 작전판)
-                "작전판", "작전판패널", "내작전판",
+                # ✅ 2026-11-25 🗺️ 웹 전술판. 🚨 명령어는 이것 하나뿐이에요 — 내 작전판·패널 박기는 `/작전판` 메뉴 버튼.
+                #    (2026-11-26: 명령어 2개를 더했다가 전역 100개 한도를 넘어 운영 봇이 꺼졌어요. 맨 아래 한도 검사 참고)
+                "작전판",
                 # 🚨 슬래시가 아니라 **메시지 우클릭 메뉴**예요(`app_commands.ContextMenu`).
                 #    `cog_load`에서 `bot.tree.add_command`를 빼먹으면 조용히 사라져요.
                 "건의로 등록"}
@@ -336,6 +337,21 @@ async def main():
                       "(`python scripts/scan_orphan_modules.py`로 자세히)")
     else:
         print("  ✅ 쓰기 함수가 전부 어딘가에서 불려요")
+
+    # ------------------------------------------------------------------
+    # 🚨 **전역 슬래시 명령어는 100개가 한도**예요. 넘으면 봇이 시작하다가 꺼져요.
+    #    2026-11-26에 딱 100개인 줄 모르고 2개를 더해 배포했다가 운영 봇이 멈췄어요.
+    #    위쪽은 `TARGET_COGS`만 실어서 못 잡으니, **모든 cog를 싣는** 별도 검사를 불러요.
+    print("\n전역 슬래시 명령어 한도(100개):")
+    _limit_path = os.path.join(BOT_DIR, "scripts", "test_command_limit.py")
+    _proc = subprocess.run([sys.executable, _limit_path],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+    _lines = [line.strip() for line in (_proc.stdout or "").splitlines()]
+    for line in _lines:
+        if line.startswith(("전역 슬래시", "우클릭", "❌", "✅")):
+            print(f"  {line}")
+    if _proc.returncode != 0:
+        failed.append("전역 슬래시 명령어 한도 검사 실패 (`python scripts/test_command_limit.py`로 자세히)")
 
     print("\n" + "=" * 50)
     if failed:

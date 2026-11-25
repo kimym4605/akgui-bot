@@ -830,6 +830,50 @@ async def run():
     check("전적 서버가 바쁘면 몇 초 뒤인지 안내", "42초" in it.last["content"])
     check("이름 찾기: 모르는 사람은 '멤버'", await inst.member_name("abc") == "멤버" and await inst.member_name(12345) == "멤버")
 
+    # `/작전판`(맵 없이) 메뉴 — 명령어를 늘리지 않으려고(전역 100개 한도) 내 작전판·패널 박기를 여기 모았어요
+    def labels(view):
+        return [x.label for x in view.children]
+
+    import discord
+
+    class FakeText(discord.TextChannel):       # isinstance 검사만 지나가면 돼요
+        def __init__(self):
+            self.sent, self.id = [], 555
+
+        @property
+        def mention(self):
+            return "#작전"
+
+        async def send(self, content=None, **kw):
+            self.sent.append((content, kw))
+            return SimpleNamespace(id=7000 + len(self.sent))
+
+    panel_store = {}
+    cog.settings_store.get_setting = lambda key: panel_store.get(key)
+    cog.settings_store.set_setting = lambda key, value: panel_store.__setitem__(key, value)
+    it_m = FakeIt(20)
+    it_m.guild = SimpleNamespace(owner_id=1)
+    await inst.show_menu(it_m)
+    check("/작전판 메뉴: 버튼 4개 (소유자가 아니면 패널 박기 없음)", labels(it_m.last["view"]) == ["새 작전판", "내 작전판", "작전 모음", "내 경기 장면"]
+          and it_m.last["ephemeral"] is True and it_m.last["embed"] is not None, labels(it_m.last["view"]))
+    it_o = FakeIt(1)
+    it_o.guild = SimpleNamespace(owner_id=1)
+    it_o.channel = FakeText()
+    await inst.show_menu(it_o)
+    check("서버 소유자에게만 📌 패널 박기", labels(it_o.last["view"])[-1] == "이 채널에 패널 박기" and len(it_o.last["view"].children) == 5)
+    await button(it_o.last["view"], "내 작전판").callback(it_o)
+    check("메뉴의 내 작전판 버튼이 목록을 엶", isinstance(it_o.last.get("view"), cog.PickView) or "작전판" in (it_o.last.get("content") or ""))
+    await inst.post_panel(it_o)
+    p_content, p_kw = it_o.channel.sent[-1]
+    check("패널 박기: 상설 패널(버튼 4개)을 올리고 위치를 기억", ids_of(p_kw["view"]) == ["akgui:tac:new", "akgui:tac:mine", "akgui:tac:lib", "akgui:tac:match"]
+          and panel_store[cog.KEY_PANEL] == {"channel": 555, "message": 7001} and "올렸어요" in it_o.last["content"])
+    it_m.channel = FakeText()
+    await inst.post_panel(it_m)
+    check("소유자가 아니면 패널을 못 올림", it_m.channel.sent == [] and "소유자만" in it_m.last["content"])
+    board_cmd = inst.board
+    check("슬래시 명령어는 /작전판 하나, 맵은 비워도 됨", [c.name for c in inst.get_app_commands()] == ["작전판"]
+          and not next(p for p in board_cmd.parameters if p.name == "맵").required)
+
     print("[4] 그림 그리기")
     from utils import tactics_render as tr
 

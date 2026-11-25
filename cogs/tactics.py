@@ -23,8 +23,10 @@ discord.py가 쓰는 aiohttp로 `0.0.0.0:$PORT(8080)`. Fly `[http_service]`가 `
 
 ## 2026-11-25 업그레이드 (사용자 요청 1~5)
 
-1. 📂 **내 작전판** — 만든 판 목록에서 편집 링크를 다시 받아요(`/내작전판`, 패널 버튼). 지우기·모음에서 내리기도.
-2. 🧭 **채널 패널**(`/작전판패널`, 서버 소유자) + 📚 **작전 모음** — 📤 올린 판이 맵별로 모여요.
+🚨 슬래시 명령어는 `/작전판` 하나뿐이에요(전역 100개 한도가 꽉 차서 더 못 늘려요). 맵 없이 쓰면 메뉴가 떠요.
+
+1. 📂 **내 작전판** — 만든 판 목록에서 편집 링크를 다시 받아요(`/작전판` 메뉴, 패널 버튼). 지우기·모음에서 내리기도.
+2. 🧭 **채널 패널**(`/작전판` 메뉴의 📌 버튼, 서버 소유자만 보임) + 📚 **작전 모음** — 📤 올린 판이 맵별로 모여요.
 3. 💬 **피드백** — 올린 글의 [피드백 남기기] → 내 이름으로 메모 핀을 꽂는 개인 링크. [복사해서 고치기] → 내 판으로 복사.
    메모가 달리면 올린 글에 답글로 만든 사람을 불러요(같은 사람·같은 판은 10분에 한 번).
 4. 👥 **같이 그리기** — 판을 연 사람끼리 실시간으로 같이 보여요. 초대 글의 [같이 그리기]를 누른 사람은 12시간 동안 고칠 수 있어요.
@@ -337,7 +339,7 @@ def created_embed(title: str, extra: str = "") -> discord.Embed:
         description=("**✏️ 편집**: 요원을 고르고 → 스킬(Q·E·C·X)을 골라 → 맵을 눌러 놓아요. 저장은 자동이에요.\n"
                      "**👀 보기 링크**를 팀원에게 주면 같은 판을 실시간으로 같이 볼 수 있어요(고치지는 못해요).\n"
                      + (extra + "\n" if extra else "") +
-                     "-# 🚨 편집 링크는 남에게 주지 마세요. 링크를 잃어버리면 📂 내 작전판(`/내작전판`)에서 다시 받아요."),
+                     "-# 🚨 편집 링크는 남에게 주지 마세요. 링크를 잃어버리면 `/작전판` → 📂 내 작전판에서 다시 받아요."),
         color=COLOR)
 
 
@@ -965,44 +967,55 @@ class Tactics(commands.Cog):
                if not cur or cur in m["name"].lower() or cur in key]
         return sorted(out, key=lambda c: c.name)[:25]
 
-    @app_commands.command(name="작전판", description="미니맵에 요원·스킬을 놓아 작전을 그려요 (웹 전술판)")
-    @app_commands.describe(맵="그릴 맵", 제목="예: A 공격 기본 연막 (비워도 돼요)")
+    # 🚨 슬래시 명령어는 `/작전판` 하나뿐이에요. 봇 전체 전역 명령어가 디스코드 한도(100개)에 꽉 차 있어서,
+    #    하나라도 더 만들면 봇이 시작하다가 꺼져요(CommandLimitReached). 내 작전판·패널 박기는 메뉴 버튼으로 가요.
+    @app_commands.command(name="작전판", description="미니맵에 요원·스킬을 놓아 작전을 그려요 — 맵을 비우면 메뉴(내 작전판·작전 모음·경기 장면)")
+    @app_commands.describe(맵="그릴 맵 (비우면 메뉴가 떠요)", 제목="예: A 공격 기본 연막 (비워도 돼요)")
     @app_commands.autocomplete(맵=map_autocomplete)
-    async def board(self, interaction: discord.Interaction, 맵: str, 제목: str | None = None):
+    async def board(self, interaction: discord.Interaction, 맵: str | None = None, 제목: str | None = None):
         if not await ack(interaction, ephemeral=True):
+            return
+        if not (맵 or "").strip():
+            await self.show_menu(interaction)
             return
         try:
             ms = await tactics.maps(self.session)
         except Exception:  # noqa: BLE001
             await interaction.followup.send("맵 자료를 못 받아왔어요. 잠시 뒤 다시 해 주세요.", ephemeral=True)
             return
-        key = (맵 or "").strip().lower()
+        key = 맵.strip().lower()
         if key not in ms:   # 한국어 이름을 그대로 친 경우
-            key = next((k for k, m in ms.items() if m["name"] == (맵 or "").strip()), "")
+            key = next((k for k, m in ms.items() if m["name"] == 맵.strip()), "")
         await self.create_and_reply(interaction, key, 제목, edit=False)
 
-    @app_commands.command(name="내작전판", description="내가 만든 작전판을 다시 열어요 (편집 링크 다시 받기 · 같이 그리기 초대)")
-    async def mine(self, interaction: discord.Interaction):
-        if not await ack(interaction, ephemeral=True):
-            return
-        await self.show_mine(interaction)
+    async def show_menu(self, interaction: discord.Interaction) -> None:
+        """`/작전판`(맵 없이) — 패널과 같은 메뉴를 나만 보이게. 서버 소유자에게는 [이 채널에 패널 박기]도 보여요."""
+        view = discord.ui.View(timeout=300)
+        view.add_item(action_button("새 작전판", "🗺️", discord.ButtonStyle.primary, self.show_new))
+        view.add_item(action_button("내 작전판", "📂", discord.ButtonStyle.secondary, self.show_mine))
+        view.add_item(action_button("작전 모음", "📚", discord.ButtonStyle.secondary, self.show_library))
+        view.add_item(action_button("내 경기 장면", "🎬", discord.ButtonStyle.secondary, self.show_matches))
+        guild = interaction.guild
+        if guild is not None and interaction.user.id == guild.owner_id:
+            view.add_item(action_button("이 채널에 패널 박기", "📌", discord.ButtonStyle.success, self.post_panel))
+        await interaction.followup.send(embed=panel_embed(), view=view, ephemeral=True)
 
-    @app_commands.command(
-        name="작전판패널",
-        description="[서버 소유자 전용] 이 채널에 작전판 패널을 박아둬요 (새 작전판·내 작전판·작전 모음·경기 장면).",
-    )
-    async def panel(self, interaction: discord.Interaction):
-        if not await ack(interaction, ephemeral=True):
-            return
+    async def post_panel(self, interaction: discord.Interaction) -> None:
+        """[서버 소유자 전용] 이 채널에 상설 패널을 올려요. 전에 올린 패널은 지워요."""
         if interaction.guild is None or interaction.user.id != interaction.guild.owner_id:
-            await interaction.followup.send("이 명령어는 서버 소유자만 쓸 수 있어요.", ephemeral=True)
+            await interaction.followup.send("패널은 서버 소유자만 올릴 수 있어요.", ephemeral=True)
             return
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel):
             await interaction.followup.send("텍스트 채널에서 써주세요.", ephemeral=True)
             return
         old = settings_store.get_setting(KEY_PANEL) or {}
-        message = await channel.send(embed=panel_embed(), view=TacticsPanelView())
+        try:
+            message = await channel.send(embed=panel_embed(), view=TacticsPanelView())
+        except discord.HTTPException:
+            await interaction.followup.send("이 채널에 글을 못 올렸어요. 봇 권한(메시지 보내기·링크 첨부)을 확인해 주세요.",
+                                            ephemeral=True)
+            return
         settings_store.set_setting(KEY_PANEL, {"channel": channel.id, "message": message.id})
         log.info("🗺️ 작전판 패널 게시: 채널 %s", channel.id)
         if old.get("channel") and old.get("message") and int(old["message"]) != message.id:
@@ -1015,7 +1028,6 @@ class Tactics(commands.Cog):
         await interaction.followup.send(
             f"🗺️ {channel.mention} 에 작전판 패널을 올렸어요. 패널에서 만든 판을 📤 올리면 이 채널에 그림이 올라와요.\n"
             "-# 메시지를 **고정(핀)** 해두면 새로 온 사람도 바로 찾아요.", ephemeral=True)
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Tactics(bot))
