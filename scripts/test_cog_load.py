@@ -57,8 +57,8 @@ NEW_COMMANDS = {"프로필", "업적", "내전전적", "주간랭킹", "내전�
                 "발로들패널", "발로들",
                 # ✅ 2026-11-25 🤝 서버 공동 목표
                 "공동목표패널", "공동목표",
-                # ✅ 2026-11-25 🗺️ 웹 전술판
-                "작전판",
+                # ✅ 2026-11-25 🗺️ 웹 전술판 (+ 같은 날 업그레이드: 패널·내 작전판)
+                "작전판", "작전판패널", "내작전판",
                 # 🚨 슬래시가 아니라 **메시지 우클릭 메뉴**예요(`app_commands.ContextMenu`).
                 #    `cog_load`에서 `bot.tree.add_command`를 빼먹으면 조용히 사라져요.
                 "건의로 등록"}
@@ -213,6 +213,7 @@ async def main():
         "🧩 발로들": ["akgui:balodle:open:agent", "akgui:balodle:open:ability",
                    "akgui:balodle:open:map", "akgui:balodle:stats", "akgui:balodle:notify"],
         "🤝 공동 목표": ["akgui:goal:me"],
+        "🗺️ 작전판": ["akgui:tac:new", "akgui:tac:mine", "akgui:tac:lib", "akgui:tac:match"],
     }
     for label, want in PANELS.items():
         missing = [c for c in want if c not in registered_ids]

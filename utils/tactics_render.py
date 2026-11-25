@@ -6,6 +6,7 @@
 - 미니맵·요원·스킬 아이콘은 valorant-api CDN에서 받아 **메모리에 기억**해요(아이콘 수십 개, 몇 MB).
 - 그리기는 CPU 일이라 `render_scene`은 동기 함수 → 호출부가 `asyncio.to_thread`로 불러요.
 - 🚨 나눔고딕은 이모지를 못 그려요 → 글은 `_clean`으로 걸러요(서버 배너와 같은 문제).
+- 🎬 경기 장면의 요원(`rot` 시선·`dead` 처치됨·`me` 나)도 화면과 같은 모양으로 그려요. 💬 메모 핀은 안 그려요.
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ SMOKE_FILL = {"ally": (150, 210, 240, 110), "enemy": (255, 140, 150, 105)}
 ZONE_FILL = {"ally": (79, 195, 247, 52), "enemy": (255, 70, 85, 56)}
 _IMG_CACHE: dict[str, Image.Image] = {}
 _IMG_CACHE_MAX = 300
-_DRAWABLE = re.compile(r"[^0-9A-Za-z가-힣ㄱ-ㅎㅏ-ㅣ ._\-~!?#&()\[\]+'\"/:,%·]")
+_DRAWABLE = re.compile(r"[^0-9A-Za-z가-힣ㄱ-ㅎㅏ-ㅣ ._\-~!?#&()\[\]+'\"/:,%·→]")   # → 는 경기 장면 제목(누가→누구)
 
 
 def _clean(text: str) -> str:
@@ -214,8 +215,21 @@ def render_scene(*, mapinfo: dict, agents: dict, images: dict, items: list[dict]
             d = ImageDraw.Draw(board)
         elif typ == "agent":
             a = agents.get(it.get("agent")) or {}
-            _disc(board, it["u"] * MAP_PX, it["v"] * MAP_PX, 21, images.get(a.get("icon")), col, pad=1.0)
+            cx, cy = it["u"] * MAP_PX, it["v"] * MAP_PX
+            if it.get("rot") is not None and not it.get("dead"):
+                # 🎬 경기 장면: 보던 방향(시선 = (sin r, −cos r))에 작은 화살촉
+                dx, dy = math.sin(it["rot"]), -math.cos(it["rot"])
+                tip = (cx + dx * 36, cy + dy * 36)
+                base = (cx + dx * 24, cy + dy * 24)
+                d.polygon([tip, (base[0] - dy * 8, base[1] + dx * 8), (base[0] + dy * 8, base[1] - dx * 8)], fill=col)
+            if it.get("me"):
+                d.ellipse([cx - 28, cy - 28, cx + 28, cy + 28], outline=(245, 197, 24, 255), width=4)
+            _disc(board, cx, cy, 21, images.get(a.get("icon")), col, pad=1.0)
             d = ImageDraw.Draw(board)
+            if it.get("dead"):
+                d.ellipse([cx - 22, cy - 22, cx + 22, cy + 22], fill=(0, 0, 0, 120))
+                d.line([(cx - 15, cy - 15), (cx + 15, cy + 15)], fill=(255, 70, 85, 255), width=6)
+                d.line([(cx - 15, cy + 15), (cx + 15, cy - 15)], fill=(255, 70, 85, 255), width=6)
         elif typ == "arrow" and it.get("u2") is not None:
             pts = line_points(it)
             d.line(pts, fill=(0, 0, 0, 130), width=9, joint="curve")

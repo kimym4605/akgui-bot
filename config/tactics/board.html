@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <meta name="robots" content="noindex">
+<link rel="icon" href="data:,">
 <title>악귀봇 작전판</title>
 <style>
   :root {
@@ -25,11 +26,16 @@
   #title { width: 220px; }
   .grow { flex: 1; }
   #status { color: var(--soft); font-size: 12px; }
-  .wrap { display: grid; grid-template-columns: 300px minmax(0, 1fr) 240px; gap: 12px; padding: 12px; max-width: 1500px; margin: 0 auto; }
-  .view .wrap { grid-template-columns: minmax(0, 1fr) 260px; }
+  #who { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px;
+          background: var(--panel2); border: 1px solid var(--line); font-size: 12px; white-space: nowrap; }
+  .chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .wrap { display: grid; grid-template-columns: 300px minmax(0, 1fr) 260px; gap: 12px; padding: 12px; max-width: 1500px; margin: 0 auto; }
+  .view .wrap { grid-template-columns: minmax(0, 1fr) 280px; }
   @media (max-width: 1100px) { .wrap, .view .wrap { grid-template-columns: 1fr; } .mapcol { order: -1; } }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
   .card h2 { font-size: 13px; color: var(--soft); margin: 2px 0 8px; font-weight: 600; }
+  .side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
   .row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
   .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; }
   .agents button { padding: 2px; aspect-ratio: 1; border-radius: 10px; }
@@ -57,11 +63,22 @@
   .list .g img { width: 22px; height: 22px; border-radius: 6px; }
   .list .a { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--soft); padding-left: 28px; }
   .list .a img { width: 16px; height: 16px; background: #000; border-radius: 4px; }
+  .note { display: flex; gap: 6px; align-items: flex-start; padding: 6px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .note:hover, .note.on { background: var(--panel2); }
+  .note .num { flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--pick); color: #111;
+               font-weight: 800; font-size: 12px; display: flex; align-items: center; justify-content: center; }
+  .note .body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .note .who { color: var(--soft); font-size: 12px; }
+  .note button { padding: 0 6px; font-size: 12px; flex: none; }
   #err { padding: 40px 16px; color: var(--soft); }
   .view .edit-only { display: none !important; }
   .edit .view-only { display: none !important; }
+  body:not(.owner) .owner-only { display: none !important; }
+  body:not(.noter) .noter-only { display: none !important; }
   .team-ally.on { border-color: var(--ally); box-shadow: 0 0 0 1px var(--ally) inset; }
   .team-enemy.on { border-color: var(--enemy); box-shadow: 0 0 0 1px var(--enemy) inset; }
+  @keyframes ping { from { transform: scale(.15); opacity: 1; } to { transform: scale(1); opacity: 0; } }
+  .ping { transform-box: fill-box; transform-origin: center; animation: ping 1.4s ease-out forwards; pointer-events: none; }
   @media (pointer: coarse) {
     button { padding: 10px 12px; }
     .agents { grid-template-columns: repeat(auto-fill, minmax(54px, 1fr)); gap: 8px; }
@@ -79,11 +96,13 @@
     <span id="title-view" class="view-only" style="font-weight:700"></span>
     <button id="side" class="edit-only" title="공격/수비 표시">⚔️ 공격</button>
     <span id="side-view" class="view-only" style="color:var(--soft)"></span>
+    <span id="who"></span>
     <span class="grow"></span>
     <span id="status"></span>
     <button id="save" class="edit-only">💾 저장</button>
     <button id="share" class="edit-only">👀 보기 링크 복사</button>
-    <button id="post" class="edit-only">📤 디스코드에 올리기</button>
+    <button id="invite" class="owner-only" title="디스코드 채널에 초대 글을 올려요. 버튼을 누른 사람은 12시간 동안 같이 그릴 수 있어요.">👥 같이 그리기 초대</button>
+    <button id="post" class="owner-only" title="장면마다 그림을 올리고 서버 작전 모음에 실어요">📤 디스코드에 올리기</button>
   </div>
   <div class="wrap">
     <aside class="card edit-only">
@@ -105,6 +124,10 @@
         <button id="t-ruler">📏 거리</button>
       </div>
       <div class="row">
+        <button id="t-note" title="맵에 피드백 메모를 꽂아요">💬 피드백 핀</button>
+        <button id="t-ping" title="같이 보는 사람들에게 그 자리를 깜빡여요">📍 핑</button>
+      </div>
+      <div class="row">
         <button id="undo">↩️ 되돌리기</button>
         <button id="del" disabled>🗑️ 지우기</button>
         <button id="clear">장면 비우기</button>
@@ -119,6 +142,12 @@
         <input type="text" id="scene-title" class="edit-only" maxlength="40" placeholder="장면 제목 (예: 진입 전)">
         <span id="scene-title-view" class="view-only" style="color:var(--soft)"></span>
       </div>
+      <div class="row noter-only">
+        <button id="n-select" class="on">🖐️ 보기</button>
+        <button id="n-note">💬 피드백 핀 남기기</button>
+        <button id="n-ping">📍 핑</button>
+        <span class="hint" id="noter-hint" style="margin:0;align-self:center"></span>
+      </div>
       <div class="mapbox" id="mapbox">
         <div id="stage">
           <img id="mini" alt="미니맵" draggable="false">
@@ -130,6 +159,7 @@
             <g id="g-callouts"></g>
             <g id="g-items"></g>
             <g id="g-preview"></g>
+            <g id="g-cursors" pointer-events="none"></g>
           </svg>
         </div>
         <div class="zoom">
@@ -140,12 +170,20 @@
       </div>
       <div class="opts">
         <label><input type="checkbox" id="opt-callout" checked> 구역 이름</label>
+        <label><input type="checkbox" id="opt-notes" checked> 피드백 핀</label>
+        <label title="그리는 사람이 장면을 넘기면 내 화면도 따라가요"><input type="checkbox" id="opt-follow"> 장면 따라가기</label>
         <span>원 크기·벽 길이는 실제 비율의 <b>대략값</b>이에요 · 두 손가락/휠로 확대</span>
       </div>
     </main>
-    <aside class="card list">
-      <h2>놓인 것</h2>
-      <div id="list"></div>
+    <aside class="side">
+      <div class="card list">
+        <h2>💬 피드백 <span id="note-count"></span></h2>
+        <div id="notes"></div>
+      </div>
+      <div class="card list">
+        <h2>놓인 것</h2>
+        <div id="list"></div>
+      </div>
     </aside>
   </div>
 </div>
@@ -153,19 +191,32 @@
 "use strict";
 const NS = "http://www.w3.org/2000/svg";
 const parts = location.pathname.split("/").filter(Boolean);
-const MODE = parts[0] === "e" ? "edit" : "view";
-const KEY = parts[1] || "";
+// e 편집 링크(만든 사람) · c 같이 그리기 · f 피드백(메모 핀만) · v 보기
+const ROLE = ["e", "v", "c", "f"].includes(parts[0]) ? parts[0] : "v";
+const KEY = parts[1] || "", PASS = parts[2] || "";
+const CAN_EDIT = ROLE === "e" || ROLE === "c", CAN_NOTE = ROLE !== "v", OWNER = ROLE === "e";
+const MODE = CAN_EDIT ? "edit" : "view";
+const TAIL = `${ROLE}/${encodeURIComponent(KEY)}${PASS ? "/" + encodeURIComponent(PASS) : ""}`;
 const TEAM = { ally: "#4fc3f7", enemy: "#ff4655" };
 const FILL = { smoke: { ally: "rgba(150,210,240,.42)", enemy: "rgba(255,140,150,.40)" },
                zone: { ally: "rgba(79,195,247,.20)", enemy: "rgba(255,70,85,.22)" },
                wall: { ally: "rgba(79,195,247,.9)", enemy: "rgba(255,70,85,.9)" } };
 const TAP = 0.015;        // 이보다 짧게 끌면 '톡 누름'
 
-let META = null, MAP = null, AG = {}, scenes = [{ title: "", items: [] }], cur = 0, side = "atk", viewId = "";
+let META = null, MAP = null, AG = {}, scenes = [{ sid: "s0", title: "", items: [] }], cur = 0, side = "atk", viewId = "";
+let title = "", notes = [], focusedNote = null;
 let team = "ally", tool = "select", curAgent = null, curAbility = null, selected = -1;
 let undoStack = [], dirty = false, saveTimer = null, drag = null, roleFilter = "", ruler = null;
 const Z = { s: 1, x: 0, y: 0 }, pointers = new Map();
 let pinch = null;
+// 👥 실시간: confirmed = 서버 상태(받은 순서대로 따라감) · unacked = 보냈지만 확인 못 받은 묶음
+//           synced = confirmed + unacked (내가 보낸 것까지). 화면 상태와 synced의 차이만 연산으로 보내요.
+let ws = null, wsOk = false, wsTry = 0, wsDead = false, synced = null, confirmed = null, seq = 0, unacked = [], stale = false;
+// 방금 확인받은 묶음(몇 초치). 서버는 2초 모아서 저장하니, 저장 전에 재시작(배포)하면 확인받은 것도 사라질 수 있어요.
+// 다시 붙을 때 끊기기 직전 것들을 한 번 더 보내요(같은 연산은 두 번 와도 결과가 같아요).
+let recent = [], lostAt = 0;
+let me = null, myBy = "", who = [], viewers = 0, lastCur = 0;
+const cursors = new Map();
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, attrs = {}, parent) => {
@@ -178,6 +229,8 @@ const X = (u) => u * 1000, Y = (v) => v * 1000;
 const items = () => scenes[cur].items;
 const meters = (du) => du / (MAP.unit || 0.007);
 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+const nid = () => Math.random().toString(36).slice(2, 10).padEnd(8, "0");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function getJSON(url, opts) {
   const r = await fetch(url, opts);
@@ -186,32 +239,39 @@ async function getJSON(url, opts) {
   return j;
 }
 
+function loadScenes(list) {
+  const out = (Array.isArray(list) ? list : []).map((s) => ({
+    sid: s.sid || nid(), title: s.title || "",
+    items: (s.items || []).map((it) => (it.id ? it : { ...it, id: nid() })) }));
+  return out.length ? out : [{ sid: nid(), title: "", items: [] }];
+}
+
 async function main() {
   document.body.classList.add(MODE);
+  if (OWNER) document.body.classList.add("owner");
+  if (CAN_NOTE && !CAN_EDIT) document.body.classList.add("noter");
   try {
-    const [meta, board] = await Promise.all([
-      getJSON("/api/meta"),
-      getJSON(`/api/board/${MODE === "edit" ? "e" : "v"}/${encodeURIComponent(KEY)}`),
-    ]);
+    const [meta, board] = await Promise.all([getJSON("/api/meta"), getJSON(`/api/board/${TAIL}`)]);
     META = meta; MAP = meta.maps[board.map];
     if (!MAP) throw new Error("맵 자료가 없어요.");
     for (const a of meta.agents) AG[a.id] = a;
     const data = board.data || {};
-    if (Array.isArray(data.scenes) && data.scenes.length)
-      scenes = data.scenes.map((s) => ({ title: s.title || "", items: s.items || [] }));
+    scenes = loadScenes(data.scenes);
     side = data.side || "atk";
+    notes = board.notes || [];
+    myBy = board.by || "";
     viewId = board.view;
-    $("title").value = board.title || "";
-    $("title-view").textContent = board.title || "";
-    document.title = `${board.title || MAP.name} · 악귀봇 작전판`;
+    setTitle(board.title || "", true);
   } catch (e) {
     $("err").hidden = false; $("err").textContent = "⚠️ " + e.message; return;
   }
   $("mapname").textContent = `🗺️ ${MAP.name}`;
   $("mini").src = MAP.minimap;
   $("root").hidden = false;
+  $("opt-follow").checked = !CAN_EDIT;
   drawCallouts();
-  if (MODE === "edit") setupEditor();
+  if (CAN_EDIT) { synced = clone(localState()); confirmed = clone(synced); setupEditor(); }
+  if (CAN_NOTE && !CAN_EDIT) setupNoter();
   setupZoom();
   document.addEventListener("keydown", (e) => {
     if (e.target.tagName === "INPUT") return;
@@ -223,6 +283,12 @@ async function main() {
   updateSide();
   renderScenes();
   render();
+  connect();
+  setInterval(() => {      // 멈춘 커서는 5초 뒤 지워요
+    const now = Date.now(); let gone = false;
+    for (const [c, v] of cursors) if (now - v.at > 5000) { cursors.delete(c); gone = true; }
+    if (gone) drawCursors();
+  }, 1500);
 }
 
 // ---------------------------------------------------------------- 곡선
@@ -299,6 +365,80 @@ function midOf(it) {
   return [(X(it.u) + X(it.u2)) / 2, (Y(it.v) + Y(it.v2)) / 2];
 }
 
+// ---------------------------------------------------------------- 동기화(순수 함수)
+// 상태 = { title, side, scenes: [{ sid, title, items: [{ id, … }] }] }.
+// 🚨 서버의 `utils/tactics.py` `apply_op`와 같은 규칙이에요. 한쪽을 고치면 다른 쪽도 고쳐요.
+function clone(o) { return JSON.parse(JSON.stringify(o)); }
+// 항목 둘이 같은지(키 순서는 안 따져요 — 서버가 돌려준 항목은 키 순서가 달라요).
+function same(a, b) { return JSON.stringify(a, Object.keys(a).sort()) === JSON.stringify(b, Object.keys(b).sort()); }
+// base → now 로 가는 연산 목록(항목 id·장면 sid 기준). 남이 바꾼 것을 덮어쓰지 않게 바뀐 것만 내요.
+function diffState(base, now) {
+  const ops = [];
+  if ((base.title || "") !== (now.title || "")) ops.push({ t: "meta", title: now.title || "" });
+  if (base.side !== now.side) ops.push({ t: "meta", side: now.side });
+  const bs = new Map(base.scenes.map((s) => [s.sid, s]));
+  const ns = new Set(now.scenes.map((s) => s.sid));
+  // 지운 장면을 먼저 보내요(장면 10개 한도에 잠깐이라도 안 걸리게). 단, 하나도 안 남으면 새 장면 하나를 넣은 뒤에.
+  const gone = base.scenes.filter((s) => !ns.has(s.sid)).map((s) => ({ t: "sdel", sid: s.sid }));
+  const keepAny = gone.length < base.scenes.length;
+  if (keepAny) ops.push(...gone);
+  now.scenes.forEach((s, i) => {
+    const b = bs.get(s.sid);
+    if (!b) {
+      ops.push({ t: "sadd", after: i ? now.scenes[i - 1].sid : null, scene: clone(s) });
+      if (!keepAny && i === 0) ops.push(...gone);
+      return;
+    }
+    if ((b.title || "") !== (s.title || "")) ops.push({ t: "stitle", sid: s.sid, title: s.title || "" });
+    const bi = new Map(b.items.map((it) => [it.id, it]));
+    const ni = new Set(s.items.map((it) => it.id));
+    for (const it of b.items) if (!ni.has(it.id)) ops.push({ t: "del", sid: s.sid, id: it.id });
+    for (const it of s.items) {
+      const o = bi.get(it.id);
+      if (!o) ops.push({ t: "add", sid: s.sid, item: clone(it) });
+      else if (!same(o, it)) ops.push({ t: "upd", sid: s.sid, item: clone(it) });
+    }
+  });
+  return ops;
+}
+// 연산을 상태에 적용(제자리). 대상이 없으면 조용히 건너뛰어요(남이 먼저 지웠을 수 있어요).
+function applyOps(st, ops) {
+  for (const op of ops) {
+    if (op.t === "meta") { if (op.title != null) st.title = op.title; if (op.side) st.side = op.side; continue; }
+    if (op.t === "sadd") {
+      if (!op.scene || st.scenes.some((s) => s.sid === op.scene.sid)) continue;
+      const i = op.after == null ? -1 : st.scenes.findIndex((s) => s.sid === op.after);
+      st.scenes.splice(op.after == null ? 0 : (i < 0 ? st.scenes.length : i + 1), 0, clone(op.scene));
+      continue;
+    }
+    const si = st.scenes.findIndex((s) => s.sid === op.sid);
+    if (si < 0) continue;
+    const sc = st.scenes[si];
+    if (op.t === "sdel") { if (st.scenes.length > 1) st.scenes.splice(si, 1); }
+    else if (op.t === "stitle") sc.title = op.title || "";
+    else if (op.t === "add" || op.t === "upd") {
+      const k = sc.items.findIndex((it) => it.id === op.item.id);
+      if (k >= 0) sc.items[k] = clone(op.item);
+      else if (op.t === "add") sc.items.push(clone(op.item));
+    } else if (op.t === "del") {
+      const k = sc.items.findIndex((it) => it.id === op.id);
+      if (k >= 0) sc.items.splice(k, 1);
+    }
+  }
+  return st;
+}
+// 남의 연산이 왔을 때 내 화면을 다시 맞춰요.
+//   confirmed = 서버 상태(서버가 보낸 순서 그대로 따라간 것) · sentOps = 보냈지만 아직 확인(ack) 못 받은 내 연산
+//   synced = 지금까지 보낸 것까지 반영된 상태 · local = 화면 상태(아직 안 보낸 변경 포함)
+// 서버는 [남의 연산 → 내 미확인 연산 → 내가 곧 보낼 변경] 순서로 적용하게 돼요. 같은 순서로 다시 쌓으면
+// 같은 것을 동시에 고쳐도 모두의 화면이 같아져요(나중에 도착한 쪽이 이겨요).
+function rebase(confirmed, sentOps, synced, local) {
+  const mine = diffState(synced, local);
+  const base = applyOps(clone(confirmed), sentOps);
+  return { synced: base, local: applyOps(clone(base), mine) };
+}
+// ---------------------------------------------------------------- 동기화 끝
+
 // ---------------------------------------------------------------- 그리기
 function drawCallouts() {
   const g = $("g-callouts"); g.innerHTML = "";
@@ -327,18 +467,32 @@ function iconDisc(g, x, y, r, href, ring, dark = true) {
   el("circle", { cx: x, cy: y, r: r + 2, fill: "none", stroke: ring, "stroke-width": 3.5 }, g);
 }
 function lineD(it) { return it.pts && it.pts.length > 1 ? smoothD(it.pts) : `M${X(it.u)},${Y(it.v)} L${X(it.u2)},${Y(it.v2)}`; }
-function label(g, x, y, text) {
-  const t = el("text", { x, y, "font-size": 18, "font-weight": 700, fill: "#fff", stroke: "#000", "stroke-width": 4,
+function label(g, x, y, text, size = 18) {
+  const t = el("text", { x, y, "font-size": size, "font-weight": 700, fill: "#fff", stroke: "#000", "stroke-width": 4,
     "paint-order": "stroke", "pointer-events": "none" }, g);
   t.textContent = text;
+  return t;
 }
 
 function drawItem(g, it, idx, preview = false) {
   const col = TEAM[it.team] || TEAM.ally;
   const grp = el("g", { "data-i": idx, style: preview ? "pointer-events:none;opacity:.75" : "cursor:pointer" }, g);
   if (it.type === "agent") {
-    iconDisc(grp, X(it.u), Y(it.v), 21, (AG[it.agent] || {}).icon, col, false);
-    const t = el("title", {}, grp); t.textContent = (AG[it.agent] || {}).name || "";
+    const x = X(it.u), y = Y(it.v);
+    if (it.rot != null && !it.dead) {       // 🎬 경기 장면: 보던 방향 (sin r, −cos r)
+      const dx = Math.sin(it.rot), dy = -Math.cos(it.rot);
+      const bx = x + dx * 24, by = y + dy * 24;
+      el("path", { d: `M${x + dx * 36},${y + dy * 36} L${bx - dy * 8},${by + dx * 8} L${bx + dy * 8},${by - dx * 8} z`, fill: col }, grp);
+    }
+    if (it.me) el("circle", { cx: x, cy: y, r: 28, fill: "none", stroke: "#f5c518", "stroke-width": 4 }, grp);
+    iconDisc(grp, x, y, 21, (AG[it.agent] || {}).icon, col, false);
+    if (it.dead) {
+      el("circle", { cx: x, cy: y, r: 22, fill: "rgba(0,0,0,.5)" }, grp);
+      el("path", { d: `M${x - 15},${y - 15} L${x + 15},${y + 15} M${x - 15},${y + 15} L${x + 15},${y - 15}`,
+        stroke: "#ff4655", "stroke-width": 6, "stroke-linecap": "round" }, grp);
+    }
+    const t = el("title", {}, grp);
+    t.textContent = ((AG[it.agent] || {}).name || "") + (it.me ? " (나)" : "") + (it.dead ? " · 처치됨" : "");
   } else if (it.type === "ability") {
     const ab = abilityOf(it) || { shape: { kind: "icon" } };
     const sh = ab.shape || { kind: "icon" };
@@ -400,7 +554,7 @@ function rangeOf(agentId, slot) {
   return ((ab || {}).shape || {}).range || 0;
 }
 function anchorsOf(agentId, tm) {
-  return items().filter((it) => it.type === "agent" && it.agent === agentId && it.team === tm).map((it) => [it.u, it.v]);
+  return items().filter((it) => it.type === "agent" && !it.dead && it.agent === agentId && it.team === tm).map((it) => [it.u, it.v]);
 }
 // 스킬 항목의 놓일 자리를 사거리 안으로. 던진 경로가 있으면 떨어지는 끝점만 맞춰요.
 function fitRange(it) {
@@ -417,7 +571,7 @@ function fitRange(it) {
   return it;
 }
 function drawRanges(g) {
-  if (MODE !== "edit" || tool !== "ability" || !curAbility || !curAgent) return;
+  if (!CAN_EDIT || tool !== "ability" || !curAbility || !curAgent) return;
   const m = (curAbility.shape || {}).range;
   if (!m) return;
   const r = m * (MAP.unit || 0.007) * 1000;
@@ -428,14 +582,76 @@ function drawRanges(g) {
   }
 }
 
+// ---------------------------------------------------------------- 💬 피드백 핀
+const sceneNotes = () => notes.filter((n) => n.sid === scenes[cur].sid);
+function drawNotes(g) {
+  if (!$("opt-notes").checked) return;
+  sceneNotes().forEach((n, k) => {
+    const x = X(n.u), y = Y(n.v), on = n.id === focusedNote;
+    const grp = el("g", { "data-n": n.id, style: "cursor:pointer" }, g);
+    el("path", { d: `M${x},${y} L${x - 9},${y - 16} A15,15 0 1 1 ${x + 9},${y - 16} z`, fill: "#f5c518",
+      stroke: on ? "#fff" : "#111", "stroke-width": on ? 4 : 2.5, "stroke-linejoin": "round" }, grp);
+    const t = el("text", { x, y: y - 26, "text-anchor": "middle", "dominant-baseline": "middle", "font-size": 17,
+      "font-weight": 800, fill: "#111", "pointer-events": "none" }, grp);
+    t.textContent = String(k + 1);
+    const tip = el("title", {}, grp); tip.textContent = `${n.name}: ${n.text}`;
+    if (on) label(g, x + 20, y - 22, n.text.length > 34 ? n.text.slice(0, 33) + "…" : n.text, 17);
+  });
+}
+function renderNotes() {
+  const box = $("notes"); box.innerHTML = "";
+  const list = sceneNotes();
+  const other = notes.length - list.length;
+  $("note-count").textContent = notes.length ? `${list.length}개${other ? ` (다른 장면 ${other}개)` : ""}` : "";
+  if (!list.length) {
+    const d = document.createElement("div"); d.className = "hint";
+    d.textContent = CAN_NOTE ? "이 장면엔 아직 없어요. 💬 피드백 핀을 고르고 맵을 눌러 남겨요."
+      : "이 장면엔 아직 없어요. 디스코드에 올린 글의 [피드백 남기기]로 남길 수 있어요.";
+    box.appendChild(d); return;
+  }
+  list.forEach((n, k) => {
+    const row = document.createElement("div"); row.className = "note" + (n.id === focusedNote ? " on" : "");
+    const num = document.createElement("span"); num.className = "num"; num.textContent = String(k + 1);
+    const body = document.createElement("div"); body.className = "body";
+    const who2 = document.createElement("div"); who2.className = "who"; who2.textContent = n.name + (n.by && n.by === myBy ? " (나)" : "");
+    const text = document.createElement("div"); text.textContent = n.text;
+    body.append(who2, text); row.append(num, body);
+    if (CAN_NOTE && (OWNER || (n.by && n.by === myBy))) {
+      const x = document.createElement("button"); x.textContent = "✕"; x.title = "지우기";
+      x.onclick = (e) => { e.stopPropagation(); delNote(n.id); };
+      row.appendChild(x);
+    }
+    row.onclick = () => focusNote(n.id === focusedNote ? null : n.id);
+    box.appendChild(row);
+  });
+}
+function focusNote(id) { focusedNote = id; render(); }
+function addNote(P) {
+  if (!wsOk) { status("⚠️ 연결이 끊겨 있어요 — 잠시 뒤 다시 눌러 주세요"); return; }
+  const text = (prompt("남길 피드백 (120자까지)") || "").trim().replace(/\s+/g, " ").slice(0, 120);
+  if (!text) return;
+  wsSend({ t: "nadd", note: { id: nid(), sid: scenes[cur].sid, u: P[0], v: P[1], text } });
+}
+function delNote(id) {
+  if (!wsOk) { status("⚠️ 연결이 끊겨 있어요 — 잠시 뒤 다시 눌러 주세요"); return; }
+  if (confirm("이 피드백을 지울까요?")) wsSend({ t: "ndel", id });
+}
+function hitNote(e) {
+  let n = e.target;
+  while (n && n !== $("svg")) { if (n.dataset && n.dataset.n) return n.dataset.n; n = n.parentNode; }
+  return null;
+}
+
 function render() {
   const g = $("g-items"); g.innerHTML = ""; clipN = 0;
   drawRanges(g);
   const order = items().map((it, i) => [it, i]).sort((a, b) => rank(a[0]) - rank(b[0]));
   for (const [it, i] of order) drawItem(g, it, i);
+  drawNotes(g);
   if (ruler) drawRuler(g, ruler.a, ruler.b);
   renderList();
-  if (MODE === "edit") $("del").disabled = selected < 0;
+  renderNotes();
+  if (CAN_EDIT) $("del").disabled = selected < 0;
 }
 function drawRuler(g, a, b) {
   el("line", { x1: X(a[0]), y1: Y(a[1]), x2: X(b[0]), y2: Y(b[1]), stroke: "#f5c518", "stroke-width": 3, "stroke-dasharray": "6 5", "pointer-events": "none" }, g);
@@ -453,7 +669,7 @@ function renderList() {
   }
   const rows = Object.values(by).sort((a, b) => (a.team > b.team ? 1 : -1));
   const box = $("list"); box.innerHTML = "";
-  if (!rows.length) { box.innerHTML = `<div class="hint">${MODE === "edit" ? "아직 놓은 게 없어요." : "비어 있는 장면이에요."}</div>`; return; }
+  if (!rows.length) { box.innerHTML = `<div class="hint">${CAN_EDIT ? "아직 놓은 게 없어요." : "비어 있는 장면이에요."}</div>`; return; }
   for (const r of rows) {
     const a = AG[r.agent] || {};
     const gdiv = document.createElement("div"); gdiv.className = "g";
@@ -474,43 +690,65 @@ function updateSide() {
   const t = side === "def" ? "🛡️ 수비" : "⚔️ 공격";
   $("side").textContent = t; $("side-view").textContent = t;
 }
+function setTitle(t, force) {
+  title = t || "";
+  if (force || document.activeElement !== $("title")) $("title").value = title;
+  $("title-view").textContent = title;
+  document.title = `${title || (MAP ? MAP.name : "")} · 악귀봇 작전판`;
+}
 
 // ---------------------------------------------------------------- 장면
 function renderScenes() {
   const box = $("scene-tabs"); box.innerHTML = "";
   scenes.forEach((s, i) => {
     const b = document.createElement("button"); b.className = "sc" + (i === cur ? " on" : "");
-    b.textContent = s.title ? `${i + 1}. ${s.title}` : `${i + 1}`;
+    b.textContent = tabText(i);
     b.onclick = () => gotoScene(i);
     box.appendChild(b);
   });
   if (scenes.length === 1 && MODE === "view") box.innerHTML = "";
-  $("scene-title").value = scenes[cur].title || "";
+  if (document.activeElement !== $("scene-title")) $("scene-title").value = scenes[cur].title || "";
   $("scene-title-view").textContent = scenes.length > 1 ? `← → 로 장면 넘기기` : "";
-  if (MODE === "edit") { $("scene-del").disabled = scenes.length < 2; $("scene-add").disabled = scenes.length >= 10; }
+  if (CAN_EDIT) { $("scene-del").disabled = scenes.length < 2; $("scene-add").disabled = scenes.length >= 10; }
 }
-function gotoScene(i) { cur = i; selected = -1; ruler = null; renderScenes(); render(); }
+function tabText(i) {
+  const s = scenes[i], n = notes.filter((x) => x.sid === s.sid).length;
+  return (s.title ? `${i + 1}. ${s.title}` : `${i + 1}`) + (n ? ` 💬${n}` : "");
+}
+// silent = 남을 따라 넘어간 것(다시 알리지 않아요)
+function gotoScene(i, silent) {
+  cur = Math.max(0, Math.min(i, scenes.length - 1)); selected = -1; ruler = null; focusedNote = null;
+  $("scene-title").value = scenes[cur].title || "";
+  renderScenes(); render();
+  // 방금 만든 장면이면 서버가 아직 몰라요 → 변경을 먼저 보내고 나서 "이 장면 보는 중"을 알려요
+  if (!silent && wsOk && CAN_EDIT) { flushLive(); wsSend({ t: "at", sid: scenes[cur].sid }); }
+}
 
 // ---------------------------------------------------------------- 편집
 function setupEditor() {
   $("team-ally").onclick = () => setTeam("ally");
   $("team-enemy").onclick = () => setTeam("enemy");
   $("side").onclick = () => { side = side === "atk" ? "def" : "atk"; updateSide(); changed(); };
-  $("title").oninput = () => changed();
+  $("title").oninput = () => { title = $("title").value.trim().slice(0, 40); $("title-view").textContent = title; changed(); };
+  $("title").onblur = () => { $("title").value = title; };
   $("scene-title").oninput = () => { scenes[cur].title = $("scene-title").value.slice(0, 40); renderScenesTabsOnly(); changed(); };
   $("scene-add").onclick = () => {
     if (scenes.length >= 10) return;
-    push(); scenes.splice(cur + 1, 0, { title: "", items: JSON.parse(JSON.stringify(items())) });
+    push();
+    scenes.splice(cur + 1, 0, { sid: nid(), title: "", items: clone(items()).map((it) => ({ ...it, id: nid() })) });
     gotoScene(cur + 1); changed(); status("지금 장면을 복사했어요 — 바뀐 것만 고치세요");
   };
   $("scene-del").onclick = () => {
-    if (scenes.length < 2 || !confirm(`${cur + 1}번 장면을 지울까요?`)) return;
-    push(); scenes.splice(cur, 1); gotoScene(Math.max(0, cur - 1)); changed();
+    if (scenes.length < 2 || !confirm(`${cur + 1}번 장면을 지울까요? 그 장면의 피드백도 같이 지워져요.`)) return;
+    push(); const gone = scenes.splice(cur, 1)[0]; notes = notes.filter((n) => n.sid !== gone.sid);
+    gotoScene(Math.max(0, cur - 1)); changed();
   };
   $("t-select").onclick = () => setTool("select");
   $("t-arrow").onclick = () => setTool("arrow");
   $("t-text").onclick = () => setTool("text");
   $("t-ruler").onclick = () => setTool("ruler");
+  $("t-note").onclick = () => setTool("note");
+  $("t-ping").onclick = () => setTool("ping");
   $("undo").onclick = undo;
   $("del").onclick = delSelected;
   $("clear").onclick = () => { if (items().length && confirm("이 장면을 전부 비울까요?")) { push(); scenes[cur].items = []; selected = -1; changed(); render(); } };
@@ -521,6 +759,7 @@ function setupEditor() {
     catch { status(url); }
   };
   $("post").onclick = postToDiscord;
+  $("invite").onclick = inviteLive;
   const roles = [["", "전체"]];
   for (const a of META.agents) if (!roles.some((r) => r[0] === a.role)) roles.push([a.role, a.roleName]);
   for (const [k, name] of roles) {
@@ -536,12 +775,19 @@ function setupEditor() {
     if (e.key === "Delete" || e.key === "Backspace") delSelected();
     if (e.key === "Escape") { setTool("select"); selected = -1; ruler = null; render(); }
   });
-  window.addEventListener("beforeunload", (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+  window.addEventListener("beforeunload", (e) => { if (dirty && !wsOk) { e.preventDefault(); e.returnValue = ""; } });
   status("자동 저장돼요");
+}
+// 피드백 링크(f): 보기 화면 + 메모 핀·핑만
+function setupNoter() {
+  $("n-select").onclick = () => setTool("select");
+  $("n-note").onclick = () => setTool("note");
+  $("n-ping").onclick = () => setTool("ping");
+  $("noter-hint").textContent = "💬 피드백 핀을 고르고 맵을 누르면 내 이름으로 메모가 남아요.";
 }
 function renderScenesTabsOnly() {
   const b = $("scene-tabs").children[cur];
-  if (b) b.textContent = scenes[cur].title ? `${cur + 1}. ${scenes[cur].title}` : `${cur + 1}`;
+  if (b) b.textContent = tabText(cur);
 }
 
 function renderAgents() {
@@ -592,16 +838,21 @@ const HINT = {
   arrow: "끄는 대로 이동 경로가 그려져요(코너를 돌아가도 돼요).",
   text: "맵을 누르면 글을 넣어요(60자까지).",
   ruler: "두 지점을 끌면 실제 거리(m, 대략)를 보여줘요. 저장되지 않아요.",
+  note: "맵을 누르면 그 자리에 피드백 메모를 남겨요(120자까지). 보는 사람 모두에게 보여요.",
+  ping: "맵을 누르면 같이 보는 사람들 화면에서 그 자리가 깜빡여요.",
 };
 function setTool(t) {
   tool = t;
-  for (const [id, k] of [["t-select", "select"], ["t-arrow", "arrow"], ["t-text", "text"], ["t-ruler", "ruler"]]) $(id).classList.toggle("on", tool === k);
+  for (const [id, k] of [["t-select", "select"], ["t-arrow", "arrow"], ["t-text", "text"], ["t-ruler", "ruler"],
+                         ["t-note", "note"], ["t-ping", "ping"], ["n-select", "select"], ["n-note", "note"], ["n-ping", "ping"]])
+    $(id).classList.toggle("on", tool === k);
   let hint = HINT[t] || "";
   const rng = t === "ability" && curAbility && (curAbility.shape || {}).range;
   if (rng) hint = anchorsOf(curAgent.id, team).length
     ? `${curAgent.name}에게서 사거리 약 ${rng}m 안에만 놓여요(노란 점선 원). ` + hint
     : `💡 ${curAgent.name}을(를) 먼저 맵에 놓으면 사거리(약 ${rng}m) 안에서만 놓여요. ` + hint;
   $("tool-hint").textContent = hint;
+  if (!CAN_EDIT) $("noter-hint").textContent = t === "select" ? "" : hint;
   if (t !== "ruler") ruler = null;
   renderAbilities(); render();
 }
@@ -612,11 +863,12 @@ function setTeam(t) {
   if (tool === "ability") setTool("ability");   // 사거리 원·안내를 그 팀 요원 기준으로 다시
 }
 
-function snap() { return JSON.stringify({ scenes, cur }); }
-function push() { undoStack.push(snap()); if (undoStack.length > 60) undoStack.shift(); }
+// 되돌리기: 그때의 장면들을 통째로 기억해요. 남이 바꾼 것은 기억에도 같이 반영해서(applyRemote) 되돌려도 안 사라져요.
+function push() { undoStack.push({ scenes: clone(scenes), sid: scenes[cur].sid }); if (undoStack.length > 60) undoStack.shift(); }
 function undo() {
   if (!undoStack.length) return;
-  const s = JSON.parse(undoStack.pop()); scenes = s.scenes; cur = Math.min(s.cur, scenes.length - 1);
+  const s = undoStack.pop(); scenes = s.scenes;
+  const i = scenes.findIndex((x) => x.sid === s.sid); cur = i >= 0 ? i : Math.min(cur, scenes.length - 1);
   selected = -1; renderScenes(); changed(); render();
 }
 function delSelected() { if (selected < 0) return; push(); items().splice(selected, 1); selected = -1; changed(); render(); }
@@ -663,11 +915,16 @@ function setupZoom() {
 function startPinch() {
   const [a, b] = [...pointers.values()];
   pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, s: Z.s, x: Z.x, y: Z.y };
-  if (drag && drag.kind === "move") { const s = JSON.parse(undoStack.pop()); scenes = s.scenes; }  // 옮기던 건 되돌려요
+  if (drag && drag.kind === "move") { const s = undoStack.pop(); if (s) scenes = s.scenes; }  // 옮기던 건 되돌려요
   drag = null; $("g-preview").innerHTML = ""; render();
+  drainRemote();
 }
 
 function curShape() { return tool === "arrow" ? { kind: "path" } : ((curAbility || {}).shape || { kind: "icon" }); }
+function letGo(e) {       // prompt()는 손 뗀 신호를 삼켜요 → 누른 손가락을 직접 잊어요
+  pointers.delete(e.pointerId);
+  try { $("mapbox").releasePointerCapture(e.pointerId); } catch { /* 이미 풀림 */ }
+}
 
 function onDown(e) {
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -675,22 +932,27 @@ function onDown(e) {
   if (pointers.size === 2) { startPinch(); return; }
   if (pointers.size > 2) return;
   const p = pt(e), P = [p.u, p.v];
-  if (MODE === "view" || tool === "select") {
-    const i = MODE === "edit" ? hitIndex(e) : -1;
-    if (MODE === "edit") { selected = i; render(); }
-    if (i >= 0) { push(); drag = { kind: "move", start: p, orig: JSON.parse(JSON.stringify(items()[i])), moved: false }; }
+  if (CAN_NOTE && tool === "note") { letGo(e); addNote(P); return; }
+  if (CAN_NOTE && tool === "ping") { sendPing(P); return; }
+  if (!CAN_EDIT || tool === "select") {
+    const note = hitNote(e);
+    if (note) { focusNote(note === focusedNote ? null : note); return; }
+    const i = CAN_EDIT ? hitIndex(e) : -1;
+    if (CAN_EDIT) { selected = i; render(); }
+    if (i >= 0) { push(); drag = { kind: "move", start: p, orig: clone(items()[i]), moved: false }; }
     else if (Z.s > 1) drag = { kind: "pan", cx: e.clientX, cy: e.clientY, x: Z.x, y: Z.y };
     return;
   }
   if (tool === "ruler") { drag = { kind: "ruler", a: P }; ruler = { a: P, b: P }; render(); return; }
   if (tool === "agent" && curAgent) {
-    push(); items().push({ type: "agent", agent: curAgent.id, team, u: p.u, v: p.v });
+    push(); items().push({ id: nid(), type: "agent", agent: curAgent.id, team, u: p.u, v: p.v });
     selected = items().length - 1; setTool("select"); changed(); render(); return;
   }
   if (tool === "text") {
+    letGo(e);
     const text = (prompt("넣을 글 (60자까지)") || "").trim().slice(0, 60);
-    if (text) { push(); items().push({ type: "text", text, team, u: p.u, v: p.v }); changed(); render(); }
-    pointers.delete(e.pointerId); return;
+    if (text) { push(); items().push({ id: nid(), type: "text", text, team, u: p.u, v: p.v }); changed(); render(); }
+    return;
   }
   if (tool === "arrow" || (tool === "ability" && curAbility)) drag = { kind: "draw", start: P, pts: [P] };
 }
@@ -706,14 +968,16 @@ function onMove(e) {
     Z.s = ns; Z.x = lx - (lx - pinch.x) * (ns / pinch.s) + (mx - pinch.mx); Z.y = ly - (ly - pinch.y) * (ns / pinch.s) + (my - pinch.my);
     applyZoom(); return;
   }
-  if (!drag) return;
   const p = pt(e), P = [p.u, p.v];
+  sendCursor(P);
+  if (!drag) return;
   if (drag.kind === "pan") { Z.x = drag.x + e.clientX - drag.cx; Z.y = drag.y + e.clientY - drag.cy; applyZoom(); return; }
   if (drag.kind === "ruler") { ruler.b = P; render(); return; }
   if (drag.kind === "move") {
     const i = selected, o = drag.orig, du = p.u - drag.start.u, dv = p.v - drag.start.v;
-    if (Math.abs(du) + Math.abs(dv) > 0.002) drag.moved = true;
     const it = items()[i];
+    if (!it) return;
+    if (Math.abs(du) + Math.abs(dv) > 0.002) drag.moved = true;
     it.u = +(o.u + du).toFixed(4); it.v = +(o.v + dv).toFixed(4);
     if (o.u2 != null) { it.u2 = +(o.u2 + du).toFixed(4); it.v2 = +(o.v2 + dv).toFixed(4); }
     if (o.pts) it.pts = o.pts.map(([u, v]) => [+(u + du).toFixed(4), +(v + dv).toFixed(4)]);
@@ -740,12 +1004,12 @@ function onUp(e) {
   if (pinch) { if (pointers.size < 2) pinch = null; return; }
   if (!drag) return;
   const d = drag; drag = null; $("g-preview").innerHTML = "";
-  if (d.kind === "pan" || d.kind === "ruler") return;
-  if (d.kind === "move") { if (d.moved) changed(); else undoStack.pop(); return; }
+  if (d.kind === "pan" || d.kind === "ruler") { drainRemote(); return; }
+  if (d.kind === "move") { if (d.moved) changed(); else undoStack.pop(); drainRemote(); return; }
   const p = pt(e);
   const it = newDrawnItem(d, [p.u, p.v], true);
-  if (!it) return;
-  push(); items().push(it); changed(); render();
+  if (it) { push(); items().push(it); changed(); render(); }
+  drainRemote();
 }
 
 // 끌기 결과 → 항목.
@@ -754,7 +1018,8 @@ function onUp(e) {
 function newDrawnItem(d, P, final) {
   const sh = curShape();
   const unit = MAP.unit || 0.007;
-  const base = tool === "arrow" ? { type: "arrow", team } : { type: "ability", agent: curAgent.id, slot: curAbility.slot, team };
+  const base = tool === "arrow" ? { id: nid(), type: "arrow", team }
+    : { id: nid(), type: "ability", agent: curAgent.id, slot: curAbility.slot, team };
   const a = d.start, moved = dist(a, P) >= TAP || d.pts.length > 2;
   if (sh.kind === "line") {
     const b = fitLine(a, moved ? P : [a[0] + 0.06, a[1]], { fixed: (sh.fixed || 0) * unit, max: (sh.max || 0) * unit });
@@ -778,42 +1043,221 @@ function newDrawnItem(d, P, final) {
 
 // ---------------------------------------------------------------- 저장 · 올리기
 function status(t) { $("status").textContent = t; }
-function changed() {
-  dirty = true; status("저장 대기 중…");
-  clearTimeout(saveTimer); saveTimer = setTimeout(save, 2500);
+function localState() { return { title, side, scenes }; }
+function liveText() {
+  const others = who.length + viewers - 1;
+  if (!CAN_EDIT) return others > 0 ? `🟢 실시간 · ${others + 1}명이 보는 중` : "🟢 실시간";
+  return others > 0 ? `🟢 실시간 저장 · ${others + 1}명이 보는 중` : "🟢 자동 저장됨";
 }
+function changed() {
+  dirty = true;
+  clearTimeout(saveTimer);
+  if (wsOk) saveTimer = setTimeout(flushLive, 120);
+  else if (OWNER) { status("저장 대기 중…"); saveTimer = setTimeout(save, 2500); }
+  else status("⚠️ 연결이 끊겼어요 — 다시 이어지면 반영돼요");
+}
+// 화면 상태와 서버가 아는 상태(synced)의 차이를 연산으로 보내요.
+function flushLive() {
+  clearTimeout(saveTimer);
+  if (!wsOk || !CAN_EDIT || !synced) return false;
+  const now = localState();
+  const ops = diffState(synced, now);
+  for (let i = 0; i < ops.length; i += 60) {
+    const batch = { t: "ops", n: ++seq, ops: ops.slice(i, i + 60) };
+    unacked.push(batch); wsSend(batch);
+  }
+  if (ops.length) synced = clone(now);
+  dirty = false; status(liveText());
+  return true;
+}
+// 💾 저장: 실시간으로 이어져 있으면 바로 보내고, 끊겨 있으면(만든 사람만) 통째로 저장해요.
 async function save() {
   clearTimeout(saveTimer);
-  const body = { title: $("title").value.trim(), data: { side, scenes } };
+  if (wsOk) return flushLive();
+  if (!OWNER) { status("⚠️ 연결이 끊겼어요 — 다시 이어지면 반영돼요"); return false; }
+  const body = { title, data: { side, scenes } };
   status("저장 중…");
   try {
     await getJSON(`/api/board/e/${encodeURIComponent(KEY)}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    dirty = false;
-    status(`저장됨 ${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`);
+    dirty = false; unacked = []; synced = clone(localState()); confirmed = clone(synced);
+    status(`저장됨${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`);
     return true;
   } catch (e) {
     status("⚠️ 저장 실패: " + e.message);
-    saveTimer = setTimeout(save, 5000);
+    if (!wsOk) saveTimer = setTimeout(save, 5000);
     return false;
   }
 }
-async function postToDiscord() {
-  if (!scenes.some((s) => s.items.length)) { status("빈 작전판이에요 — 먼저 그려 주세요"); return; }
-  $("post").disabled = true;
+async function ownerPost(path, busyText, btn) {
+  $(btn).disabled = true;
   try {
-    if (dirty) { await new Promise((r) => setTimeout(r, 1100)); if (!(await save())) return; }
-    status("그림을 만들어 올리는 중…");
-    const j = await getJSON(`/api/board/e/${encodeURIComponent(KEY)}/post`, { method: "POST" });
-    status("📤 " + (j.message || "올렸어요"));
+    if (wsOk) { flushLive(); for (let i = 0; i < 30 && unacked.length; i++) await sleep(100); }   // 서버가 받을 때까지
+    else if (dirty) { await sleep(1100); if (!(await save())) return; }
+    status(busyText);
+    const j = await getJSON(`/api/board/e/${encodeURIComponent(KEY)}/${path}`, { method: "POST" });
+    status((path === "post" ? "📤 " : "👥 ") + (j.message || "했어요"));
   } catch (e) {
     status("⚠️ " + e.message);
   } finally {
-    setTimeout(() => { $("post").disabled = false; }, 3000);
+    setTimeout(() => { $(btn).disabled = false; }, 3000);
   }
+}
+function postToDiscord() {
+  if (!scenes.some((s) => s.items.length)) { status("빈 작전판이에요 — 먼저 그려 주세요"); return; }
+  ownerPost("post", "그림을 만들어 올리는 중…", "post");
+}
+function inviteLive() { ownerPost("invite", "초대 글을 올리는 중…", "invite"); }
+
+// ---------------------------------------------------------------- 👥 실시간
+function wsSend(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+function connect() {
+  if (wsDead || !("WebSocket" in window)) return;
+  let sock;
+  try { sock = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/${TAIL}`); }
+  catch { retry(); return; }
+  ws = sock;
+  sock.onmessage = (e) => { let m; try { m = JSON.parse(e.data); } catch { return; } onMsg(m); };
+  sock.onclose = (e) => {
+    if (ws !== sock) return;
+    const was = wsOk; wsOk = false; ws = null; who = []; viewers = 0; cursors.clear(); drawCursors(); renderWho();
+    if (was) lostAt = Date.now();
+    if (e.code === 4404) { wsDead = true; status("⚠️ 지워진 작전판이에요"); return; }
+    if (was) status("⚠️ 연결이 끊겼어요 — 다시 잇는 중…");
+    if (dirty && OWNER) { clearTimeout(saveTimer); saveTimer = setTimeout(save, 2500); }   // 끊긴 동안은 통째 저장
+    retry();
+  };
+}
+function retry() { wsTry++; setTimeout(connect, Math.min(30000, 800 * 2 ** Math.min(wsTry, 6))); }
+function remember() { return { sid: scenes[cur] && scenes[cur].sid, sel: selected >= 0 && items()[selected] ? items()[selected].id : null }; }
+function restore(k) {
+  const i = scenes.findIndex((s) => s.sid === k.sid);
+  cur = i >= 0 ? i : Math.max(0, Math.min(cur, scenes.length - 1));
+  selected = k.sel ? items().findIndex((it) => it.id === k.sel) : -1;
+}
+function onMsg(m) {
+  if (m.t === "init") onInit(m);
+  else if (m.t === "ops") onRemote(m.ops || []);
+  else if (m.t === "ack") {       // 서버가 내 묶음을 적용했어요 → 서버 상태(confirmed)에도 같은 차례에 적용
+    const i = unacked.findIndex((b) => b.n === m.n);
+    if (i >= 0) {
+      const b = unacked.splice(i, 1)[0], now = Date.now();
+      if (confirmed) applyOps(confirmed, b.ops);
+      recent.push({ at: now, ops: b.ops }); recent = recent.filter((r) => now - r.at < 8000);
+    }
+  }
+  else if (m.t === "nadd") {
+    if (m.note && !notes.some((n) => n.id === m.note.id)) notes.push(m.note);
+    if (m.note && m.note.by !== myBy) status(`💬 ${m.note.name}님이 피드백을 남겼어요`);
+    renderScenes(); render();
+  } else if (m.t === "ndel") { notes = notes.filter((n) => n.id !== m.id); if (focusedNote === m.id) focusedNote = null; renderScenes(); render(); }
+  else if (m.t === "who") { who = m.list || []; viewers = m.viewers || 0; renderWho(); if (!dirty) status(liveText()); }
+  else if (m.t === "bye") { cursors.delete(m.c); drawCursors(); }
+  else if (m.t === "cur") { cursors.set(m.c, { u: m.u, v: m.v, at: Date.now() }); drawCursors(); }
+  else if (m.t === "ping") showPing(m.u, m.v, m.c);
+  else if (m.t === "at") {
+    const i = scenes.findIndex((s) => s.sid === m.sid);
+    if ($("opt-follow").checked && i >= 0 && i !== cur && !drag) gotoScene(i, true);
+  } else if (m.t === "err") status("⚠️ " + (m.message || "오류"));
+}
+// 처음 이어졌거나 다시 이어졌을 때: 서버 상태를 받고, 아직 못 보낸 내 변경을 그 위에 다시 얹어요.
+// reset = 서버가 내 연산을 거절했거나(개수 한도 등) 남이 통째로 저장함 → 내 것을 버리고 서버 상태로.
+function onInit(m) {
+  me = m.me || null; if (me && me.by) myBy = me.by;
+  who = m.who || []; viewers = m.viewers || 0; notes = m.notes || [];
+  const data = m.data || {};
+  const srv = { title: m.title || "", side: data.side || "atk", scenes: loadScenes(data.scenes) };
+  let pending = [];
+  if (CAN_EDIT && synced && !m.reset) {
+    for (const r of recent) if (r.at >= lostAt - 5000) pending.push(...r.ops);   // 끊기기 직전 5초에 확인받은 것
+    for (const b of unacked) pending.push(...b.ops);
+    pending.push(...diffState(synced, localState()));
+  }
+  unacked = []; recent = []; stale = false; undoStack = [];
+  if (drag && drag.kind !== "pan") { drag = null; $("g-preview").innerHTML = ""; }
+  const keep = remember();
+  const st = applyOps(clone(srv), pending);
+  scenes = st.scenes; side = st.side; setTitle(st.title, document.activeElement !== $("title") || !!m.reset);
+  if (CAN_EDIT) { synced = clone(srv); confirmed = clone(srv); }
+  restore(keep);
+  wsOk = true; wsTry = 0; dirty = false;
+  if (CAN_EDIT) flushLive();
+  updateSide(); renderWho(); renderScenes(); render();
+  status(m.reset ? "⚠️ 판을 서버 내용으로 다시 맞췄어요" : liveText());
+}
+// 남이 바꾼 것(ops)이 왔어요. 서버 상태(confirmed)에는 바로 적용하고, 화면은 그 위에 내 것을 다시 쌓아요(rebase).
+// 끄는 중(그리기·옮기기)에는 화면을 건드리지 않고 표시만 해 뒀다가(stale) 손을 떼면 맞춰요.
+function onRemote(ops) {
+  if (!ops.length) return;
+  for (const s of undoStack) applyOps(s, ops);        // 되돌려도 남의 것은 안 사라지게
+  if (!CAN_EDIT || !confirmed) {                       // 보기·피드백: 보낼 게 없으니 그대로 적용
+    const keep = remember(), st = localState();
+    applyOps(st, ops);
+    shown(st, keep); return;
+  }
+  applyOps(confirmed, ops);
+  if (drag && drag.kind !== "pan") { stale = true; return; }
+  rebaseNow();
+}
+function rebaseNow() {
+  stale = false;
+  const keep = remember(), sent = [];
+  for (const b of unacked) sent.push(...b.ops);
+  const r = rebase(confirmed, sent, synced, localState());
+  synced = r.synced; scenes = r.local.scenes;
+  shown(r.local, keep);
+}
+function shown(st, keep) {
+  side = st.side; if (st.title !== title) setTitle(st.title, false);
+  const sids = new Set(scenes.map((s) => s.sid)); notes = notes.filter((n) => sids.has(n.sid));
+  restore(keep); updateSide(); renderScenes(); render();
+}
+function drainRemote() { if (stale) rebaseNow(); }
+
+function renderWho() {
+  const box = $("who"); box.innerHTML = "";
+  if (who.length + viewers < 2) return;      // 혼자면 안 보여요
+  for (const p of who) {
+    const c = document.createElement("span"); c.className = "chip";
+    const dot = document.createElement("i"); dot.style.background = p.color;
+    const nm = document.createElement("span");
+    nm.textContent = p.name + (me && p.c === me.c ? " (나)" : "") + (p.role === "f" ? " · 피드백" : "");
+    c.append(dot, nm); box.appendChild(c);
+  }
+  if (viewers) { const c = document.createElement("span"); c.className = "chip"; c.textContent = `👀 ${viewers}`; box.appendChild(c); }
+}
+const personOf = (c) => who.find((p) => p.c === c) || { name: "", color: "#fff" };
+function sendCursor(P) {
+  if (!wsOk || !CAN_NOTE || who.length + viewers < 2) return;
+  const now = Date.now();
+  if (now - lastCur < 150) return;
+  lastCur = now; wsSend({ t: "cur", u: P[0], v: P[1] });
+}
+function drawCursors() {
+  const g = $("g-cursors");
+  for (const n of [...g.querySelectorAll("[data-c]")]) n.remove();
+  for (const [c, v] of cursors) {
+    const p = personOf(c);
+    const grp = el("g", { "data-c": c }, g);
+    el("circle", { cx: X(v.u), cy: Y(v.v), r: 6, fill: p.color, stroke: "#000", "stroke-width": 2 }, grp);
+    if (p.name) label(grp, X(v.u) + 10, Y(v.v) + 5, p.name, 14).setAttribute("fill", p.color);
+  }
+}
+function showPing(u, v, c) {
+  const g = $("g-cursors"), p = c == null ? (me || { name: "", color: "#f5c518" }) : personOf(c);
+  const grp = el("g", {}, g);
+  el("circle", { cx: X(u), cy: Y(v), r: 70, fill: "none", stroke: p.color, "stroke-width": 8, class: "ping" }, grp);
+  el("circle", { cx: X(u), cy: Y(v), r: 7, fill: p.color, stroke: "#000", "stroke-width": 2 }, grp);
+  if (p.name) label(grp, X(u) + 12, Y(v) - 10, p.name, 15);
+  setTimeout(() => grp.remove(), 1500);
+}
+function sendPing(P) {
+  showPing(P[0], P[1], null);
+  if (wsOk) wsSend({ t: "ping", u: P[0], v: P[1] });
 }
 
 $("opt-callout").onchange = drawCallouts;
+$("opt-notes").onchange = render;
 main();
 </script>
 </body>
