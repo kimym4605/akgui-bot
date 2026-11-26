@@ -240,11 +240,12 @@ def _mission_titles(rarity: str) -> str:
 
 def _mission() -> str:
     rare, common = RARITY["rare"], RARITY["common"]
-    return f"""🎯 `/미션`은 하루 {DAILY_MISSION_COUNT}개가 배정되고, 깬 미션의 **희귀도만큼** 코인이 들어와요.
+    return f"""🎯 `/미션`은 하루 {DAILY_MISSION_COUNT}개가 배정되고, 깬 미션의 **난이도만큼** 코인이 들어와요.
 
-· **희귀도별 보상** — {_rarity_line()}. 하루 최대 {MAX_DAILY_REWARD}코인이에요.
-  일부러 하러 가야 하는 미션({rare['emoji']} {_mission_titles('rare')})이 제일 많이 줘요.
-  그냥 있어도 깨지는 미션({common['emoji']} {_mission_titles('common')})은 {common['reward']}코인이에요.
+· **난이도별 보상** — {_rarity_line()}. 하루 최대 {MAX_DAILY_REWARD}코인이에요.
+  실력이 드는 미션({rare['emoji']} {_mission_titles('rare')})이 제일 많이 줘요.
+  명령어 한 번이면 되는 미션({common['emoji']} {_mission_titles('common')})은 {common['reward']}코인이에요.
+  😴 숙면방에 있는 시간은 통화 미션·통화레벨·음성랭킹에 안 세요.
 
 · **발로란트 미션은 자동 판정이에요.** 봇이 30분마다 전적을 확인해요
   (그래서 깬 직후 바로는 안 뜰 수 있어요. 조금 기다려 주세요).

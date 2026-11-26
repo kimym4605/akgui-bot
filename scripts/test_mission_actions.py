@@ -645,49 +645,40 @@ _min_reward = min(mission_store.reward_of(k) for k in MISSIONS)
 check(f"최저 보상이 옛 고정값(1코인) 이상 — {_min_reward}코인", _min_reward >= 1,
       f"{ {k: mission_store.reward_of(k) for k in MISSIONS if mission_store.reward_of(k) < 1} }")
 
-# ⭐⭐ **희귀도가 실측과 어긋나지 않는지 본다.** 아래는 2026-11-02에 `coin_log`로 잰
-#    14일 완료율이에요. 풀 안에서는 배정 확률이 균등해서 그대로 비교할 수 있어요.
-# 🚨 티어를 바꾸고 싶으면 **먼저 다시 재세요.** 느낌으로 바꾸면 여기서 FAIL이 나요 —
-#    실제로 "학살자 15킬은 어려우니 비싸게"가 숫자와 **반대**였어요(68%로 쉬운 쪽).
-# 🚨 풀을 섞어서 비교하면 안 돼요(발로 5종 vs 서버 8종은 분모가 달라요).
-# 🔄 2026-11-15: 11/02~11/13 재측정값으로 바꿨어요(배정을 pick_missions로 복원, 분모 = 그날
-#    1개 이상 깬 사람). 이름은 옛 그대로 둬요 — 아래 검사들이 이 이름을 써요.
-# 🔄 2026-11-18: `val_kills15`를 68 → **44**로 바꿨어요. 조건이 15킬 → 20킬로 올라서
-#    옛 수치(68%)는 더 이상 이 미션의 난이도가 아니에요. 44는 **추정치**예요 —
-#    🔔 전적 카드 1,687건(10/18~11/18 · 25명)에서 "그날 최다 킬"이 15 이상인 날 82%,
-#    20 이상인 날 53% → 68 × 53/82. 2주쯤 지나면 `coin_log`로 다시 재서 바꿀 것.
-#    (맵 추천은 🟣 → 🔵로 내렸지만 **수치는 그대로** 42예요. 오상 43·전적 46과 같은 구간이라
-#     🔵가 맞는 자리고, 그래서 아래 역전 검사도 그대로 통과해요.)
-RATE_2026_11_02 = {
-    "voice_together": 76, "attend_check": 53, "catch_fish": 49, "use_rank": 46,
-    "use_myshop": 43, "use_map": 42, "create_room": 35, "play_gamble": 30,
-    "val_kd1": 74, "val_win": 73, "val_play": 72, "val_kills15": 44, "val_comp": 65,
-    # ⚔️ 2026-11-24 추가: 추정치(전적 카드 1,999건 · `mission_store` 주석). 2주 뒤 재측정.
-    "val_streak2": 47,
+# ⭐⭐ **난이도 = 그 미션에 드는 수고** (2026-11-26 방장 결정 — `mission_store.RARITY` 주석).
+#    전엔 2026-11-02·11-15에 잰 **완료율**로 칸을 정하고 "완료율이 높은 미션이 더 많이 주면
+#    FAIL"을 검사했어요. 그런데 11/15~25 재측정에서 그 기준이 체감과 거꾸로였어요
+#    (도박 66%에 8코인, 승리하기 52%에 2코인). 완료율이 낮은 건 귀찮아서 안 하는 클릭
+#    미션이었어요. 그래서 이제 **미션마다 수고 칸을 적어 두고 등급이 그 칸과 맞는지** 봐요.
+# 🚨 새 미션을 만들면 여기에 칸을 꼭 적을 것 — 빠지면 아래 첫 검사가 FAIL이에요.
+EFFORT = {
+    # 클릭 = 명령어·버튼 한 번
+    "attend_check": "클릭", "use_myshop": "클릭", "use_rank": "클릭", "use_map": "클릭",
+    "play_gamble": "클릭",
+    # 시간 = 시간을 써야 함
+    "voice_together": "시간", "catch_fish": "시간", "create_room": "시간",
+    "val_play": "시간", "val_comp": "시간",
+    # 실력 = 이기거나 잘해야 함
+    "val_win": "실력", "val_kd1": "실력", "val_kills15": "실력", "val_streak2": "실력",
 }
-check(f"실측 표가 미션 {len(MISSIONS)}종을 전부 덮는다",
-      set(RATE_2026_11_02) == set(MISSIONS),
-      f"빠짐 {sorted(set(MISSIONS) - set(RATE_2026_11_02))} / "
-      f"잉여 {sorted(set(RATE_2026_11_02) - set(MISSIONS))}")
-
-for _pool, _pname in ((SERVER_KEYS, "서버"), (VALORANT_KEYS, "발로")):
-    _bad = []
-    for _a in _pool:
-        for _b in _pool:
-            # 완료율이 더 높은(= 더 쉬운) 미션이 **더 많이 주면** 모순이에요.
-            if RATE_2026_11_02[_a] > RATE_2026_11_02[_b] and \
-                    mission_store.reward_of(_a) > mission_store.reward_of(_b):
-                _bad.append(f"{_a}({RATE_2026_11_02[_a]}%,{mission_store.reward_of(_a)}코인)"
-                            f">{_b}({RATE_2026_11_02[_b]}%,{mission_store.reward_of(_b)}코인)")
-    check(f"{_pname} 풀: 쉬운 미션이 더 많이 주는 역전이 없다", not _bad, "; ".join(_bad))
+EFFORT_TO_RARITY = {"클릭": "common", "시간": "uncommon", "실력": "rare"}
+check(f"수고 표가 미션 {len(MISSIONS)}종을 전부 덮는다",
+      set(EFFORT) == set(MISSIONS),
+      f"빠짐 {sorted(set(MISSIONS) - set(EFFORT))} / 잉여 {sorted(set(EFFORT) - set(MISSIONS))}")
+_bad = [f"{k}({EFFORT[k]}인데 {MISSIONS[k]['rarity']})" for k in EFFORT
+        if k in MISSIONS and MISSIONS[k]["rarity"] != EFFORT_TO_RARITY[EFFORT[k]]]
+check("미션 등급이 수고 칸과 맞는다 (클릭 🟢 · 시간 🔵 · 실력 🟣)", not _bad, "; ".join(_bad))
+_r = [mission_store.RARITY[x]["reward"] for x in ("common", "uncommon", "rare")]
+check(f"수고가 클수록 더 준다 — {_r}", _r[0] < _r[1] < _r[2], str(_r))
 
 # ⭐ **실행 검증.** 문자열 검사로는 "지급액이 고정값으로 박혀 있다"를 못 잡아요.
 #    실제로 `complete()`를 불러서 **가짜 지갑에 들어온 금액**이 희귀도와 같은지 봐요.
 #    (2026-10-31에 '소스에 호출이 있다'까지만 보고 끊긴 훅을 놓친 전례가 있어요.)
 _by_rarity = {}
-for _k in SERVER_KEYS:
+# 🔄 11/26: 서버 미션엔 🟣가 없어졌어요(🟣 = 실력 = 발로 미션) → 서버 먼저, 빈 칸은 발로로 채워요.
+for _k in list(SERVER_KEYS) + list(VALORANT_KEYS):
     _by_rarity.setdefault(MISSIONS[_k]["rarity"], _k)
-check("서버 미션에 희귀도 3종이 다 있다 (실행 검증 표본)",
+check("미션에 희귀도 3종이 다 있다 (실행 검증 표본)",
       set(_by_rarity) == set(mission_store.RARITY), str(_by_rarity))
 
 for _rar, _key in sorted(_by_rarity.items(), key=lambda kv: mission_store.RARITY[kv[0]]["reward"]):
@@ -1006,6 +997,28 @@ _rbody = _ast.unparse(_render) if _render else ""
 check("🚨 `_render_shop`이 상점을 보낸 뒤에 미션을 올린다",
       0 <= _rbody.find("followup.send") < _rbody.find("_credit_shop_mission"),
       f"send={_rbody.find('followup.send')} credit={_rbody.find('_credit_shop_mission')}")
+
+
+# ==================================================================
+# 😴 숙면방은 통화 시간을 안 센다 (2026-11-26) — 레벨·랭킹·통화 미션이 전부 `_countable`을 거쳐요
+# ==================================================================
+print("\n😴 숙면방")
+import types                                           # noqa: E402
+
+
+class _VC:
+    def __init__(self, name, humans):
+        self.name = name
+        self.members = [types.SimpleNamespace(bot=False) for _ in range(humans)]
+
+
+_countable = mission_cog.Mission._countable
+check("숙면방 이름 판정 (이모지·띄어쓰기 붙어도)",
+      all(mission_store.is_sleep_room(n) for n in ("😴 숙면방", "숙면방", "😴 숙면 방"))
+      and not any(mission_store.is_sleep_room(n) for n in ("👾 일반 1", "🗣️ 수다", None, "")))
+check("숙면방에 둘이 있어도 안 센다", _countable(None, _VC("😴 숙면방", 2)) is False)
+check("일반방에 둘이면 센다", _countable(None, _VC("👾 일반 1", 2)) is True)
+check("일반방에 혼자면 안 센다(기존 규칙 유지)", _countable(None, _VC("👾 일반 1", 1)) is False)
 
 
 # ==================================================================

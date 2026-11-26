@@ -267,8 +267,13 @@ class Mission(commands.Cog):
     # 2. 통화방 체류 시간
     # ------------------------------------------------------------------
     def _countable(self, channel: discord.VoiceChannel | None) -> bool:
-        """봇을 뺀 사람이 2명 이상인 채널만 인정해요 (혼자 접속해두는 어뷰징 차단)."""
+        """봇을 뺀 사람이 2명 이상인 채널만 인정해요 (혼자 접속해두는 어뷰징 차단).
+
+        😴 숙면방은 사람 수와 상관없이 안 세요(2026-11-26) — 통화레벨·음성랭킹·통화 미션이
+        전부 여길 거쳐서, 이 한 줄로 셋 다 빠져요(`mission_store.is_sleep_room`)."""
         if channel is None:
+            return False
+        if mission_store.is_sleep_room(getattr(channel, "name", None)):
             return False
         return len([m for m in channel.members if not m.bot]) >= mission_store.VOICE_MIN_MEMBERS
 
