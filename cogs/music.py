@@ -424,7 +424,8 @@ class SongPickView(discord.ui.View):
                 pass
         self.stop()
         await self.cog.add_track_and_play(
-            self.guild, self.voice_channel, interaction.channel, self.requester.display_name, url
+            self.guild, self.voice_channel, interaction.channel, self.requester.display_name, url,
+            requester=self.requester, notify=interaction,
         )
 
     async def on_timeout(self):
@@ -434,6 +435,23 @@ class SongPickView(discord.ui.View):
                 await self.message.edit(content="⌛ 선택 시간이 지났어요. 다시 `/재생`으로 검색해주세요.", view=self)
             except discord.HTTPException:
                 pass
+
+
+async def _credit_karaoke_mission(requester, voice_channel, notify) -> None:
+    """🎯 '같이 노래 듣기' 미션(2026-11-26). 곡이 대기열에 **들어간 뒤에만** 불러요
+    (불러오기 실패·검색 결과 없음은 그 전에 return).
+
+    🚨 혼자 접속해서 깨는 걸 막으려고 통화 미션과 같은 규칙을 써요 — 봇 빼고
+    `VOICE_MIN_MEMBERS`명 이상. 😴 숙면방은 노래방이 아니니 따로 막지 않아요.
+    on_action이 예외를 삼켜서 미션 때문에 노래가 안 나오는 일은 없어요."""
+    if requester is None or voice_channel is None:
+        return
+    from cogs import mission
+    from utils import mission_store
+    humans = [m for m in getattr(voice_channel, "members", []) if not m.bot]
+    if len(humans) < mission_store.VOICE_MIN_MEMBERS:
+        return
+    await mission.on_action(requester.id, "karaoke_together", notify, requester)
 
 
 class Music(commands.Cog):
@@ -590,8 +608,12 @@ class Music(commands.Cog):
         text_channel: discord.abc.Messageable,
         requester_name: str,
         webpage_url: str,
+        requester: discord.Member | None = None,
+        notify=None,
     ):
-        """검색/링크로 확정된 영상 하나를 대기열에 넣고, 필요하면 바로 재생을 시작해요."""
+        """검색/링크로 확정된 영상 하나를 대기열에 넣고, 필요하면 바로 재생을 시작해요.
+
+        `requester`·`notify`(interaction)는 🎯 '같이 노래 듣기' 미션 판정에만 써요."""
         state = self._get_state(guild.id)
         state.text_channel = text_channel
         self._cancel_idle_timer(guild.id)
@@ -627,6 +649,7 @@ class Music(commands.Cog):
                 track, status="📋 대기열에 추가했어요", extra_field=("대기 순서", f"{position}번째")
             )
             await text_channel.send(embed=embed)
+        await _credit_karaoke_mission(requester, voice_channel, notify)
 
     async def add_playlist_and_play(
         self,
@@ -635,6 +658,8 @@ class Music(commands.Cog):
         text_channel: discord.abc.Messageable,
         requester_name: str,
         entries: list[dict],
+        requester: discord.Member | None = None,
+        notify=None,
     ):
         """재생목록 링크로 확정된 여러 곡을 한 번에 대기열에 넣어요."""
         state = self._get_state(guild.id)
@@ -673,6 +698,7 @@ class Music(commands.Cog):
 
         if not voice_client.is_playing() and not voice_client.is_paused():
             await self._play_next(guild)
+        await _credit_karaoke_mission(requester, voice_channel, notify)
 
     # ============================================================
     # 슬래시 명령어
@@ -706,11 +732,13 @@ class Music(commands.Cog):
             entries = [e for e in probed.get("entries", []) if e] if isinstance(probed, dict) else []
             if len(entries) > 1:
                 await self.add_playlist_and_play(
-                    guild, voice_channel, interaction.channel, interaction.user.display_name, entries
+                    guild, voice_channel, interaction.channel, interaction.user.display_name, entries,
+                    requester=interaction.user, notify=interaction,
                 )
             else:
                 await self.add_track_and_play(
-                    guild, voice_channel, interaction.channel, interaction.user.display_name, 검색어
+                    guild, voice_channel, interaction.channel, interaction.user.display_name, 검색어,
+                    requester=interaction.user, notify=interaction,
                 )
             return
 

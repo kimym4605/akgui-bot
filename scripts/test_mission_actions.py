@@ -119,7 +119,8 @@ for key, target in (("attend_check", 1), ("catch_fish", 3), ("play_gamble", 1)):
     if info:
         check(f"{key} kind=server", info["kind"] == "server", info["kind"])
         check(f"{key} target={target}", info["target"] == target, str(info.get("target")))
-check("서버 미션이 8종", len(SERVER_KEYS) == 8, f"{len(SERVER_KEYS)}종")
+# 🔄 2026-11-26: 8 → 11종 (발로들 풀기·카드 뽑기·같이 노래 듣기 추가)
+check("서버 미션이 11종", len(SERVER_KEYS) == 11, f"{len(SERVER_KEYS)}종")
 # 🔄 2026-11-24: 5 → 6종 (⚔️ 연승하기 `val_streak2` 추가)
 check("발로 미션은 6종", len(VALORANT_KEYS) == 6, f"{len(VALORANT_KEYS)}종")
 
@@ -128,7 +129,7 @@ print("\n2) 🔞 도박 미션은 성인이 아니면 배정 자체가 안 된�
 check("ADULT_ONLY_KEYS에 play_gamble", "play_gamble" in ADULT_ONLY_KEYS)
 check("비성인 풀에 play_gamble 없음", "play_gamble" not in server_keys_for(False))
 check("성인 풀에는 있음", "play_gamble" in server_keys_for(True))
-check("비성인 풀이 7종", len(server_keys_for(False)) == 7, f"{len(server_keys_for(False))}종")
+check("비성인 풀이 10종", len(server_keys_for(False)) == 10, f"{len(server_keys_for(False))}종")
 
 # 🚨 여러 유저·날짜를 전부 돌려봐요. 한 조합만 보면 시드 운으로 통과해요.
 leaked = []
@@ -217,7 +218,8 @@ check("남은 후보가 비성인 풀 안에 있다",
 fake.docs["u_reroll_a"] = {
     "_id": "u_reroll_a",
     "date": mission_store.today_iso(),
-    "picks": [k for k in SERVER_KEYS if k != "play_gamble"][:7],
+    # 🔄 11/26: `[:7]`로 개수를 박아 뒀다가 서버 미션이 11종이 되며 깨졌어요 → 🔞 빼고 **전부**.
+    "picks": [k for k in SERVER_KEYS if k != "play_gamble"],
     "progress": {}, "done": [],
 }
 new_key_a, reason_a = asyncio.run(
@@ -654,9 +656,9 @@ check(f"최저 보상이 옛 고정값(1코인) 이상 — {_min_reward}코인",
 EFFORT = {
     # 클릭 = 명령어·버튼 한 번
     "attend_check": "클릭", "use_myshop": "클릭", "use_rank": "클릭", "use_map": "클릭",
-    "play_gamble": "클릭",
-    # 시간 = 시간을 써야 함
-    "voice_together": "시간", "catch_fish": "시간", "create_room": "시간",
+    "play_gamble": "클릭", "balodle_play": "클릭", "card_pull": "클릭",
+    # 시간 = 시간을 써야 함 (다른 사람을 모아야 하는 것 포함)
+    "voice_together": "시간", "catch_fish": "시간", "create_room": "시간", "karaoke_together": "시간",
     "val_play": "시간", "val_comp": "시간",
     # 실력 = 이기거나 잘해야 함
     "val_win": "실력", "val_kd1": "실력", "val_kills15": "실력", "val_streak2": "실력",

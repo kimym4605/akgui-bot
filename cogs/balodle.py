@@ -762,6 +762,12 @@ class Balodle(commands.Cog):
             outcome, counted, updated = await self._finish(day_iso, uid, kind, correct, attempts, coin, updated)
             day = merge_answers(counted or day, updated)       # 카운터가 오른 문서 + 내 정답
         await self._redraw(interaction, view, day, updated.get(kind) or {}, outcome=outcome)
+        if finish:
+            # 🎯 '발로들 풀기' 미션(2026-11-26) — 맞히든 못 맞히든 끝나면 인정해요.
+            #    🔁 연습 문제는 위에서 먼저 return해서 여기 안 와요. 화면을 그린 **뒤에** 불러서
+            #    알림이 나만 보이는 followup으로 나가요(on_action은 예외를 삼켜요).
+            from cogs import mission
+            await mission.on_action(uid, "balodle_play", interaction, interaction.user)
 
     async def _finish(self, day_iso: str, uid: int, kind: str, correct: bool, attempts: int,
                       coin: int, play: dict) -> tuple[dict, dict, dict]:

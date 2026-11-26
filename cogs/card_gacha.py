@@ -432,6 +432,11 @@ async def do_pull(interaction: discord.Interaction, *, pulls: int = 1,
     except Exception:
         log.exception("🟡 레전드 홍보 실패 - 뽑기 자체는 정상이에요 (user=%s)", user_id)
 
+    # 5) 🎯 '카드 뽑기' 미션(2026-11-26). 코인 차감과 뽑기가 **둘 다 성공한 뒤**에만 와요
+    #    (모자람·실패·환불 경로는 위에서 전부 return). 연속 뽑기도 1번으로 쳐요.
+    from cogs import mission
+    await mission.on_action(user_id, "card_pull", interaction, interaction.user)
+
 
 # ============================================================
 # ⚒️ 합성 — 중복 3장을 뽑기와 똑같은 확률로 1장 다시 굴려요 (2026-10-31)
